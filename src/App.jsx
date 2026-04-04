@@ -5,6 +5,7 @@ import ChatPane from './components/ChatPane'
 import ConnectModal from './components/ConnectModal'
 import CostsPanel from './components/CostsPanel'
 import MemoryPanel from './components/MemoryPanel'
+import ErrorBoundary from './components/ErrorBoundary'
 
 const NAV = [
   { id: 'sessions', label: '💬 Sessions' },
@@ -20,6 +21,9 @@ export default function App() {
 
   useEffect(() => {
     if (gatewayUrl && !connected) connect()
+    const onError = () => setShowConnect(true)
+    window.addEventListener('octis:gateway-error', onError)
+    return () => window.removeEventListener('octis:gateway-error', onError)
   }, [])
 
   useEffect(() => {

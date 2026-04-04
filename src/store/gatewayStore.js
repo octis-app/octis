@@ -46,7 +46,11 @@ export const useGatewayStore = create(
         }
 
         socket.onclose = () => set({ connected: false, ws: null })
-        socket.onerror = () => set({ connected: false })
+        socket.onerror = () => {
+          set({ connected: false, ws: null })
+          // Signal app to show connect modal
+          window.dispatchEvent(new CustomEvent('octis:gateway-error'))
+        }
 
         set({ ws: socket })
       },
