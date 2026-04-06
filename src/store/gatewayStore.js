@@ -215,6 +215,38 @@ export const useGatewayStore = create(
   )
 )
 
+// Persisted project tags: { [sessionKey]: { project: string, card: string } }
+export const useProjectStore = create(
+  persist(
+    (set, get) => ({
+      tags: {}, // { [sessionKey]: { project: string, card: string } }
+
+      setTag: (sessionKey, project) => {
+        set(s => ({ tags: { ...s.tags, [sessionKey]: { ...(s.tags[sessionKey] || {}), project } } }))
+      },
+
+      setCard: (sessionKey, card) => {
+        set(s => ({ tags: { ...s.tags, [sessionKey]: { ...(s.tags[sessionKey] || {}), card } } }))
+      },
+
+      getTag: (sessionKey) => get().tags[sessionKey] || {},
+
+      getProjects: () => {
+        const all = get().tags
+        const projects = {}
+        Object.entries(all).forEach(([sk, meta]) => {
+          if (meta.project) {
+            if (!projects[meta.project]) projects[meta.project] = []
+            projects[meta.project].push(sk)
+          }
+        })
+        return projects // { projectName: [sessionKey, ...] }
+      },
+    }),
+    { name: 'octis-projects' }
+  )
+)
+
 export const useSessionStore = create((set, get) => ({
   sessions: [],
   sessionActivity: {},
@@ -273,14 +305,17 @@ export const useSessionStore = create((set, get) => ({
 
     if (meta.isStreaming) return 'working'
     if (meta.lastRole === 'assistant') return 'needs-you'
-    // Treat 'user' lastRole as active if recent
     const activity = get().sessionActivity[key]
     const last = activity || session.updatedAt || session.lastActivity || session.updated_at
-    if (!last) return 'idle'
+    if (!last) return 'quiet'
     const age = Date.now() - (typeof last === 'number' ? last : new Date(last).getTime())
-    if (age < 60 * 60 * 1000) return 'active'
-    if (age < 24 * 60 * 60 * 1000) return 'idle'
-    return 'dead'
+    if (age < 24 * 60 * 60 * 1000) return 'active'
+    return 'quiet'
+  },
+
+  // Project tagging — stored locally (persisted via a separate store below)
+  setSessionProject: (sessionKey, projectTag) => {
+    useProjectStore.getState().setTag(sessionKey, projectTag)
   },
 
   pinToPane: (paneIndex, sessionKey) => {

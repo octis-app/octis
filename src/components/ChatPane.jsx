@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef } from 'react'
-import { useGatewayStore, useSessionStore } from '../store/gatewayStore'
+import { useGatewayStore, useSessionStore, useProjectStore } from '../store/gatewayStore'
 
 export default function ChatPane({ sessionKey, paneIndex, onClose }) {
   const { send, ws } = useGatewayStore()
   const { setSessions, sessions, setLastRole, markStreaming } = useSessionStore()
+  const { setCard } = useProjectStore()
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [sessionCard, setSessionCard] = useState(null)
@@ -34,6 +35,12 @@ export default function ChatPane({ sessionKey, paneIndex, onClose }) {
             const lastMsg = msgs[msgs.length - 1]
             if (lastMsg.role) setLastRole(sessionKey, lastMsg.role)
           }
+          // Auto-extract session card (last 📋 assistant message)
+          const cardMsg = [...msgs].reverse().find(m => m.role === 'assistant' && extractText(m.content).includes('📋'))
+          if (cardMsg) {
+            const cardText = extractText(cardMsg.content).slice(0, 500)
+            setCard(sessionKey, cardText)
+          }
         }
 
         // Streaming chat events for this session
@@ -48,6 +55,11 @@ export default function ChatPane({ sessionKey, paneIndex, onClose }) {
             }
             return [...prev, chatMsg]
           })
+          // Auto-save session card if this is a 📋 message
+          if (chatMsg.role === 'assistant') {
+            const text = extractText(chatMsg.content)
+            if (text.includes('📋')) setCard(sessionKey, text.slice(0, 500))
+          }
         }
 
         // Also handle flat chat event (older gateway versions)
