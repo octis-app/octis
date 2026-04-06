@@ -123,6 +123,32 @@ app.get('/api/memory', async (req, res) => {
   }
 })
 
+// Projects — full content + file metadata
+app.get('/api/projects', async (req, res) => {
+  try {
+    const files = await fs.readdir(MEMORY_DIR)
+    const projectFiles = files.filter(f => f.endsWith('.md') && !/^\d{4}-\d{2}-\d{2}/.test(f))
+    const projects = await Promise.all(
+      projectFiles.map(async f => {
+        const filepath = path.join(MEMORY_DIR, f)
+        const [content, stat] = await Promise.all([
+          fs.readFile(filepath, 'utf8').catch(() => ''),
+          fs.stat(filepath).catch(() => null),
+        ])
+        return {
+          name: f.replace('.md', ''),
+          content,
+          size: stat?.size || 0,
+          mtime: stat?.mtime || null,
+        }
+      })
+    )
+    res.json({ projects })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 // Todos only (for session sidebar)
 app.get('/api/todos', async (req, res) => {
   try {
