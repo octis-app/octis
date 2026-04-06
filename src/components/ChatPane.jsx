@@ -1,6 +1,103 @@
 import { useState, useEffect, useRef } from 'react'
 import { useGatewayStore, useSessionStore, useProjectStore } from '../store/gatewayStore'
 
+// ─── Chat message markdown renderer ──────────────────────────────────────────
+function CollapsibleCode({ lang, code }) {
+  const [open, setOpen] = useState(false)
+  const lines = code.split('\n')
+  const preview = lines.slice(0, 2).join('\n')
+  return (
+    <div className="my-1.5 rounded-lg overflow-hidden border border-[#2a3142]">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between px-3 py-1.5 bg-[#0f1117] hover:bg-[#181c24] transition-colors text-left"
+      >
+        <span className="text-[10px] text-[#6b7280] font-mono">{lang || 'code'} · {lines.length} lines</span>
+        <span className="text-[10px] text-[#6366f1]">{open ? '▲ collapse' : '▼ expand'}</span>
+      </button>
+      {!open && (
+        <div className="px-3 py-1.5 bg-[#0a0d14] text-[11px] font-mono text-[#6b7280] truncate">{preview}…</div>
+      )}
+      {open && (
+        <pre className="px-3 py-2 bg-[#0a0d14] text-[11px] font-mono text-[#a5b4fc] overflow-x-auto leading-relaxed">{code}</pre>
+      )}
+    </div>
+  )
+}
+
+function ChatMarkdown({ text }) {
+  const lines = text.split('\n')
+  const elements = []
+  let i = 0
+
+  const renderInline = (str) => {
+    // bold, italic, inline code
+    const parts = str.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g)
+    return parts.map((p, j) => {
+      if (p.startsWith('**') && p.endsWith('**')) return <strong key={j} className="font-semibold text-white">{p.slice(2,-2)}</strong>
+      if (p.startsWith('`') && p.endsWith('`') && p.length > 2) return <code key={j} className="bg-[#0f1117] text-[#a5b4fc] px-1 rounded text-[11px] font-mono">{p.slice(1,-1)}</code>
+      if (p.startsWith('*') && p.endsWith('*') && p.length > 2) return <em key={j} className="italic opacity-80">{p.slice(1,-1)}</em>
+      return <span key={j}>{p}</span>
+    })
+  }
+
+  while (i < lines.length) {
+    const line = lines[i]
+
+    // Code block
+    if (line.startsWith('```')) {
+      const lang = line.slice(3).trim()
+      const codeLines = []
+      i++
+      while (i < lines.length && !lines[i].startsWith('```')) { codeLines.push(lines[i]); i++ }
+      i++
+      elements.push(<CollapsibleCode key={`code-${i}`} lang={lang} code={codeLines.join('\n')} />)
+      continue
+    }
+
+    // H1/H2/H3
+    if (line.startsWith('### ')) { elements.push(<div key={i} className="text-xs font-semibold text-[#818cf8] mt-2 mb-0.5">{renderInline(line.slice(4))}</div>); i++; continue }
+    if (line.startsWith('## ')) { elements.push(<div key={i} className="text-sm font-semibold text-[#a5b4fc] mt-2 mb-1">{renderInline(line.slice(3))}</div>); i++; continue }
+    if (line.startsWith('# ')) { elements.push(<div key={i} className="text-sm font-bold text-white mt-2 mb-1 border-b border-[#2a3142] pb-1">{renderInline(line.slice(2))}</div>); i++; continue }
+
+    // Bullet / task
+    const taskMatch = line.match(/^(\s*)- \[([ xX])\] (.*)/)
+    if (taskMatch) {
+      const done = taskMatch[2].toLowerCase() === 'x'
+      elements.push(
+        <div key={i} className="flex items-start gap-1.5 py-0.5">
+          <span className={`mt-0.5 text-[11px] ${done ? 'text-emerald-400' : 'text-[#3a4152]'}`}>{done ? '✓' : '○'}</span>
+          <span className={`text-sm leading-relaxed ${done ? 'line-through text-[#4b5563]' : ''}`}>{renderInline(taskMatch[3])}</span>
+        </div>
+      )
+      i++; continue
+    }
+    const bulletMatch = line.match(/^(\s*)[-*] (.*)/)
+    if (bulletMatch) {
+      const indent = bulletMatch[1].length
+      elements.push(
+        <div key={i} className={`flex items-start gap-1.5 py-0.5 ${indent > 0 ? 'ml-4' : ''}`}>
+          <span className="text-[#6366f1] mt-1 text-[10px] shrink-0">•</span>
+          <span className="text-sm leading-relaxed">{renderInline(bulletMatch[2])}</span>
+        </div>
+      )
+      i++; continue
+    }
+
+    // Divider
+    if (line.trim() === '---') { elements.push(<hr key={i} className="border-[#2a3142] my-2" />); i++; continue }
+
+    // Blank line
+    if (line.trim() === '') { elements.push(<div key={i} className="h-1" />); i++; continue }
+
+    // Regular text
+    elements.push(<div key={i} className="text-sm leading-relaxed py-0.5">{renderInline(line)}</div>)
+    i++
+  }
+
+  return <div className="space-y-0">{elements}</div>
+}
+
 export default function ChatPane({ sessionKey, paneIndex, onClose }) {
   const { send, ws } = useGatewayStore()
   const { setSessions, sessions, setLastRole, markStreaming } = useSessionStore()
@@ -115,15 +212,9 @@ export default function ChatPane({ sessionKey, paneIndex, onClose }) {
   }
 
   function renderContent(content) {
-    if (!content) return null
-    if (typeof content === 'string') return content
-    if (Array.isArray(content)) {
-      return content.map((block, i) => {
-        if (block.type === 'text') return <span key={i}>{block.text}</span>
-        return null
-      })
-    }
-    return String(content)
+    const text = extractText(content)
+    if (!text) return null
+    return <ChatMarkdown text={text} />
   }
 
   const handleSend = () => {
@@ -189,9 +280,9 @@ export default function ChatPane({ sessionKey, paneIndex, onClose }) {
         <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
           {messages.map((msg, i) => (
             <div key={msg.id || i} className={`flex gap-2 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-[80%] px-3 py-2 rounded-xl text-sm whitespace-pre-wrap ${
+              <div className={`max-w-[85%] px-3 py-2 rounded-xl ${
                 msg.role === 'user'
-                  ? 'bg-[#6366f1] text-white rounded-br-sm'
+                  ? 'bg-[#6366f1] text-white rounded-br-sm text-sm whitespace-pre-wrap'
                   : 'bg-[#1e2330] text-[#e8eaf0] rounded-bl-sm'
               }`}>
                 {renderContent(msg.content)}
