@@ -8,7 +8,7 @@ const app = express()
 app.use(cors())
 app.use(express.json())
 
-const PORT = process.env.OCTIS_API_PORT || 3747
+const PORT = process.env.PORT || process.env.OCTIS_API_PORT || 3747
 
 // --- Postgres ---
 const pool = new pg.Pool({
@@ -35,29 +35,29 @@ app.get('/api/costs', async (req, res) => {
   try {
     const { rows: daily } = await pool.query(`
       SELECT
-        date,
+        cost_date AS date,
         SUM(total_cost_usd) AS total_cost_usd,
         SUM(input_tokens) AS input_tokens,
         SUM(output_tokens) AS output_tokens,
-        COUNT(DISTINCT session_key) AS session_count
+        SUM(session_count) AS session_count
       FROM raw_nexus.claw_user_daily_costs
-      WHERE date >= CURRENT_DATE - INTERVAL '7 days'
-      GROUP BY date
-      ORDER BY date DESC
+      WHERE cost_date >= CURRENT_DATE - INTERVAL '7 days'
+      GROUP BY cost_date
+      ORDER BY cost_date DESC
     `)
 
     const { rows: sessions } = await pool.query(`
       SELECT
-        session_key,
-        session_label,
+        session_id AS session_key,
+        first_message AS session_label,
         sender_name,
         SUM(total_cost_usd) AS cost,
-        MAX(last_updated) AS last_activity,
+        MAX(last_ts) AS last_activity,
         SUM(input_tokens) AS input_tokens,
         SUM(output_tokens) AS output_tokens
       FROM raw_nexus.claw_session_costs
-      WHERE last_updated >= CURRENT_DATE - INTERVAL '7 days'
-      GROUP BY session_key, session_label, sender_name
+      WHERE session_date >= CURRENT_DATE - INTERVAL '7 days'
+      GROUP BY session_id, first_message, sender_name
       ORDER BY cost DESC
       LIMIT 50
     `)
@@ -65,7 +65,7 @@ app.get('/api/costs', async (req, res) => {
     const { rows: todayRow } = await pool.query(`
       SELECT COALESCE(SUM(total_cost_usd), 0) AS today_cost
       FROM raw_nexus.claw_user_daily_costs
-      WHERE date = CURRENT_DATE
+      WHERE cost_date = CURRENT_DATE
     `)
 
     res.json({
@@ -132,6 +132,17 @@ app.get('/api/todos', async (req, res) => {
     res.status(500).json({ error: err.message })
   }
 })
+
+// Serve static frontend in production
+if (process.env.NODE_ENV === 'production') {
+  const __dirname = path.dirname(new URL(import.meta.url).pathname)
+  const distPath = path.join(__dirname, '..', 'dist')
+  app.use(express.static(distPath))
+  // Catch-all for SPA routing — must come after API routes and static
+  app.use((req, res) => {
+    res.sendFile(path.join(distPath, 'index.html'))
+  })
+}
 
 app.listen(PORT, () => {
   console.log(`Octis API server running on http://localhost:${PORT}`)

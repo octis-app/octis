@@ -5,6 +5,18 @@ import ChatPane from './components/ChatPane'
 import ConnectModal from './components/ConnectModal'
 import CostsPanel from './components/CostsPanel'
 import MemoryPanel from './components/MemoryPanel'
+import MobileApp from './components/MobileApp'
+
+// Detect mobile: screen width <768px or touch device
+function useIsMobile() {
+  const [mobile, setMobile] = useState(() => window.innerWidth < 768)
+  useEffect(() => {
+    const handler = () => setMobile(window.innerWidth < 768)
+    window.addEventListener('resize', handler)
+    return () => window.removeEventListener('resize', handler)
+  }, [])
+  return mobile
+}
 
 const NAV = [
   { id: 'sessions', label: '💬 Sessions' },
@@ -17,6 +29,7 @@ export default function App() {
   const { activePanes, paneCount, setPaneCount, pinToPane } = useSessionStore()
   const [showConnect, setShowConnect] = useState(false)
   const [activeNav, setActiveNav] = useState('sessions')
+  const isMobile = useIsMobile()
 
   useEffect(() => {
     if (gatewayUrl && !connected) connect()
@@ -25,6 +38,11 @@ export default function App() {
   useEffect(() => {
     if (!connected && !gatewayUrl) setShowConnect(true)
   }, [connected, gatewayUrl])
+
+  // Render mobile layout on small screens
+  if (isMobile) {
+    return <MobileApp />
+  }
 
   const visiblePanes = activePanes.slice(0, paneCount)
 

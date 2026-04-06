@@ -113,28 +113,37 @@ export default function Sidebar({ onSettingsClick }) {
   const [search, setSearch] = useState('')
 
   const handlePin = (sessionKey) => {
+    // If already pinned, just bring it (no-op, it's visible)
+    const alreadyAt = activePanes.indexOf(sessionKey)
+    if (alreadyAt >= 0 && alreadyAt < paneCount) return
+    // Find first empty pane slot
     const emptyPane = activePanes.findIndex((p, i) => i < paneCount && !p)
-    pinToPane(emptyPane >= 0 ? emptyPane : 0, sessionKey)
+    if (emptyPane >= 0) {
+      pinToPane(emptyPane, sessionKey)
+    } else {
+      // All panes occupied — replace the last one
+      pinToPane(paneCount - 1, sessionKey)
+    }
   }
 
   const handleRename = (sessionKey, newLabel) => {
-    send({ type: 'sessions.patch', sessionKey, patch: { label: newLabel } })
+    send({ type: 'req', id: `sessions-patch-${Date.now()}`, method: 'sessions.patch', params: { sessionKey, patch: { label: newLabel } } })
     setSessions(sessions.map(s => s.key === sessionKey ? { ...s, label: newLabel } : s))
   }
 
   const handleArchive = (sessionKey) => {
     if (confirm(`Archive session "${sessionKey}"? It can be recovered from the gateway for 30 days.`)) {
-      send({ type: 'sessions.delete', sessionKey })
+      send({ type: 'req', id: `sessions-delete-${Date.now()}`, method: 'sessions.delete', params: { sessionKey } })
       setSessions(sessions.filter(s => s.key !== sessionKey))
-      // Clear from panes
       activePanes.forEach((p, i) => { if (p === sessionKey) pinToPane(i, null) })
     }
   }
 
   const handleNewSession = () => {
     const key = `session-${Date.now()}`
-    send({ type: 'chat.send', sessionKey: key, message: '/new' })
-    pinToPane(activePanes.findIndex((p, i) => i < paneCount && !p) ?? 0, key)
+    send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey: key, message: '/new' } })
+    const emptyPane = activePanes.findIndex((p, i) => i < paneCount && !p)
+    pinToPane(emptyPane >= 0 ? emptyPane : paneCount - 1, key)
   }
 
   const filtered = sessions.filter(s => {

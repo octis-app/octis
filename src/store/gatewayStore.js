@@ -1,6 +1,58 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
+// --- Device identity helpers (Web Crypto) ---
+
+async function generateDeviceKey() {
+  const keyPair = await crypto.subtle.generateKey(
+    { name: 'Ed25519' },
+    true,
+    ['sign', 'verify']
+  )
+  const pubKeyRaw = await crypto.subtle.exportKey('spki', keyPair.publicKey)
+  const pubKeyB64 = btoa(String.fromCharCode(...new Uint8Array(pubKeyRaw)))
+
+  // Device ID = sha256 of public key (hex, first 32 chars)
+  const hash = await crypto.subtle.digest('SHA-256', pubKeyRaw)
+  const deviceId = Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32)
+
+  return { keyPair, pubKeyB64, deviceId }
+}
+
+async function signChallenge(privateKey, payload) {
+  const encoded = new TextEncoder().encode(payload)
+  const sigBuf = await crypto.subtle.sign({ name: 'Ed25519' }, privateKey, encoded)
+  return btoa(String.fromCharCode(...new Uint8Array(sigBuf)))
+}
+
+// Persist device identity across sessions
+let _deviceCache = null
+async function getOrCreateDevice() {
+  if (_deviceCache) return _deviceCache
+  const stored = localStorage.getItem('octis-device')
+  if (stored) {
+    try {
+      const d = JSON.parse(stored)
+      // Re-import the key
+      const privRaw = Uint8Array.from(atob(d.privKeyB64), c => c.charCodeAt(0))
+      const pubRaw = Uint8Array.from(atob(d.pubKeyB64), c => c.charCodeAt(0))
+      const privateKey = await crypto.subtle.importKey('pkcs8', privRaw, { name: 'Ed25519' }, false, ['sign'])
+      _deviceCache = { privateKey, pubKeyB64: d.pubKeyB64, deviceId: d.deviceId }
+      return _deviceCache
+    } catch (e) {
+      console.warn('Failed to restore device key, generating new one', e)
+    }
+  }
+
+  // Generate new
+  const { keyPair, pubKeyB64, deviceId } = await generateDeviceKey()
+  const privRaw = await crypto.subtle.exportKey('pkcs8', keyPair.privateKey)
+  const privKeyB64 = btoa(String.fromCharCode(...new Uint8Array(privRaw)))
+  localStorage.setItem('octis-device', JSON.stringify({ pubKeyB64, privKeyB64, deviceId }))
+  _deviceCache = { privateKey: keyPair.privateKey, pubKeyB64, deviceId }
+  return _deviceCache
+}
+
 // Shared message bus for gateway events
 const listeners = new Set()
 const emit = (msg) => listeners.forEach(fn => fn(msg))
@@ -8,7 +60,7 @@ const emit = (msg) => listeners.forEach(fn => fn(msg))
 export const useGatewayStore = create(
   persist(
     (set, get) => ({
-      gatewayUrl: '',
+      gatewayUrl: import.meta.env.VITE_GATEWAY_URL || '',
       gatewayToken: '',
       connected: false,
       ws: null,
@@ -27,26 +79,63 @@ export const useGatewayStore = create(
         if (ws) ws.close()
         if (!gatewayUrl) return
 
-        const wsUrl = gatewayUrl.replace(/^http/, 'ws')
+        const wsUrl = gatewayUrl.startsWith('http') ? gatewayUrl.replace(/^http/, 'ws') : gatewayUrl
         const socket = new WebSocket(wsUrl)
 
         socket.onopen = () => {
-          socket.send(JSON.stringify({
-            type: 'connect',
-            params: { auth: { token: gatewayToken }, mode: 'operator' }
-          }))
+          // Wait for challenge — don't send anything yet
+          console.log('[octis] WS open, waiting for challenge...')
         }
 
-        socket.onmessage = (event) => {
+        socket.onmessage = async (event) => {
           try {
             const msg = JSON.parse(event.data)
             get().handleMessage(msg)
             emit(msg)
-          } catch {}
+
+            // Handle challenge-response handshake
+            // No device identity sent — gateway runs with dangerouslyDisableDeviceAuth
+            // so any stale device key in localStorage would cause device-id-mismatch rejections
+            if (msg.type === 'event' && msg.event === 'connect.challenge') {
+              const token = get().gatewayToken
+              socket.send(JSON.stringify({
+                type: 'req',
+                id: 'octis-connect',
+                method: 'connect',
+                params: {
+                  minProtocol: 3,
+                  maxProtocol: 3,
+                  client: {
+                    id: 'openclaw-control-ui',
+                    version: '0.1.0',
+                    platform: 'web',
+                    mode: 'ui',
+                  },
+                  role: 'operator',
+                  scopes: ['operator.read', 'operator.write'],
+                  caps: [],
+                  commands: [],
+                  permissions: {},
+                  auth: { token },
+                  locale: navigator.language || 'en-US',
+                  userAgent: 'octis/0.1.0',
+                },
+              }))
+              console.log('[octis] Sent connect (token-only auth)')
+            }
+          } catch (e) {
+            console.warn('[octis] Failed to parse message', e)
+          }
         }
 
-        socket.onclose = () => set({ connected: false, ws: null })
-        socket.onerror = () => set({ connected: false })
+        socket.onclose = (e) => {
+          console.log('[octis] WS closed:', e.code, e.reason)
+          set({ connected: false, ws: null })
+        }
+        socket.onerror = (e) => {
+          console.warn('[octis] WS error', e)
+          set({ connected: false })
+        }
 
         set({ ws: socket })
       },
@@ -67,16 +156,41 @@ export const useGatewayStore = create(
       },
 
       handleMessage: (msg) => {
-        if (msg.type === 'connect.ack') {
-          set({ connected: true })
-          useGatewayStore.getState().send({ type: 'sessions.list' })
+        // Connect response
+        if (msg.type === 'res' && msg.id === 'octis-connect') {
+          if (msg.ok) {
+            console.log('[octis] Connected ✅', msg.payload)
+            set({ connected: true })
+            useSessionStore.getState().setSessions([])
+            // Request sessions list
+            const { ws } = useGatewayStore.getState()
+            if (ws) ws.send(JSON.stringify({ type: 'req', id: 'sessions-list-init', method: 'sessions.list', params: {} }))
+          } else {
+            console.error('[octis] Auth failed:', msg.error)
+            set({ connected: false })
+          }
         }
+
+        if (msg.type === 'res' && (msg.id === 'sessions-list-init' || msg.id === 'sessions-list')) {
+          const raw = msg.payload?.sessions || []
+          // Normalize: gateway uses sessionKey, our UI uses .key
+          const sessions = raw.map(s => ({ ...s, key: s.key || s.sessionKey }))
+          useSessionStore.getState().setSessions(sessions)
+        }
+
+        // Also handle the old event-based sessions list
         if (msg.type === 'sessions.list.result') {
-          useSessionStore.getState().setSessions(msg.sessions || [])
+          const raw = msg.sessions || []
+          const sessions = raw.map(s => ({ ...s, key: s.key || s.sessionKey }))
+          useSessionStore.getState().setSessions(sessions)
         }
+
         // Update session activity on any chat event
         if (msg.type === 'chat' && msg.sessionKey) {
           useSessionStore.getState().touchSession(msg.sessionKey)
+        }
+        if (msg.type === 'event' && msg.event === 'chat' && msg.payload?.sessionKey) {
+          useSessionStore.getState().touchSession(msg.payload.sessionKey)
         }
       },
     }),
@@ -89,7 +203,7 @@ export const useGatewayStore = create(
 
 export const useSessionStore = create((set, get) => ({
   sessions: [],
-  sessionActivity: {}, // sessionKey -> timestamp of last activity
+  sessionActivity: {},
   activePanes: [null, null, null, null, null],
   paneCount: 2,
 
@@ -102,14 +216,13 @@ export const useSessionStore = create((set, get) => ({
   },
 
   getStatus: (session) => {
-    // Use real-time activity tracking if available
-    const activity = get().sessionActivity[session.key]
+    const activity = get().sessionActivity[session.key || session.sessionKey]
     const last = activity || session.updatedAt || session.lastActivity || session.updated_at
     if (!last) return 'idle'
     const age = Date.now() - (typeof last === 'number' ? last : new Date(last).getTime())
-    if (age < 60 * 60 * 1000) return 'active'       // < 1h
-    if (age < 24 * 60 * 60 * 1000) return 'idle'    // < 24h
-    return 'dead'                                     // > 24h
+    if (age < 60 * 60 * 1000) return 'active'
+    if (age < 24 * 60 * 60 * 1000) return 'idle'
+    return 'dead'
   },
 
   pinToPane: (paneIndex, sessionKey) => {

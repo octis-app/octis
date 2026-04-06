@@ -1,15 +1,36 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useGatewayStore } from '../store/gatewayStore'
 
 export default function ConnectModal({ onClose }) {
-  const { gatewayUrl, gatewayToken, setCredentials, connect } = useGatewayStore()
-  const [url, setUrl] = useState(gatewayUrl || 'ws://127.0.0.1:18789')
+  const { gatewayUrl, gatewayToken, setCredentials, connect, connected } = useGatewayStore()
+  const [url, setUrl] = useState(gatewayUrl || import.meta.env.VITE_GATEWAY_URL || 'wss://octis.duckdns.org/ws')
   const [token, setToken] = useState(gatewayToken || '')
+  const [status, setStatus] = useState('idle') // idle | connecting | error
+  const [errorMsg, setErrorMsg] = useState('')
+
+  // Watch for successful connection
+  useEffect(() => {
+    if (status === 'connecting' && connected) {
+      setStatus('idle')
+      onClose()
+    }
+  }, [connected, status])
 
   const handleConnect = () => {
+    if (!url.trim()) { setErrorMsg('Gateway URL is required'); setStatus('error'); return }
+    if (!token.trim()) { setErrorMsg('Token is required'); setStatus('error'); return }
+    setStatus('connecting')
+    setErrorMsg('')
     setCredentials(url, token)
     connect()
-    onClose()
+
+    // Timeout fallback — if not connected in 8s, show error
+    setTimeout(() => {
+      if (!useGatewayStore.getState().connected) {
+        setStatus('error')
+        setErrorMsg('Connection timed out. Check the URL and token.')
+      }
+    }, 8000)
   }
 
   return (
@@ -23,24 +44,48 @@ export default function ConnectModal({ onClose }) {
           className="w-full bg-[#0f1117] border border-[#2a3142] rounded-lg px-3 py-2 text-sm text-white mb-4 outline-none focus:border-[#6366f1]"
           value={url}
           onChange={e => setUrl(e.target.value)}
-          placeholder="ws://127.0.0.1:18789"
+          placeholder="wss://octis.duckdns.org/ws"
+          disabled={status === 'connecting'}
         />
 
         <label className="block text-xs text-[#6b7280] uppercase tracking-wider mb-1">Token</label>
         <input
-          className="w-full bg-[#0f1117] border border-[#2a3142] rounded-lg px-3 py-2 text-sm text-white mb-6 outline-none focus:border-[#6366f1]"
+          className="w-full bg-[#0f1117] border border-[#2a3142] rounded-lg px-3 py-2 text-sm text-white mb-4 outline-none focus:border-[#6366f1]"
           type="password"
           value={token}
           onChange={e => setToken(e.target.value)}
           placeholder="Your gateway token"
+          disabled={status === 'connecting'}
+          onKeyDown={e => e.key === 'Enter' && status !== 'connecting' && handleConnect()}
         />
 
-        <button
-          onClick={handleConnect}
-          className="w-full bg-[#6366f1] hover:bg-[#818cf8] text-white rounded-lg py-2 text-sm font-medium transition-colors"
-        >
-          Connect
-        </button>
+        {status === 'error' && (
+          <div className="text-red-400 text-sm mb-4 bg-red-400/10 border border-red-400/20 rounded-lg px-3 py-2">
+            ❌ {errorMsg}
+          </div>
+        )}
+
+        {status === 'connecting' && (
+          <div className="text-[#6366f1] text-sm mb-4 bg-[#6366f1]/10 border border-[#6366f1]/20 rounded-lg px-3 py-2 flex items-center gap-2">
+            <span className="animate-spin inline-block">⟳</span> Connecting…
+          </div>
+        )}
+
+        <div className="flex gap-2">
+          <button
+            onClick={handleConnect}
+            disabled={status === 'connecting'}
+            className="flex-1 bg-[#6366f1] hover:bg-[#818cf8] disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg py-2 text-sm font-medium transition-colors"
+          >
+            {status === 'connecting' ? 'Connecting…' : 'Connect'}
+          </button>
+          <button
+            onClick={onClose}
+            className="px-4 bg-[#2a3142] hover:bg-[#3a4152] text-[#6b7280] rounded-lg py-2 text-sm transition-colors"
+          >
+            Cancel
+          </button>
+        </div>
       </div>
     </div>
   )

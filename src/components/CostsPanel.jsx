@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:3747'
+const API = import.meta.env.VITE_API_URL || ''
 
 function Bar({ value, max }) {
   const pct = max > 0 ? Math.round((value / max) * 100) : 0
@@ -81,14 +81,14 @@ export default function CostsPanel() {
         <div className="space-y-2">
           {data.daily?.map(d => (
             <div key={d.date} className="flex items-center gap-3">
-              <div className="text-xs text-[#6b7280] w-20 shrink-0">{d.date}</div>
+              <div className="text-xs text-[#6b7280] w-20 shrink-0">{d.date ? new Date(d.date).toLocaleDateString('en-CA') : ''}</div>
               <div className="flex-1">
                 <Bar value={d.total_cost_usd} max={Math.max(maxDailyCost, DAILY_LIMIT)} />
               </div>
               <div className={`text-xs w-14 text-right ${d.total_cost_usd > DAILY_LIMIT ? 'text-red-400' : 'text-white'}`}>
                 ${d.total_cost_usd.toFixed(2)}
               </div>
-              <div className="text-xs text-[#6b7280] w-20 text-right">{d.session_count} sessions</div>
+              <div className="text-xs text-[#6b7280] w-20 text-right">{d.session_count} sess</div>
             </div>
           ))}
         </div>
