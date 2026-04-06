@@ -1,18 +1,12 @@
 import { useState } from 'react'
 import { useSessionStore, useGatewayStore } from '../store/gatewayStore'
 
-const statusColors = {
-  active: '#22c55e',
-  idle: '#f59e0b',
-  dead: '#6b7280',
-  blocked: '#ef4444',
-}
-
-const statusLabels = {
-  active: 'Active',
-  idle: 'Idle',
-  dead: 'Dead',
-  blocked: 'Blocked',
+const STATUS = {
+  working:   { color: '#a855f7', label: 'Working',    dot: 'animate-pulse' },
+  'needs-you': { color: '#3b82f6', label: 'Needs you',  dot: '' },
+  active:    { color: '#22c55e', label: 'Active',     dot: '' },
+  idle:      { color: '#f59e0b', label: 'Idle',       dot: '' },
+  dead:      { color: '#6b7280', label: 'Quiet',      dot: '' },
 }
 
 function SessionItem({ session, isPinned, onPin, onRename, onArchive }) {
@@ -34,7 +28,10 @@ function SessionItem({ session, isPinned, onPin, onRename, onArchive }) {
       }`}
     >
       <div className="flex items-center gap-2">
-        <div className="w-1.5 h-1.5 rounded-full shrink-0 mt-0.5" style={{ background: statusColors[status] }} />
+        <div
+          className={`w-1.5 h-1.5 rounded-full shrink-0 mt-0.5 ${STATUS[status]?.dot || ''}`}
+          style={{ background: STATUS[status]?.color || '#6b7280' }}
+        />
 
         {editing ? (
           <input
@@ -69,7 +66,7 @@ function SessionItem({ session, isPinned, onPin, onRename, onArchive }) {
       </div>
 
       <div className="flex items-center gap-2 mt-0.5 ml-3.5">
-        <span className="text-xs" style={{ color: statusColors[status] }}>{statusLabels[status]}</span>
+        <span className="text-xs" style={{ color: STATUS[status]?.color || '#6b7280' }}>{STATUS[status]?.label || status}</span>
         {session.cost != null && (
           <span className="text-xs text-[#6b7280]">· ${typeof session.cost === 'number' ? session.cost.toFixed(3) : session.cost}</span>
         )}
@@ -148,9 +145,7 @@ export default function Sidebar({ onSettingsClick }) {
 
   const filtered = sessions.filter(s => {
     const status = getStatus(s)
-    if (filter === 'active' && status !== 'active') return false
-    if (filter === 'idle' && status !== 'idle') return false
-    if (filter === 'dead' && status !== 'dead') return false
+    if (filter !== 'all' && status !== filter) return false
     if (search) {
       const q = search.toLowerCase()
       return (s.label || s.key).toLowerCase().includes(q)
@@ -159,6 +154,8 @@ export default function Sidebar({ onSettingsClick }) {
   })
 
   const counts = {
+    working: sessions.filter(s => getStatus(s) === 'working').length,
+    'needs-you': sessions.filter(s => getStatus(s) === 'needs-you').length,
     active: sessions.filter(s => getStatus(s) === 'active').length,
     idle: sessions.filter(s => getStatus(s) === 'idle').length,
     dead: sessions.filter(s => getStatus(s) === 'dead').length,
@@ -185,21 +182,27 @@ export default function Sidebar({ onSettingsClick }) {
         />
 
         {/* Filter tabs */}
-        <div className="flex gap-1 mt-2">
+        <div className="flex flex-wrap gap-1 mt-2">
           {[
-            { id: 'all', label: `All ${sessions.length}` },
-            { id: 'active', label: `🟢 ${counts.active}` },
-            { id: 'idle', label: `🟡 ${counts.idle}` },
-            { id: 'dead', label: `⚫ ${counts.dead}` },
+            { id: 'all',       label: `All`,         count: sessions.length,        color: '' },
+            { id: 'working',   label: `Working`,     count: counts.working,         color: '#a855f7' },
+            { id: 'needs-you', label: `Needs you`,   count: counts['needs-you'],    color: '#3b82f6' },
+            { id: 'active',    label: `Active`,      count: counts.active,          color: '#22c55e' },
+            { id: 'idle',      label: `Idle`,        count: counts.idle,            color: '#f59e0b' },
+            { id: 'dead',      label: `Quiet`,       count: counts.dead,            color: '#6b7280' },
           ].map(f => (
             <button
               key={f.id}
               onClick={() => setFilter(f.id)}
-              className={`flex-1 text-xs py-1 rounded transition-colors ${
+              className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] transition-colors ${
                 filter === f.id ? 'bg-[#6366f1] text-white' : 'text-[#6b7280] hover:text-white hover:bg-[#2a3142]'
               }`}
             >
+              {f.color && filter !== f.id && (
+                <span className="w-1.5 h-1.5 rounded-full shrink-0 inline-block" style={{ background: f.color }} />
+              )}
               {f.label}
+              <span className={filter === f.id ? 'text-white/70' : 'text-[#4b5563]'}>{f.count}</span>
             </button>
           ))}
         </div>

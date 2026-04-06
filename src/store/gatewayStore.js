@@ -185,12 +185,26 @@ export const useGatewayStore = create(
           useSessionStore.getState().setSessions(sessions)
         }
 
-        // Update session activity on any chat event
-        if (msg.type === 'chat' && msg.sessionKey) {
-          useSessionStore.getState().touchSession(msg.sessionKey)
-        }
+        // Track streaming + last role for status indicators
         if (msg.type === 'event' && msg.event === 'chat' && msg.payload?.sessionKey) {
-          useSessionStore.getState().touchSession(msg.payload.sessionKey)
+          const sk = msg.payload.sessionKey
+          const role = msg.payload.role
+          if (role === 'assistant') {
+            useSessionStore.getState().markStreaming(sk)
+          } else if (role === 'user') {
+            useSessionStore.getState().setLastRole(sk, 'user')
+          }
+          useSessionStore.getState().touchSession(sk)
+        }
+        if (msg.type === 'chat' && msg.sessionKey) {
+          const sk = msg.sessionKey
+          const role = msg.role
+          if (role === 'assistant') {
+            useSessionStore.getState().markStreaming(sk)
+          } else if (role === 'user') {
+            useSessionStore.getState().setLastRole(sk, 'user')
+          }
+          useSessionStore.getState().touchSession(sk)
         }
       },
     }),
@@ -204,6 +218,8 @@ export const useGatewayStore = create(
 export const useSessionStore = create((set, get) => ({
   sessions: [],
   sessionActivity: {},
+  sessionMeta: {},    // { [sessionKey]: { lastRole: 'user'|'assistant', isStreaming: bool } }
+  streamingTimers: {},
   activePanes: [null, null, null, null, null],
   paneCount: 2,
 
@@ -215,8 +231,50 @@ export const useSessionStore = create((set, get) => ({
     }))
   },
 
+  setLastRole: (sessionKey, role) => {
+    set(s => ({
+      sessionMeta: {
+        ...s.sessionMeta,
+        [sessionKey]: { ...(s.sessionMeta[sessionKey] || {}), lastRole: role, isStreaming: false }
+      }
+    }))
+  },
+
+  markStreaming: (sessionKey) => {
+    // Clear any existing debounce timer
+    const existing = get().streamingTimers[sessionKey]
+    if (existing) clearTimeout(existing)
+
+    const timer = setTimeout(() => {
+      // Streaming stopped — keep lastRole as 'assistant' (needs-you)
+      set(s => ({
+        sessionMeta: {
+          ...s.sessionMeta,
+          [sessionKey]: { ...(s.sessionMeta[sessionKey] || {}), isStreaming: false }
+        },
+        streamingTimers: Object.fromEntries(
+          Object.entries(s.streamingTimers).filter(([k]) => k !== sessionKey)
+        )
+      }))
+    }, 4000)
+
+    set(s => ({
+      streamingTimers: { ...s.streamingTimers, [sessionKey]: timer },
+      sessionMeta: {
+        ...s.sessionMeta,
+        [sessionKey]: { ...(s.sessionMeta[sessionKey] || {}), isStreaming: true, lastRole: 'assistant' }
+      }
+    }))
+  },
+
   getStatus: (session) => {
-    const activity = get().sessionActivity[session.key || session.sessionKey]
+    const key = session.key || session.sessionKey
+    const meta = get().sessionMeta[key] || {}
+
+    if (meta.isStreaming) return 'working'
+    if (meta.lastRole === 'assistant') return 'needs-you'
+    // Treat 'user' lastRole as active if recent
+    const activity = get().sessionActivity[key]
     const last = activity || session.updatedAt || session.lastActivity || session.updated_at
     if (!last) return 'idle'
     const age = Date.now() - (typeof last === 'number' ? last : new Date(last).getTime())

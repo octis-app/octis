@@ -3,7 +3,7 @@ import { useGatewayStore, useSessionStore } from '../store/gatewayStore'
 
 export default function ChatPane({ sessionKey, paneIndex, onClose }) {
   const { send, ws } = useGatewayStore()
-  const { setSessions, sessions } = useSessionStore()
+  const { setSessions, sessions, setLastRole, markStreaming } = useSessionStore()
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [sessionCard, setSessionCard] = useState(null)
@@ -29,6 +29,11 @@ export default function ChatPane({ sessionKey, paneIndex, onClose }) {
           setMessages(msgs)
           const card = msgs.find(m => m.role === 'assistant')
           if (card) setSessionCard(extractText(card.content).slice(0, 300))
+          // Set initial status based on last message role
+          if (msgs.length > 0) {
+            const lastMsg = msgs[msgs.length - 1]
+            if (lastMsg.role) setLastRole(sessionKey, lastMsg.role)
+          }
         }
 
         // Streaming chat events for this session
@@ -114,6 +119,7 @@ export default function ChatPane({ sessionKey, paneIndex, onClose }) {
     const msg = input
     send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey, message: msg } })
     setMessages(prev => [...prev, { role: 'user', content: msg, id: Date.now() }])
+    setLastRole(sessionKey, 'user')
     setInput('')
   }
 
