@@ -1,189 +1,176 @@
 import { useState, useEffect, useRef } from 'react'
-import { useGatewayStore, useSessionStore } from '../store/gatewayStore'
+import { useGatewayStore, useSessionStore, useProjectStore } from '../store/gatewayStore'
 
-function resolveContent(c) {
-  if (!c) return ''
-  if (typeof c === 'string') return c
-  if (Array.isArray(c)) return c.map(x => typeof x === 'string' ? x : x?.text ?? '').join('')
-  return c?.text ?? JSON.stringify(c)
-}
-
-// Detect if a message is "noise" — tool calls, system, heartbeats, etc.
-function isNoise(msg) {
-  if (msg.role === 'tool') return true
-  if (msg.role === 'system') return true
-  const text = resolveContent(msg.content)
-  if (!text) return true
-  if (/^HEARTBEAT_OK$/m.test(text.trim())) return true
-  if (/^NO_REPLY$/m.test(text.trim())) return true
-  return false
-}
-
-// Split text into segments: normal text vs code blocks
-function parseSegments(text) {
-  const segments = []
-  const re = /```([\w]*)\n?([\s\S]*?)```/g
-  let last = 0
-  let match
-  while ((match = re.exec(text)) !== null) {
-    if (match.index > last) segments.push({ type: 'text', content: text.slice(last, match.index) })
-    segments.push({ type: 'code', lang: match[1] || '', content: match[2] })
-    last = match.index + match[0].length
-  }
-  if (last < text.length) segments.push({ type: 'text', content: text.slice(last) })
-  return segments
-}
-
-function CodeBlock({ lang, content }) {
-  const lines = content.split('\n').length
-  const [open, setOpen] = useState(lines <= 10)
-
+// ─── Chat message markdown renderer ──────────────────────────────────────────
+function CollapsibleCode({ lang, code }) {
+  const [open, setOpen] = useState(false)
+  const lines = code.split('\n')
+  const preview = lines.slice(0, 2).join('\n')
   return (
     <div className="my-1.5 rounded-lg overflow-hidden border border-[#2a3142]">
       <button
         onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center gap-2 px-3 py-1.5 bg-[#0f1117] text-left hover:bg-[#1a1f2e] transition-colors"
+        className="w-full flex items-center justify-between px-3 py-1.5 bg-[#0f1117] hover:bg-[#181c24] transition-colors text-left"
       >
-        <span className="text-[10px] text-[#6366f1] font-mono">{lang || 'code'}</span>
-        <span className="text-[10px] text-[#4b5563]">{lines} lines</span>
-        <span className="ml-auto text-[10px] text-[#6b7280]">{open ? '▲ collapse' : '▼ expand'}</span>
+        <span className="text-[10px] text-[#6b7280] font-mono">{lang || 'code'} · {lines.length} lines</span>
+        <span className="text-[10px] text-[#6366f1]">{open ? '▲ collapse' : '▼ expand'}</span>
       </button>
+      {!open && (
+        <div className="px-3 py-1.5 bg-[#0a0d14] text-[11px] font-mono text-[#6b7280] truncate">{preview}…</div>
+      )}
       {open && (
-        <pre className="px-3 py-2 text-xs text-[#e8eaf0] bg-[#0f1117] overflow-x-auto whitespace-pre leading-relaxed max-h-[400px] overflow-y-auto">
-          <code>{content}</code>
-        </pre>
+        <pre className="px-3 py-2 bg-[#0a0d14] text-[11px] font-mono text-[#a5b4fc] overflow-x-auto leading-relaxed">{code}</pre>
       )}
     </div>
   )
 }
 
-function MessageContent({ text }) {
-  const segments = parseSegments(text)
-  return (
-    <div>
-      {segments.map((seg, i) =>
-        seg.type === 'code'
-          ? <CodeBlock key={i} lang={seg.lang} content={seg.content} />
-          : <span key={i} className="whitespace-pre-wrap break-words">{seg.content}</span>
-      )}
-    </div>
-  )
+function ChatMarkdown({ text }) {
+  const lines = text.split('\n')
+  const elements = []
+  let i = 0
+
+  const renderInline = (str) => {
+    // bold, italic, inline code
+    const parts = str.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g)
+    return parts.map((p, j) => {
+      if (p.startsWith('**') && p.endsWith('**')) return <strong key={j} className="font-semibold text-white">{p.slice(2,-2)}</strong>
+      if (p.startsWith('`') && p.endsWith('`') && p.length > 2) return <code key={j} className="bg-[#0f1117] text-[#a5b4fc] px-1 rounded text-[11px] font-mono">{p.slice(1,-1)}</code>
+      if (p.startsWith('*') && p.endsWith('*') && p.length > 2) return <em key={j} className="italic opacity-80">{p.slice(1,-1)}</em>
+      return <span key={j}>{p}</span>
+    })
+  }
+
+  while (i < lines.length) {
+    const line = lines[i]
+
+    // Code block
+    if (line.startsWith('```')) {
+      const lang = line.slice(3).trim()
+      const codeLines = []
+      i++
+      while (i < lines.length && !lines[i].startsWith('```')) { codeLines.push(lines[i]); i++ }
+      i++
+      elements.push(<CollapsibleCode key={`code-${i}`} lang={lang} code={codeLines.join('\n')} />)
+      continue
+    }
+
+    // H1/H2/H3
+    if (line.startsWith('### ')) { elements.push(<div key={i} className="text-xs font-semibold text-[#818cf8] mt-2 mb-0.5">{renderInline(line.slice(4))}</div>); i++; continue }
+    if (line.startsWith('## ')) { elements.push(<div key={i} className="text-sm font-semibold text-[#a5b4fc] mt-2 mb-1">{renderInline(line.slice(3))}</div>); i++; continue }
+    if (line.startsWith('# ')) { elements.push(<div key={i} className="text-sm font-bold text-white mt-2 mb-1 border-b border-[#2a3142] pb-1">{renderInline(line.slice(2))}</div>); i++; continue }
+
+    // Bullet / task
+    const taskMatch = line.match(/^(\s*)- \[([ xX])\] (.*)/)
+    if (taskMatch) {
+      const done = taskMatch[2].toLowerCase() === 'x'
+      elements.push(
+        <div key={i} className="flex items-start gap-1.5 py-0.5">
+          <span className={`mt-0.5 text-[11px] ${done ? 'text-emerald-400' : 'text-[#3a4152]'}`}>{done ? '✓' : '○'}</span>
+          <span className={`text-sm leading-relaxed ${done ? 'line-through text-[#4b5563]' : ''}`}>{renderInline(taskMatch[3])}</span>
+        </div>
+      )
+      i++; continue
+    }
+    const bulletMatch = line.match(/^(\s*)[-*] (.*)/)
+    if (bulletMatch) {
+      const indent = bulletMatch[1].length
+      elements.push(
+        <div key={i} className={`flex items-start gap-1.5 py-0.5 ${indent > 0 ? 'ml-4' : ''}`}>
+          <span className="text-[#6366f1] mt-1 text-[10px] shrink-0">•</span>
+          <span className="text-sm leading-relaxed">{renderInline(bulletMatch[2])}</span>
+        </div>
+      )
+      i++; continue
+    }
+
+    // Divider
+    if (line.trim() === '---') { elements.push(<hr key={i} className="border-[#2a3142] my-2" />); i++; continue }
+
+    // Blank line
+    if (line.trim() === '') { elements.push(<div key={i} className="h-1" />); i++; continue }
+
+    // Regular text
+    elements.push(<div key={i} className="text-sm leading-relaxed py-0.5">{renderInline(line)}</div>)
+    i++
+  }
+
+  return <div className="space-y-0">{elements}</div>
 }
 
 export default function ChatPane({ sessionKey, paneIndex, onClose }) {
-  const { send, ws, apiUrl } = useGatewayStore()
-  const { sessions, getDisplayName, setDisplayNameOverride, setMessageCount, setSessionCard: storeSessionCard } = useSessionStore()
-  const sessionMeta = sessions.find(x => x.key === sessionKey)
-  const sessionLabel = getDisplayName(sessionMeta || { key: sessionKey })
-
+  const { send, ws } = useGatewayStore()
+  const { setSessions, sessions, setLastRole, markStreaming } = useSessionStore()
+  const { setCard } = useProjectStore()
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [sessionCard, setSessionCard] = useState(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
-  const [sending, setSending] = useState(false)
-  const [hideNoise, setHideNoise] = useState(true)
-  const [sessionCost, setSessionCost] = useState(null) // { total, lastMsg }
+  const [autoRenamed, setAutoRenamed] = useState(false)
   const bottomRef = useRef(null)
-
-  // Extract a good display name from chat history
-  const extractNameFromHistory = (msgs) => {
-    // Try to find a session card with a topic
-    const card = msgs.find(m => m.role === 'assistant' && resolveContent(m.content)?.includes('📋'))
-    if (card) {
-      const cardText = resolveContent(card.content)
-      const topicMatch = cardText.match(/📋\s+\*?\*?(.+?)\*?\*?[\n\r]/)
-      if (topicMatch) return topicMatch[1].replace(/[*[\]]/g, '').trim()
-    }
-    // Try the first user message
-    const firstUser = msgs.find(m => m.role === 'user')
-    if (firstUser) {
-      const text = resolveContent(firstUser.content)
-      if (text && text.length < 80) return text.slice(0, 60)
-      if (text) return text.slice(0, 60) + '…'
-    }
-    return null
-  }
 
   useEffect(() => {
     if (!sessionKey || !ws) return
     setMessages([])
-
-    send({
-      type: 'req',
-      id: `history-${sessionKey}`,
-      method: 'chat.history',
-      params: { sessionKey, limit: 100 }
-    })
+    setSessionCard(null)
+    setAutoRenamed(false)
+    const reqId = `chat-history-${sessionKey}-${Date.now()}`
+    send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey, limit: 100 } })
 
     const handleMsg = (event) => {
       try {
         const msg = JSON.parse(event.data)
 
-        // History response
-        if (msg.type === 'res' && msg.id === `history-${sessionKey}` && msg.ok) {
-          const msgs = msg.payload?.messages ?? []
+        // Gateway response: {type:'res', id:reqId, ok:true, payload:{messages:[...]}}
+        if (msg.type === 'res' && msg.id === reqId && msg.ok) {
+          const msgs = msg.payload?.messages || []
           setMessages(msgs)
-
-          // Extract and persist display name if not already set
-          const currentName = getDisplayName(sessionMeta || { key: sessionKey })
-          const isDefaultName = !currentName || currentName === sessionKey
-          if (isDefaultName && msgs.length > 0) {
-            const extracted = extractNameFromHistory(msgs)
-            if (extracted) setDisplayNameOverride(sessionKey, extracted)
+          const card = msgs.find(m => m.role === 'assistant')
+          if (card) setSessionCard(extractText(card.content).slice(0, 300))
+          // Set initial status based on last message role
+          if (msgs.length > 0) {
+            const lastMsg = msgs[msgs.length - 1]
+            if (lastMsg.role) setLastRole(sessionKey, lastMsg.role)
           }
-
-          // Track message count (user + assistant only)
-          const realMsgs = msgs.filter(m => m.role === 'user' || m.role === 'assistant')
-          setMessageCount(sessionKey, realMsgs.length)
-
-          // Extract session card
-          const card = msgs.find(m => m.role === 'assistant' && resolveContent(m.content)?.includes('📋'))
-          if (card) {
-            const cardText = resolveContent(card.content).split('\n').slice(0, 8).join('\n')
-            setSessionCard(cardText)
-            storeSessionCard(sessionKey, cardText) // persist to store for sidebar
+          // Auto-extract session card (last 📋 assistant message)
+          const cardMsg = [...msgs].reverse().find(m => m.role === 'assistant' && extractText(m.content).includes('📋'))
+          if (cardMsg) {
+            const cardText = extractText(cardMsg.content).slice(0, 500)
+            setCard(sessionKey, cardText)
           }
         }
 
-        // Streaming: session.message events
-        if (msg.type === 'event' && msg.event === 'session.message') {
-          const pl = msg.payload
-          if (pl?.sessionKey !== sessionKey) return
-          const chatMsg = pl.message
-          if (!chatMsg) return
-          if (chatMsg.role === 'assistant') setSending(false)
+        // Streaming chat events for this session
+        if (msg.type === 'event' && msg.event === 'chat' && msg.payload?.sessionKey === sessionKey) {
+          const chatMsg = msg.payload
           setMessages(prev => {
-            const id = chatMsg.__openclaw?.id || chatMsg.id
-            const idx = prev.findIndex(m => (m.__openclaw?.id || m.id) === id)
+            const idx = prev.findIndex(m => m.id === chatMsg.id)
             if (idx >= 0) {
               const next = [...prev]
-              next[idx] = { ...next[idx], ...chatMsg }
+              next[idx] = { ...next[idx], content: chatMsg.content }
               return next
             }
             return [...prev, chatMsg]
           })
+          // Auto-save session card if this is a 📋 message
+          if (chatMsg.role === 'assistant') {
+            const text = extractText(chatMsg.content)
+            if (text.includes('📋')) setCard(sessionKey, text.slice(0, 500))
+          }
         }
 
-        // Streaming: chat events (legacy / partial)
-        if (msg.type === 'event' && msg.event?.startsWith('chat.')) {
-          const pl = msg.payload
-          const msgSessionKey = pl?.sessionKey || msg.sessionKey
-          if (msgSessionKey !== sessionKey) return
-          const chatMsg = pl?.message || pl
-          if (!chatMsg || !chatMsg.role) return
-          if (chatMsg.role === 'assistant') setSending(false)
+        // Also handle flat chat event (older gateway versions)
+        if (msg.type === 'chat' && msg.sessionKey === sessionKey) {
           setMessages(prev => {
-            const id = chatMsg.__openclaw?.id || chatMsg.id
-            const idx = prev.findIndex(m => (m.__openclaw?.id || m.id) === id)
+            const idx = prev.findIndex(m => m.id === msg.id)
             if (idx >= 0) {
               const next = [...prev]
-              next[idx] = { ...next[idx], ...chatMsg }
+              next[idx] = { ...next[idx], content: msg.content }
               return next
             }
-            return [...prev, chatMsg]
+            return [...prev, msg]
           })
         }
-
       } catch {}
     }
 
@@ -191,31 +178,70 @@ export default function ChatPane({ sessionKey, paneIndex, onClose }) {
     return () => ws.removeEventListener('message', handleMsg)
   }, [sessionKey, ws])
 
-  // Load session cost from API
+  // Auto-rename: once the first assistant reply arrives, derive a name from it
   useEffect(() => {
-    if (!sessionKey || !apiUrl) return
-    fetch(`${apiUrl}/api/costs/session/${encodeURIComponent(sessionKey)}`)
-      .then(r => r.ok ? r.json() : null)
-      .then(d => { if (d) setSessionCost(d) })
-      .catch(() => {})
-  }, [sessionKey, apiUrl])
+    if (autoRenamed || messages.length === 0) return
+    const firstUser = messages.find(m => m.role === 'user')
+    const firstAssistant = messages.find(m => m.role === 'assistant')
+    if (!firstUser || !firstAssistant) return
+    // Only auto-rename sessions that still have the default generated key as label
+    const session = sessions.find(s => s.key === sessionKey)
+    const currentLabel = session?.label || ''
+    if (currentLabel && !currentLabel.startsWith('session-') && currentLabel !== sessionKey) return
+    // Derive label from first user message (first 50 chars)
+    const rawLabel = extractText(firstUser.content).trim().replace(/\n/g, ' ').slice(0, 50)
+    if (rawLabel.length > 5) {
+      send({ type: 'req', id: `sessions-patch-${Date.now()}`, method: 'sessions.patch', params: { sessionKey, patch: { label: rawLabel } } })
+      setSessions(sessions.map(s => s.key === sessionKey ? { ...s, label: rawLabel } : s))
+      setAutoRenamed(true)
+    }
+  }, [messages])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
+  // Extract plain text from content (handles string or array of blocks)
+  function extractText(content) {
+    if (!content) return ''
+    if (typeof content === 'string') return content
+    if (Array.isArray(content)) {
+      return content.filter(b => b.type === 'text').map(b => b.text).join('')
+    }
+    return String(content)
+  }
+
+  function renderContent(content) {
+    const text = extractText(content)
+    if (!text) return null
+    return <ChatMarkdown text={text} />
+  }
+
   const handleSend = () => {
-    if (!input.trim() || sending) return
-    const ikey = `octis-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    send({
-      type: 'req',
-      id: ikey,
-      method: 'chat.send',
-      params: { sessionKey, message: input, idempotencyKey: ikey }
-    })
-    setMessages(prev => [...prev, { role: 'user', content: input, id: ikey }])
+    if (!input.trim()) return
+    const msg = input
+    send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey, message: msg } })
+    setMessages(prev => [...prev, { role: 'user', content: msg, id: Date.now() }])
+    setLastRole(sessionKey, 'user')
     setInput('')
-    setSending(true)
+  }
+
+  const handleSave = () => {
+    const msg = '💾 checkpoint — save any key decisions, context, or tasks from this session to MEMORY.md and TODOS.md now. One-line ack only.'
+    send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey, message: msg } })
+    setMessages(prev => [...prev, { role: 'user', content: '💾 Save checkpoint', id: Date.now() }])
+  }
+
+  const handleArchive = () => {
+    if (confirm('Save and archive this session?')) {
+      const msg = '💾 Final save — write any remaining decisions, tasks, or context to MEMORY.md and TODOS.md. One-line ack only.'
+      send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey, message: msg } })
+      setTimeout(() => {
+        send({ type: 'req', id: `sessions-delete-${Date.now()}`, method: 'sessions.delete', params: { sessionKey } })
+        setSessions(sessions.filter(s => s.key !== sessionKey))
+        onClose()
+      }, 3000)
+    }
   }
 
   if (!sessionKey) {
@@ -229,58 +255,40 @@ export default function ChatPane({ sessionKey, paneIndex, onClose }) {
     )
   }
 
-  const visibleMessages = hideNoise ? messages.filter(m => !isNoise(m)) : messages
-  const noiseCount = messages.length - messages.filter(m => !isNoise(m)).length
+  const displayName = (() => {
+    const s = sessions.find(s => s.key === sessionKey)
+    const label = s?.label || sessionKey
+    return label.length > 40 ? label.slice(0, 40) + '…' : label
+  })()
 
   return (
     <div className="flex flex-1 min-w-0 border-r border-[#2a3142]">
+      {/* Chat area */}
       <div className="flex flex-col flex-1 min-w-0">
-        {/* Header */}
-        <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[#2a3142] bg-[#181c24] shrink-0">
-          <span className="text-sm font-medium text-white truncate flex-1">{sessionLabel}</span>
-          {sending && <span className="text-xs text-[#6366f1] animate-pulse">thinking…</span>}
-
-          {/* Noise toggle */}
-          <button
-            onClick={() => setHideNoise(h => !h)}
-            title={hideNoise ? `Show ${noiseCount} hidden messages` : 'Hide system/tool noise'}
-            className={`text-xs px-2 py-1 rounded transition-colors ${
-              hideNoise
-                ? 'text-[#6b7280] hover:text-white hover:bg-[#2a3142]'
-                : 'bg-[#2a3142] text-white'
-            }`}
-          >
-            {hideNoise ? `🔇 +${noiseCount}` : '🔊'}
-          </button>
-
-          <button onClick={() => setSidebarOpen(s => !s)} className="text-xs text-[#6b7280] hover:text-white px-2 py-1 rounded hover:bg-[#2a3142] transition-colors">
+        {/* Pane header */}
+        <div className="flex items-center gap-1 px-3 py-2.5 border-b border-[#2a3142] bg-[#181c24] shrink-0">
+          <span className="text-sm font-medium text-white truncate flex-1" title={sessionKey}>{displayName}</span>
+          <button onClick={handleSave} title="Save checkpoint to memory" className="text-xs text-[#6b7280] hover:text-green-400 px-1.5 py-1 rounded hover:bg-[#2a3142] transition-colors">💾</button>
+          <button onClick={handleArchive} title="Save & archive session" className="text-xs text-[#6b7280] hover:text-yellow-400 px-1.5 py-1 rounded hover:bg-[#2a3142] transition-colors">📦</button>
+          <button onClick={() => setSidebarOpen(s => !s)} className="text-xs text-[#6b7280] hover:text-white px-1.5 py-1 rounded hover:bg-[#2a3142] transition-colors">
             {sidebarOpen ? '→' : '←'}
           </button>
-          <button onClick={onClose} className="text-xs text-[#6b7280] hover:text-red-400 px-2 py-1 rounded hover:bg-[#2a3142] transition-colors">✕</button>
+          <button onClick={onClose} className="text-xs text-[#6b7280] hover:text-red-400 px-1.5 py-1 rounded hover:bg-[#2a3142] transition-colors">✕</button>
         </div>
 
         {/* Messages */}
         <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
-          {visibleMessages.map((msg, i) => {
-            const text = resolveContent(msg.content)
-            if (!text && msg.role !== 'user') return null
-            return (
-              <div key={msg.__openclaw?.id || msg.id || i} className={`flex gap-2 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-[80%] px-3 py-2 rounded-xl text-sm break-words ${
-                  msg.role === 'user'
-                    ? 'bg-[#6366f1] text-white rounded-br-sm'
-                    : 'bg-[#1e2330] text-[#e8eaf0] rounded-bl-sm'
-                }`}>
-                  <MessageContent text={text} />
-                </div>
+          {messages.map((msg, i) => (
+            <div key={msg.id || i} className={`flex gap-2 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              <div className={`max-w-[85%] px-3 py-2 rounded-xl ${
+                msg.role === 'user'
+                  ? 'bg-[#6366f1] text-white rounded-br-sm text-sm whitespace-pre-wrap'
+                  : 'bg-[#1e2330] text-[#e8eaf0] rounded-bl-sm'
+              }`}>
+                {renderContent(msg.content)}
               </div>
-            )
-          })}
-          {sending && (
-            <div className="flex justify-start">
-              <div className="bg-[#1e2330] text-[#6b7280] px-3 py-2 rounded-xl text-sm rounded-bl-sm">●●●</div>
             </div>
-          )}
+          ))}
           <div ref={bottomRef} />
         </div>
 
@@ -289,16 +297,14 @@ export default function ChatPane({ sessionKey, paneIndex, onClose }) {
           <div className="flex gap-2">
             <input
               className="flex-1 bg-[#0f1117] border border-[#2a3142] rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-[#6366f1] placeholder-[#4b5563]"
-              placeholder="Message…"
+              placeholder="Message..."
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleSend()}
-              disabled={sending}
             />
             <button
               onClick={handleSend}
-              disabled={sending || !input.trim()}
-              className="bg-[#6366f1] hover:bg-[#818cf8] disabled:opacity-40 text-white rounded-lg px-4 text-sm font-medium transition-colors"
+              className="bg-[#6366f1] hover:bg-[#818cf8] text-white rounded-lg px-4 text-sm font-medium transition-colors"
             >↑</button>
           </div>
         </div>
@@ -309,37 +315,15 @@ export default function ChatPane({ sessionKey, paneIndex, onClose }) {
         <div className="w-52 shrink-0 bg-[#181c24] border-l border-[#2a3142] flex flex-col overflow-y-auto">
           <div className="px-3 py-3 border-b border-[#2a3142]">
             <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-2">Session Brief</div>
-            {sessionCard
-              ? <pre className="text-xs text-[#e8eaf0] whitespace-pre-wrap leading-relaxed">{sessionCard}</pre>
-              : <div className="text-xs text-[#4b5563]">No session card yet.</div>
-            }
+            {sessionCard ? (
+              <pre className="text-xs text-[#e8eaf0] whitespace-pre-wrap leading-relaxed">{sessionCard}</pre>
+            ) : (
+              <div className="text-xs text-[#4b5563]">No messages yet.</div>
+            )}
           </div>
-          {sessionCost && (
-            <div className="px-3 py-3 border-t border-[#2a3142]">
-              <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-2">Cost</div>
-              <div className="space-y-1">
-                <div className="flex justify-between text-xs">
-                  <span className="text-[#6b7280]">Total</span>
-                  <span className="text-white font-medium">${sessionCost.total?.toFixed(4)}</span>
-                </div>
-                {sessionCost.lastMsg != null && (
-                  <div className="flex justify-between text-xs">
-                    <span className="text-[#6b7280]">Last msg</span>
-                    <span className="text-[#9ca3af]">${sessionCost.lastMsg?.toFixed(4)}</span>
-                  </div>
-                )}
-                {sessionCost.msgCount != null && (
-                  <div className="flex justify-between text-xs">
-                    <span className="text-[#6b7280]">Messages</span>
-                    <span className="text-[#9ca3af]">{sessionCost.msgCount}</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-          <div className="px-3 py-3 border-t border-[#2a3142]">
+          <div className="px-3 py-3">
             <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-1">Key</div>
-            <div className="text-[10px] text-[#4b5563] font-mono break-all">{sessionKey}</div>
+            <div className="text-xs text-[#4b5563] font-mono break-all">{sessionKey}</div>
           </div>
         </div>
       )}

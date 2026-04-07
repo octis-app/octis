@@ -1,87 +1,72 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
+// --- Device identity helpers (Web Crypto) ---
+
+async function generateDeviceKey() {
+  const keyPair = await crypto.subtle.generateKey(
+    { name: 'Ed25519' },
+    true,
+    ['sign', 'verify']
+  )
+  const pubKeyRaw = await crypto.subtle.exportKey('spki', keyPair.publicKey)
+  const pubKeyB64 = btoa(String.fromCharCode(...new Uint8Array(pubKeyRaw)))
+
+  // Device ID = sha256 of public key (hex, first 32 chars)
+  const hash = await crypto.subtle.digest('SHA-256', pubKeyRaw)
+  const deviceId = Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32)
+
+  return { keyPair, pubKeyB64, deviceId }
+}
+
+async function signChallenge(privateKey, payload) {
+  const encoded = new TextEncoder().encode(payload)
+  const sigBuf = await crypto.subtle.sign({ name: 'Ed25519' }, privateKey, encoded)
+  return btoa(String.fromCharCode(...new Uint8Array(sigBuf)))
+}
+
+// Persist device identity across sessions
+let _deviceCache = null
+async function getOrCreateDevice() {
+  if (_deviceCache) return _deviceCache
+  const stored = localStorage.getItem('octis-device')
+  if (stored) {
+    try {
+      const d = JSON.parse(stored)
+      // Re-import the key
+      const privRaw = Uint8Array.from(atob(d.privKeyB64), c => c.charCodeAt(0))
+      const pubRaw = Uint8Array.from(atob(d.pubKeyB64), c => c.charCodeAt(0))
+      const privateKey = await crypto.subtle.importKey('pkcs8', privRaw, { name: 'Ed25519' }, false, ['sign'])
+      _deviceCache = { privateKey, pubKeyB64: d.pubKeyB64, deviceId: d.deviceId }
+      return _deviceCache
+    } catch (e) {
+      console.warn('Failed to restore device key, generating new one', e)
+    }
+  }
+
+  // Generate new
+  const { keyPair, pubKeyB64, deviceId } = await generateDeviceKey()
+  const privRaw = await crypto.subtle.exportKey('pkcs8', keyPair.privateKey)
+  const privKeyB64 = btoa(String.fromCharCode(...new Uint8Array(privRaw)))
+  localStorage.setItem('octis-device', JSON.stringify({ pubKeyB64, privKeyB64, deviceId }))
+  _deviceCache = { privateKey: keyPair.privateKey, pubKeyB64, deviceId }
+  return _deviceCache
+}
+
 // Shared message bus for gateway events
 const listeners = new Set()
 const emit = (msg) => listeners.forEach(fn => fn(msg))
 
-// ── Background name prefetch ──────────────────────────────────────────────────
-// Fetch minimal history for sessions that don't have a name yet.
-// Batched with a small delay to avoid hammering the gateway.
-let prefetchQueue = []
-let prefetchTimer = null
-
-function resolveContentStatic(c) {
-  if (!c) return ''
-  if (typeof c === 'string') return c
-  if (Array.isArray(c)) return c.map(x => typeof x === 'string' ? x : x?.text ?? '').join('')
-  return c?.text ?? ''
-}
-
-function extractNameFromMessages(msgs) {
-  // Try session card topic first
-  const card = msgs.find(m => m.role === 'assistant' && resolveContentStatic(m.content)?.includes('📋'))
-  if (card) {
-    const text = resolveContentStatic(card.content)
-    const match = text.match(/📋\s+\*?\*?(.+?)\*?\*?[\n\r]/)
-    if (match) return match[1].replace(/[*[\]]/g, '').trim()
-  }
-  // Try first user message
-  const firstUser = msgs.find(m => m.role === 'user')
-  if (firstUser) {
-    const text = resolveContentStatic(firstUser.content)
-    if (text) return text.length <= 60 ? text : text.slice(0, 57) + '…'
-  }
-  return null
-}
-
-export function prefetchSessionNames(sessions, send) {
-  const { displayNameOverrides, sessionCards } = useSessionStore.getState()
-  // Queue sessions that don't have a name yet (not in overrides, or name === key)
-  const toFetch = sessions.filter(s => {
-    const override = displayNameOverrides[s.key]
-    const hasName = override && override !== s.key
-    return !hasName
-  }).slice(0, 30) // cap at 30 to avoid overload
-
-  if (toFetch.length === 0) return
-
-  // Stagger requests: 200ms apart to avoid hammering gateway
-  toFetch.forEach((session, i) => {
-    setTimeout(() => {
-      send({
-        type: 'req',
-        id: `prefetch-${session.key}`,
-        method: 'chat.history',
-        params: { sessionKey: session.key, limit: 20 }
-      })
-    }, i * 200)
-  })
-}
-// ────────────────────────────────────────────────────────────────────────────
-
-// Default API server URL (Octis VPS — for costs/memory HTTP endpoints)
-const DEFAULT_API = import.meta.env.VITE_API_URL || 'https://octis.duckdns.org/api'
-// Gateway URL for WebSocket chat
-const DEFAULT_GW = import.meta.env.VITE_GW_URL || 'wss://octis.duckdns.org/ws'
-const DEFAULT_GW_TOKEN = import.meta.env.VITE_GW_TOKEN || '8UJBwudjSyOifNfPltG0Nedqn1w5UcmTY9abYqGrAcY'
-const DEFAULT_API_TOKEN = import.meta.env.VITE_OCTIS_TOKEN || 'octis-yumi-2026'
-
-// Bump this version whenever env defaults change — forces localStorage reset for all users
-const STORE_VERSION = 2
-
 export const useGatewayStore = create(
   persist(
     (set, get) => ({
-      apiUrl: DEFAULT_API,
-      gatewayUrl: DEFAULT_GW,
-      gatewayToken: DEFAULT_GW_TOKEN,
-      apiToken: DEFAULT_API_TOKEN,
+      gatewayUrl: import.meta.env.VITE_GATEWAY_URL || '',
+      gatewayToken: '',
       connected: false,
       ws: null,
       pendingRequests: {},
 
-      setCredentials: (gatewayUrl, gatewayToken) => set({ gatewayUrl, gatewayToken }),
+      setCredentials: (url, token) => set({ gatewayUrl: url, gatewayToken: token }),
       setConnected: (connected) => set({ connected }),
 
       subscribe: (fn) => {
@@ -94,42 +79,62 @@ export const useGatewayStore = create(
         if (ws) ws.close()
         if (!gatewayUrl) return
 
-        const socket = new WebSocket(gatewayUrl)
+        const wsUrl = gatewayUrl.startsWith('http') ? gatewayUrl.replace(/^http/, 'ws') : gatewayUrl
+        const socket = new WebSocket(wsUrl)
 
         socket.onopen = () => {
-          // Send connect handshake after receiving challenge
-          setTimeout(() => {
-            socket.send(JSON.stringify({
-              type: 'req', id: 'octis-connect', method: 'connect',
-              params: {
-                minProtocol: 3, maxProtocol: 3,
-                client: { id: 'openclaw-control-ui', version: '0.1.0', platform: 'web', mode: 'ui' },
-                role: 'operator',
-                scopes: ['operator.read', 'operator.write'],
-                caps: [], commands: [], permissions: {},
-                auth: { token: gatewayToken },
-                locale: 'en-US',
-                userAgent: 'octis/0.1.0',
-              }
-            }))
-          }, 50)
+          // Wait for challenge — don't send anything yet
+          console.log('[octis] WS open, waiting for challenge...')
         }
 
-        socket.onmessage = (event) => {
+        socket.onmessage = async (event) => {
           try {
             const msg = JSON.parse(event.data)
             get().handleMessage(msg)
             emit(msg)
-          } catch {}
+
+            // Handle challenge-response handshake
+            // No device identity sent — gateway runs with dangerouslyDisableDeviceAuth
+            // so any stale device key in localStorage would cause device-id-mismatch rejections
+            if (msg.type === 'event' && msg.event === 'connect.challenge') {
+              const token = get().gatewayToken
+              socket.send(JSON.stringify({
+                type: 'req',
+                id: 'octis-connect',
+                method: 'connect',
+                params: {
+                  minProtocol: 3,
+                  maxProtocol: 3,
+                  client: {
+                    id: 'openclaw-control-ui',
+                    version: '0.1.0',
+                    platform: 'web',
+                    mode: 'ui',
+                  },
+                  role: 'operator',
+                  scopes: ['operator.read', 'operator.write'],
+                  caps: [],
+                  commands: [],
+                  permissions: {},
+                  auth: { token },
+                  locale: navigator.language || 'en-US',
+                  userAgent: 'octis/0.1.0',
+                },
+              }))
+              console.log('[octis] Sent connect (token-only auth)')
+            }
+          } catch (e) {
+            console.warn('[octis] Failed to parse message', e)
+          }
         }
 
-        socket.onclose = () => {
+        socket.onclose = (e) => {
+          console.log('[octis] WS closed:', e.code, e.reason)
           set({ connected: false, ws: null })
         }
-
-        socket.onerror = () => {
-          set({ connected: false, ws: null })
-          window.dispatchEvent(new CustomEvent('octis:gateway-error'))
+        socket.onerror = (e) => {
+          console.warn('[octis] WS error', e)
+          set({ connected: false })
         }
 
         set({ ws: socket })
@@ -151,224 +156,178 @@ export const useGatewayStore = create(
       },
 
       handleMessage: (msg) => {
-        // Connect response — gateway returns res with payload.type === 'hello-ok'
-        if (msg.type === 'res' && msg.id === 'octis-connect' && msg.ok) {
-          set({ connected: true })
-          useGatewayStore.getState().send({ type: 'req', id: `sl-boot-${Date.now()}`, method: 'sessions.list', params: {} })
-        }
-        // Sessions list result — payload has .sessions array
-        if (msg.type === 'res' && msg.ok && Array.isArray(msg.payload?.sessions)) {
-          useSessionStore.getState().setSessions(msg.payload.sessions)
-          // Background prefetch names for sessions we haven't opened yet
-          prefetchSessionNames(msg.payload.sessions, get().send)
-        }
-        // sessions.changed event
-        if (msg.type === 'event' && msg.event === 'sessions.changed') {
-          const sessions = msg.payload?.sessions
-          if (Array.isArray(sessions)) {
-            useSessionStore.getState().setSessions(sessions)
-            prefetchSessionNames(sessions, get().send)
-          }
-        }
-        // Background prefetch history responses — extract name + session card
-        if (msg.type === 'res' && msg.ok && msg.id?.startsWith('prefetch-')) {
-          const sessionKey = msg.id.replace('prefetch-', '')
-          const msgs = msg.payload?.messages ?? []
-          if (msgs.length > 0) {
-            const sessionStore = useSessionStore.getState()
-            // Only set name if not already overridden by user
-            const existing = sessionStore.displayNameOverrides[sessionKey]
-            const session = sessionStore.sessions.find(s => s.key === sessionKey)
-            const isDefault = !existing || existing === sessionKey
-            if (isDefault) {
-              const name = extractNameFromMessages(msgs)
-              if (name) sessionStore.setDisplayNameOverride(sessionKey, name)
-            }
-            // Always cache session card if found
-            const card = msgs.find(m => m.role === 'assistant' && resolveContentStatic(m.content)?.includes('📋'))
-            if (card && !sessionStore.sessionCards[sessionKey]) {
-              sessionStore.setSessionCard(sessionKey, resolveContentStatic(card.content).split('\n').slice(0, 8).join('\n'))
-            }
-            // Update message count
-            const realMsgs = msgs.filter(m => m.role === 'user' || m.role === 'assistant')
-            sessionStore.setMessageCount(sessionKey, realMsgs.length)
+        // Connect response
+        if (msg.type === 'res' && msg.id === 'octis-connect') {
+          if (msg.ok) {
+            console.log('[octis] Connected ✅', msg.payload)
+            set({ connected: true })
+            useSessionStore.getState().setSessions([])
+            // Request sessions list
+            const { ws } = useGatewayStore.getState()
+            if (ws) ws.send(JSON.stringify({ type: 'req', id: 'sessions-list-init', method: 'sessions.list', params: {} }))
+          } else {
+            console.error('[octis] Auth failed:', msg.error)
+            set({ connected: false })
           }
         }
 
-        // Chat activity tracking
-        if (msg.type === 'event') {
-          const sk = msg.payload?.sessionKey || msg.sessionKey
-          if (sk) useSessionStore.getState().touchSession(sk)
+        if (msg.type === 'res' && (msg.id === 'sessions-list-init' || msg.id === 'sessions-list')) {
+          const raw = msg.payload?.sessions || []
+          // Normalize: gateway uses sessionKey, our UI uses .key
+          const sessions = raw.map(s => ({ ...s, key: s.key || s.sessionKey }))
+          useSessionStore.getState().setSessions(sessions)
+        }
+
+        // Also handle the old event-based sessions list
+        if (msg.type === 'sessions.list.result') {
+          const raw = msg.sessions || []
+          const sessions = raw.map(s => ({ ...s, key: s.key || s.sessionKey }))
+          useSessionStore.getState().setSessions(sessions)
+        }
+
+        // Track streaming + last role for status indicators
+        if (msg.type === 'event' && msg.event === 'chat' && msg.payload?.sessionKey) {
+          const sk = msg.payload.sessionKey
+          const role = msg.payload.role
+          if (role === 'assistant') {
+            useSessionStore.getState().markStreaming(sk)
+          } else if (role === 'user') {
+            useSessionStore.getState().setLastRole(sk, 'user')
+          }
+          useSessionStore.getState().touchSession(sk)
+        }
+        if (msg.type === 'chat' && msg.sessionKey) {
+          const sk = msg.sessionKey
+          const role = msg.role
+          if (role === 'assistant') {
+            useSessionStore.getState().markStreaming(sk)
+          } else if (role === 'user') {
+            useSessionStore.getState().setLastRole(sk, 'user')
+          }
+          useSessionStore.getState().touchSession(sk)
         }
       },
     }),
     {
       name: 'octis-gateway',
-      version: STORE_VERSION,
-      // When version bumps, reset stored credentials to current env defaults
-      migrate: (stored, fromVersion) => {
-        return {
-          ...stored,
-          gatewayUrl: DEFAULT_GW,
-          gatewayToken: DEFAULT_GW_TOKEN,
-          apiUrl: DEFAULT_API,
-          apiToken: DEFAULT_API_TOKEN,
-        }
-      },
-      partialize: (s) => ({ apiUrl: s.apiUrl, apiToken: s.apiToken, gatewayUrl: s.gatewayUrl, gatewayToken: s.gatewayToken })
+      partialize: (s) => ({ gatewayUrl: s.gatewayUrl, gatewayToken: s.gatewayToken })
     }
   )
 )
 
-// ── Project classification ──────────────────────────────────────────────────
-// Rules: checked in order, first match wins. Key and label are both searched.
-// Add/edit rules here — no code changes needed elsewhere.
-export const PROJECT_RULES = [
-  { project: 'Octis',        patterns: [/octis/i] },
-  { project: 'Sage',         patterns: [/sage/i, /intacct/i, /billing/i, /invoice/i, /facture/i] },
-  { project: 'BS Migration', patterns: [/bs.migr/i, /building.*stack/i, /stack.*build/i, /buildium/i, /bs_build/i] },
-  { project: 'Loan System',  patterns: [/loan/i, /pr[eê]t/i, /directus/i] },
-  { project: 'Google Drive', patterns: [/drive/i, /gdrive/i, /gcp/i] },
-  { project: 'Deal Analyzer',patterns: [/centurion/i, /centris/i, /deal/i, /zipplex/i] },
-  { project: 'Beatimo Ops',  patterns: [/nexus/i, /beatimo/i, /billing/i, /monday/i] },
-  { project: 'Infra',        patterns: [/infra/i, /nginx/i, /vm\b/i, /vps/i, /docker/i, /cron/i, /deploy/i] },
-]
-
-export function classifySession(session) {
-  // Respect manually assigned project
-  if (session.project) return session.project
-  const haystack = [session.displayName, session.label, session.key].filter(Boolean).join(' ')
-  for (const rule of PROJECT_RULES) {
-    if (rule.patterns.some(p => p.test(haystack))) return rule.project
-  }
-  return 'General'
-}
-
-export function timeAgo(ts) {
-  if (!ts) return ''
-  const age = Date.now() - (typeof ts === 'number' ? ts : new Date(ts).getTime())
-  if (age < 60_000) return 'just now'
-  if (age < 3_600_000) return `${Math.floor(age / 60_000)}m ago`
-  if (age < 86_400_000) return `${Math.floor(age / 3_600_000)}h ago`
-  if (age < 7 * 86_400_000) return `${Math.floor(age / 86_400_000)}d ago`
-  return `${Math.floor(age / (7 * 86_400_000))}w ago`
-}
-// ────────────────────────────────────────────────────────────────────────────
-
-export const useSessionStore = create(
+// Persisted project tags: { [sessionKey]: { project: string, card: string } }
+export const useProjectStore = create(
   persist(
     (set, get) => ({
-      sessions: [],
-      sessionActivity: {},
-      activePanes: [null, null, null, null, null],
-      paneCount: 2,
-      // Manual project overrides: { [sessionKey]: projectName }
-      projectOverrides: {},
-      // Collapsed project folders: Set serialised as array
-      collapsedProjects: [],
+      tags: {}, // { [sessionKey]: { project: string, card: string } }
 
-      displayNameOverrides: {},
-      // Task status per session: 'todo' | 'doing' | 'done' | 'backlog' | 'archived'
-      sessionStatuses: {},
-      // Message counts per session (loaded from history)
-      messageCounts: {},
-
-      setDisplayNameOverride: (sessionKey, name) => {
-        set(s => ({ displayNameOverrides: { ...s.displayNameOverrides, [sessionKey]: name } }))
+      setTag: (sessionKey, project) => {
+        set(s => ({ tags: { ...s.tags, [sessionKey]: { ...(s.tags[sessionKey] || {}), project } } }))
       },
 
-      getDisplayName: (session) => {
-        const overrides = get().displayNameOverrides
-        if (overrides[session?.key]) return overrides[session.key]
-        return session.displayName || session.label || session.key
+      setCard: (sessionKey, card) => {
+        set(s => ({ tags: { ...s.tags, [sessionKey]: { ...(s.tags[sessionKey] || {}), card } } }))
       },
 
-      setSessionStatus: (sessionKey, status) => {
-        set(s => ({ sessionStatuses: { ...s.sessionStatuses, [sessionKey]: status } }))
-      },
+      getTag: (sessionKey) => get().tags[sessionKey] || {},
 
-      getSessionStatus: (sessionKey) => {
-        return get().sessionStatuses[sessionKey] || 'todo'
-      },
-
-      setMessageCount: (sessionKey, count) => {
-        set(s => ({ messageCounts: { ...s.messageCounts, [sessionKey]: count } }))
-      },
-
-      // Session cards keyed by sessionKey — populated when history loads
-      sessionCards: {},
-      setSessionCard: (sessionKey, cardText) => {
-        set(s => ({ sessionCards: { ...s.sessionCards, [sessionKey]: cardText } }))
-      },
-
-      setSessions: (sessions) => set({ sessions }),
-
-      touchSession: (sessionKey) => {
-        set(s => ({
-          sessionActivity: { ...s.sessionActivity, [sessionKey]: Date.now() }
-        }))
-      },
-
-      setProjectOverride: (sessionKey, project) => {
-        set(s => ({ projectOverrides: { ...s.projectOverrides, [sessionKey]: project } }))
-      },
-
-      toggleCollapsed: (project) => {
-        set(s => {
-          const next = s.collapsedProjects.includes(project)
-            ? s.collapsedProjects.filter(p => p !== project)
-            : [...s.collapsedProjects, project]
-          return { collapsedProjects: next }
+      getProjects: () => {
+        const all = get().tags
+        const projects = {}
+        Object.entries(all).forEach(([sk, meta]) => {
+          if (meta.project) {
+            if (!projects[meta.project]) projects[meta.project] = []
+            projects[meta.project].push(sk)
+          }
         })
-      },
-
-      getStatus: (session) => {
-        if (session.status === 'active') return 'active'
-        if (session.status === 'idle') return 'idle'
-        if (session.status === 'dead' || session.status === 'archived') return 'dead'
-        const activity = get().sessionActivity[session.key]
-        const last = activity || session.updatedAt || session.lastActivity || session.updated_at
-        if (!last) return 'idle'
-        const age = Date.now() - (typeof last === 'number' ? last : new Date(last).getTime())
-        if (age < 60 * 60 * 1000) return 'active'
-        if (age < 24 * 60 * 60 * 1000) return 'idle'
-        return 'dead'
-      },
-
-      getLastActive: (session) => {
-        const activity = get().sessionActivity[session.key]
-        return activity || session.updatedAt || session.lastActivity || session.updated_at || null
-      },
-
-      getProject: (session) => {
-        const overrides = get().projectOverrides
-        if (overrides[session.key]) return overrides[session.key]
-        return classifySession(session)
-      },
-
-      pinToPane: (paneIndex, sessionKey) => {
-        const panes = [...get().activePanes]
-        panes[paneIndex] = sessionKey
-        set({ activePanes: panes })
-      },
-
-      setPaneCount: (n) => set({ paneCount: Math.min(5, Math.max(1, n)) }),
-
-      getActiveCount: () => {
-        const { sessions, getStatus } = get()
-        return sessions.filter(s => getStatus(s) === 'active').length
+        return projects // { projectName: [sessionKey, ...] }
       },
     }),
-    {
-      name: 'octis-sessions',
-      partialize: (s) => ({
-        activePanes: s.activePanes,
-        paneCount: s.paneCount,
-        projectOverrides: s.projectOverrides,
-        collapsedProjects: s.collapsedProjects,
-        displayNameOverrides: s.displayNameOverrides,
-        sessionStatuses: s.sessionStatuses,
-      })
-    }
+    { name: 'octis-projects' }
   )
 )
+
+export const useSessionStore = create((set, get) => ({
+  sessions: [],
+  sessionActivity: {},
+  sessionMeta: {},    // { [sessionKey]: { lastRole: 'user'|'assistant', isStreaming: bool } }
+  streamingTimers: {},
+  activePanes: [null, null, null, null, null],
+  paneCount: 2,
+
+  setSessions: (sessions) => set({ sessions }),
+
+  touchSession: (sessionKey) => {
+    set(s => ({
+      sessionActivity: { ...s.sessionActivity, [sessionKey]: Date.now() }
+    }))
+  },
+
+  setLastRole: (sessionKey, role) => {
+    set(s => ({
+      sessionMeta: {
+        ...s.sessionMeta,
+        [sessionKey]: { ...(s.sessionMeta[sessionKey] || {}), lastRole: role, isStreaming: false }
+      }
+    }))
+  },
+
+  markStreaming: (sessionKey) => {
+    // Clear any existing debounce timer
+    const existing = get().streamingTimers[sessionKey]
+    if (existing) clearTimeout(existing)
+
+    const timer = setTimeout(() => {
+      // Streaming stopped — keep lastRole as 'assistant' (needs-you)
+      set(s => ({
+        sessionMeta: {
+          ...s.sessionMeta,
+          [sessionKey]: { ...(s.sessionMeta[sessionKey] || {}), isStreaming: false }
+        },
+        streamingTimers: Object.fromEntries(
+          Object.entries(s.streamingTimers).filter(([k]) => k !== sessionKey)
+        )
+      }))
+    }, 4000)
+
+    set(s => ({
+      streamingTimers: { ...s.streamingTimers, [sessionKey]: timer },
+      sessionMeta: {
+        ...s.sessionMeta,
+        [sessionKey]: { ...(s.sessionMeta[sessionKey] || {}), isStreaming: true, lastRole: 'assistant' }
+      }
+    }))
+  },
+
+  getStatus: (session) => {
+    const key = session.key || session.sessionKey
+    const meta = get().sessionMeta[key] || {}
+
+    if (meta.isStreaming) return 'working'
+    if (meta.lastRole === 'assistant') return 'needs-you'
+    const activity = get().sessionActivity[key]
+    const last = activity || session.updatedAt || session.lastActivity || session.updated_at
+    if (!last) return 'quiet'
+    const age = Date.now() - (typeof last === 'number' ? last : new Date(last).getTime())
+    if (age < 24 * 60 * 60 * 1000) return 'active'
+    return 'quiet'
+  },
+
+  // Project tagging — stored locally (persisted via a separate store below)
+  setSessionProject: (sessionKey, projectTag) => {
+    useProjectStore.getState().setTag(sessionKey, projectTag)
+  },
+
+  pinToPane: (paneIndex, sessionKey) => {
+    const panes = [...get().activePanes]
+    panes[paneIndex] = sessionKey
+    set({ activePanes: panes })
+  },
+
+  setPaneCount: (n) => set({ paneCount: Math.min(5, Math.max(1, n)) }),
+
+  getActiveCount: () => {
+    const { sessions, getStatus } = get()
+    return sessions.filter(s => getStatus(s) === 'active').length
+  },
+}))
