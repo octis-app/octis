@@ -1,0 +1,20 @@
+[Unit]
+Description=Octis API + Gateway Proxy
+After=network.target openclaw.service
+
+[Service]
+Type=simple
+User=node
+WorkingDirectory=/home/node/.openclaw/workspace/octis
+Environment=OCTIS_API_PORT=3747
+Environment=OPENCLAW_GATEWAY_URL=ws://127.0.0.1:18789
+Environment=OPENCLAW_GATEWAY_TOKEN=639c6816ff74eb188727ff5ff62423be0de9b6e1f62862e1f6f6207970c284b5
+Environment=OCTIS_API_TOKEN=octis-yumi-2026
+Environment=OCTIS_WORKSPACE=/home/node/.openclaw/workspace
+Environment=PG_PASSWORD=M$fxV6bM!wQRSn
+ExecStart=/usr/local/bin/node server/index.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

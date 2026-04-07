@@ -13,4 +13,21 @@
 }
 
 * { box-sizing: border-box; }
-body { margin: 0; font-family: 'Inter', system-ui, sans-serif; background: var(--bg-base); color: var(--text-primary); }
+body {
+  margin: 0;
+  font-family: 'Inter', system-ui, sans-serif;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  /* Prevent iOS bounce scroll */
+  overscroll-behavior: none;
+}
+
+/* Safe area utilities */
+.pt-safe { padding-top: env(safe-area-inset-top); }
+.pb-safe { padding-bottom: env(safe-area-inset-bottom); }
+
+/* Prevent text size adjustment on iOS */
+html { -webkit-text-size-adjust: 100%; }
+
+/* Smooth scrolling */
+.overflow-y-auto { -webkit-overflow-scrolling: touch; }
