@@ -98,6 +98,20 @@ function ChatMarkdown({ text }) {
   return <div className="space-y-0">{elements}</div>
 }
 
+// Heartbeat detection helpers
+function isHeartbeatTrigger(content) {
+  const text = typeof content === 'string' ? content : (Array.isArray(content) ? content.map(b => b.text || '').join('') : '')
+  return text.includes('Read HEARTBEAT.md') || text.trim().toLowerCase() === 'heartbeat'
+}
+function isHeartbeatResponse(content) {
+  const text = typeof content === 'string' ? content : (Array.isArray(content) ? content.map(b => b.text || '').join('') : '')
+  return text.trim() === 'HEARTBEAT_OK' || text.trim().startsWith('HEARTBEAT_OK\n')
+}
+function isHeartbeatMsg(msg) {
+  return (msg.role === 'user' && isHeartbeatTrigger(msg.content)) ||
+         (msg.role === 'assistant' && isHeartbeatResponse(msg.content))
+}
+
 export default function ChatPane({ sessionKey, paneIndex, onClose }) {
   const { send, ws } = useGatewayStore()
   const { setSessions, sessions, setLastRole, markStreaming } = useSessionStore()
@@ -107,6 +121,7 @@ export default function ChatPane({ sessionKey, paneIndex, onClose }) {
   const [sessionCard, setSessionCard] = useState(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [autoRenamed, setAutoRenamed] = useState(false)
+  const [lastHeartbeat, setLastHeartbeat] = useState(null) // { ts: Date, ok: bool }
   const bottomRef = useRef(null)
 
   useEffect(() => {
@@ -124,6 +139,9 @@ export default function ChatPane({ sessionKey, paneIndex, onClose }) {
         // Gateway response: {type:'res', id:reqId, ok:true, payload:{messages:[...]}}
         if (msg.type === 'res' && msg.id === reqId && msg.ok) {
           const msgs = msg.payload?.messages || []
+          // Find last HEARTBEAT_OK in history
+          const lastHB = [...msgs].reverse().find(m => m.role === 'assistant' && isHeartbeatResponse(m.content))
+          if (lastHB) setLastHeartbeat({ ts: new Date(lastHB.ts || lastHB.created_at || Date.now()), ok: true })
           setMessages(msgs)
           const card = msgs.find(m => m.role === 'assistant')
           if (card) setSessionCard(extractText(card.content).slice(0, 300))
@@ -143,6 +161,10 @@ export default function ChatPane({ sessionKey, paneIndex, onClose }) {
         // Streaming chat events for this session
         if (msg.type === 'event' && msg.event === 'chat' && msg.payload?.sessionKey === sessionKey) {
           const chatMsg = msg.payload
+          // Track heartbeat state from live events
+          if (chatMsg.role === 'assistant' && isHeartbeatResponse(chatMsg.content)) {
+            setLastHeartbeat({ ts: new Date(), ok: true })
+          }
           setMessages(prev => {
             const idx = prev.findIndex(m => m.id === chatMsg.id)
             if (idx >= 0) {
@@ -268,6 +290,14 @@ export default function ChatPane({ sessionKey, paneIndex, onClose }) {
         {/* Pane header */}
         <div className="flex items-center gap-1 px-3 py-2.5 border-b border-[#2a3142] bg-[#181c24] shrink-0">
           <span className="text-sm font-medium text-white truncate flex-1" title={sessionKey}>{displayName}</span>
+          {lastHeartbeat && (
+            <span
+              title={`Last heartbeat: ${lastHeartbeat.ts.toLocaleTimeString()}`}
+              className="text-xs px-1"
+            >
+              {lastHeartbeat.ok ? '❤️' : '🖤'}
+            </span>
+          )}
           <button onClick={handleSave} title="Save checkpoint to memory" className="text-xs text-[#6b7280] hover:text-green-400 px-1.5 py-1 rounded hover:bg-[#2a3142] transition-colors">💾</button>
           <button onClick={handleArchive} title="Save & archive session" className="text-xs text-[#6b7280] hover:text-yellow-400 px-1.5 py-1 rounded hover:bg-[#2a3142] transition-colors">📦</button>
           <button onClick={() => setSidebarOpen(s => !s)} className="text-xs text-[#6b7280] hover:text-white px-1.5 py-1 rounded hover:bg-[#2a3142] transition-colors">
@@ -278,7 +308,7 @@ export default function ChatPane({ sessionKey, paneIndex, onClose }) {
 
         {/* Messages */}
         <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
-          {messages.map((msg, i) => (
+          {messages.filter(msg => !isHeartbeatMsg(msg)).map((msg, i) => (
             <div key={msg.id || i} className={`flex gap-2 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
               <div className={`max-w-[85%] px-3 py-2 rounded-xl ${
                 msg.role === 'user'
