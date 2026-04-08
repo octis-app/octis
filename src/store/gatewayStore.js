@@ -62,11 +62,13 @@ export const useGatewayStore = create(
     (set, get) => ({
       gatewayUrl: import.meta.env.VITE_GATEWAY_URL || '',
       gatewayToken: import.meta.env.VITE_GATEWAY_TOKEN || '',
+      agentId: '',   // filter sessions to this agent (e.g. 'main' for Byte)
       connected: false,
       ws: null,
       pendingRequests: {},
 
-      setCredentials: (url, token) => set({ gatewayUrl: url, gatewayToken: token }),
+      setCredentials: (url, token, agentId) => set({ gatewayUrl: url, gatewayToken: token, agentId: agentId || '' }),
+      setAgentId: (agentId) => set({ agentId: agentId || '' }),
       setConnected: (connected) => set({ connected }),
 
       subscribe: (fn) => {
@@ -175,9 +177,10 @@ export const useGatewayStore = create(
             console.log('[octis] Connected ✅', msg.payload)
             set({ connected: true })
             useSessionStore.getState().setSessions([])
-            // Request sessions list
-            const { ws } = useGatewayStore.getState()
-            if (ws) ws.send(JSON.stringify({ type: 'req', id: 'sessions-list-init', method: 'sessions.list', params: {} }))
+            // Request sessions list — filter by agentId if set
+            const { ws, agentId } = useGatewayStore.getState()
+            const listParams = agentId ? { agentId } : {}
+            if (ws) ws.send(JSON.stringify({ type: 'req', id: 'sessions-list-init', method: 'sessions.list', params: listParams }))
           } else {
             console.error('[octis] Auth failed:', msg.error)
             set({ connected: false })
@@ -238,7 +241,7 @@ export const useGatewayStore = create(
     }),
     {
       name: 'octis-gateway',
-      partialize: (s) => ({ gatewayUrl: s.gatewayUrl, gatewayToken: s.gatewayToken })
+      partialize: (s) => ({ gatewayUrl: s.gatewayUrl, gatewayToken: s.gatewayToken, agentId: s.agentId })
     }
   )
 )

@@ -46,7 +46,7 @@ export default function App() {
 }
 
 function AuthenticatedApp({ getToken }) {
-  const { connected, gatewayUrl, gatewayToken, connect, setCredentials } = useGatewayStore()
+  const { connected, gatewayUrl, gatewayToken, agentId, connect, setCredentials } = useGatewayStore()
   const { activePanes, paneCount, setPaneCount, pinToPane } = useSessionStore()
   const { labels, setLabel } = useLabelStore()
   const [showConnect, setShowConnect] = useState(false)
@@ -58,6 +58,7 @@ function AuthenticatedApp({ getToken }) {
   useEffect(() => {
     if (gatewayUrl && gatewayToken) {
       // Already have credentials (e.g. from localStorage) — just connect
+      // agentId is also persisted, so it will filter automatically
       if (!connected) connect()
       return
     }
@@ -69,7 +70,7 @@ function AuthenticatedApp({ getToken }) {
         })
         if (!res.ok) throw new Error(`Config fetch failed: ${res.status}`)
         const data = await res.json()
-        setCredentials(data.url, data.token)
+        setCredentials(data.url, data.token, data.agentId)
         connect()
       } catch (e) {
         console.error('[octis] Failed to fetch gateway config:', e)
