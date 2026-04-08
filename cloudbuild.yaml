@@ -24,6 +24,7 @@ steps:
       - '--region=northamerica-northeast1'
       - '--platform=managed'
       - '--allow-unauthenticated'
+      - '--set-secrets=CLERK_SECRET_KEY=octis-clerk-secret:latest,GATEWAY_TOKEN=octis-gateway-token:latest,PG_PASSWORD=octis-pg-password:latest,GATEWAY_URL=octis-gateway-url:latest'
 
 images:
   - 'northamerica-northeast1-docker.pkg.dev/igneous-aleph-468015-d8/octis/octis:latest'

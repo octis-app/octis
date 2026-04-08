@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useSessionStore, useGatewayStore, useProjectStore } from '../store/gatewayStore'
+import { useSessionStore, useGatewayStore, useProjectStore, useLabelStore } from '../store/gatewayStore'
 
 const STATUS = {
   working:     { color: '#a855f7', label: 'Working',   dot: 'animate-pulse' },
@@ -52,15 +52,21 @@ function ProjectPicker({ sessionKey, current, onClose }) {
 function SessionItem({ session, isPinned, onPin, onRename, onArchive, onContinue }) {
   const { getStatus } = useSessionStore()
   const { getTag } = useProjectStore()
+  const { getLabel, setLabel: saveLabel } = useLabelStore()
   const status = getStatus(session)
   const tag = getTag(session.key)
   const [showMenu, setShowMenu] = useState(false)
   const [showProjectPicker, setShowProjectPicker] = useState(false)
   const [editing, setEditing] = useState(false)
-  const [label, setLabel] = useState(session.label || session.key)
+  // Use local override first, then gateway label, then key
+  const displayLabel = getLabel(session.key, session.label || session.key)
+  const [label, setLabel] = useState(displayLabel)
 
   const handleRename = () => {
-    if (label.trim()) onRename(session.key, label.trim())
+    if (label.trim()) {
+      saveLabel(session.key, label.trim()) // persist locally
+      onRename(session.key, label.trim())   // also push to gateway
+    }
     setEditing(false)
   }
 
@@ -92,12 +98,12 @@ function SessionItem({ session, isPinned, onPin, onRename, onArchive, onContinue
           />
         ) : (
           <span
-            className="text-sm text-white truncate flex-1 cursor-pointer"
+            className="text-[13px] text-white truncate flex-1 cursor-pointer leading-snug"
             onClick={onPin}
             onDoubleClick={() => setEditing(true)}
-            title="Click to open · Double-click to rename"
+            title={displayLabel}
           >
-            {session.label || session.key}
+            {displayLabel}
           </span>
         )}
 
@@ -265,14 +271,29 @@ export default function Sidebar({ onSettingsClick }) {
     pinToPane(emptyPane >= 0 ? emptyPane : paneCount - 1, newKey)
   }
 
+  const hideHeartbeat = localStorage.getItem('octis-show-heartbeat-sessions') !== 'true'
+  const hideCron = localStorage.getItem('octis-show-cron-sessions') !== 'true'
+
+  const isHeartbeatSession = (s) => {
+    const lbl = (getLabel(s.key, s.label || s.key) || '').toLowerCase()
+    const key = (s.key || '').toLowerCase()
+    return key.includes(':cron:') || lbl.includes('heartbeat') || lbl.startsWith('read heartbeat')
+  }
+  const isCronSession = (s) => {
+    const key = (s.key || '').toLowerCase()
+    return key.includes(':cron:') || key.includes('subagent')
+  }
+
   const filtered = sessions.filter(s => {
+    if (hideHeartbeat && isHeartbeatSession(s)) return false
+    if (hideCron && isCronSession(s)) return false
     const status = getStatus(s)
     if (filter !== 'all' && status !== filter) return false
     if (search) {
       const q = search.toLowerCase()
       const tag = getTag(s.key)
-      return (s.label || s.key).toLowerCase().includes(q) ||
-        (tag.project || '').toLowerCase().includes(q)
+      const lbl = getLabel(s.key, s.label || s.key)
+      return lbl.toLowerCase().includes(q) || (tag.project || '').toLowerCase().includes(q)
     }
     return true
   })
@@ -291,7 +312,7 @@ export default function Sidebar({ onSettingsClick }) {
   const untaggedSessions = sessions.filter(s => !taggedKeys.has(s.key))
 
   return (
-    <aside className="w-60 shrink-0 bg-[#181c24] border-r border-[#2a3142] flex flex-col h-screen">
+    <aside className="w-72 shrink-0 bg-[#181c24] border-r border-[#2a3142] flex flex-col h-screen">
       {/* Header */}
       <div className="px-4 py-3 border-b border-[#2a3142]">
         <div className="flex items-center gap-2 mb-2">

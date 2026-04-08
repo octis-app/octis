@@ -99,17 +99,46 @@ function ChatMarkdown({ text }) {
 }
 
 // Heartbeat detection helpers
+function extractText(content) {
+  if (!content) return ''
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) return content.filter(b => b.type === 'text').map(b => b.text).join('')
+  return String(content)
+}
+
 function isHeartbeatTrigger(content) {
-  const text = typeof content === 'string' ? content : (Array.isArray(content) ? content.map(b => b.text || '').join('') : '')
+  const text = extractText(content)
   return text.includes('Read HEARTBEAT.md') || text.trim().toLowerCase() === 'heartbeat'
 }
 function isHeartbeatResponse(content) {
-  const text = typeof content === 'string' ? content : (Array.isArray(content) ? content.map(b => b.text || '').join('') : '')
+  const text = extractText(content)
   return text.trim() === 'HEARTBEAT_OK' || text.trim().startsWith('HEARTBEAT_OK\n')
 }
 function isHeartbeatMsg(msg) {
   return (msg.role === 'user' && isHeartbeatTrigger(msg.content)) ||
          (msg.role === 'assistant' && isHeartbeatResponse(msg.content))
+}
+
+// Noise detection — tool calls, tool results, system messages, exec output
+function isNoiseMsg(msg) {
+  if (!msg) return false
+  // System-role messages
+  if (msg.role === 'system') return true
+  // Tool call or tool result roles
+  if (msg.role === 'tool' || msg.role === 'toolResult' || msg.role === 'toolCall') return true
+  // Content array containing only tool_use / tool_result blocks (no text)
+  if (Array.isArray(msg.content)) {
+    const hasText = msg.content.some(b => b.type === 'text' && b.text?.trim())
+    const hasToolBlock = msg.content.some(b => b.type === 'tool_use' || b.type === 'tool_result' || b.type === 'toolCall' || b.type === 'toolResult')
+    if (hasToolBlock && !hasText) return true
+  }
+  // Assistant messages that contain ONLY tool calls (no visible text)
+  if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+    const textBlocks = msg.content.filter(b => b.type === 'text')
+    const toolBlocks = msg.content.filter(b => b.type === 'tool_use' || b.type === 'toolCall')
+    if (toolBlocks.length > 0 && textBlocks.every(b => !b.text?.trim())) return true
+  }
+  return false
 }
 
 export default function ChatPane({ sessionKey, paneIndex, onClose }) {
@@ -122,7 +151,16 @@ export default function ChatPane({ sessionKey, paneIndex, onClose }) {
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [autoRenamed, setAutoRenamed] = useState(false)
   const [lastHeartbeat, setLastHeartbeat] = useState(null) // { ts: Date, ok: bool }
+  const [noiseHidden, setNoiseHidden] = useState(() => {
+    try { return localStorage.getItem('octis-noise-hidden') !== 'false' } catch { return true }
+  })
   const bottomRef = useRef(null)
+
+  const toggleNoise = () => setNoiseHidden(v => {
+    const next = !v
+    try { localStorage.setItem('octis-noise-hidden', String(next)) } catch {}
+    return next
+  })
 
   useEffect(() => {
     if (!sessionKey || !ws) return
@@ -146,10 +184,8 @@ export default function ChatPane({ sessionKey, paneIndex, onClose }) {
           const card = msgs.find(m => m.role === 'assistant')
           if (card) setSessionCard(extractText(card.content).slice(0, 300))
           // Set initial status based on last message role
-          if (msgs.length > 0) {
-            const lastMsg = msgs[msgs.length - 1]
-            if (lastMsg.role) setLastRole(sessionKey, lastMsg.role)
-          }
+          // Don't set lastRole from history — only set from live events
+          // (avoids all sessions flipping to 'needs-you' on first open)
           // Auto-extract session card (last 📋 assistant message)
           const cardMsg = [...msgs].reverse().find(m => m.role === 'assistant' && extractText(m.content).includes('📋'))
           if (cardMsg) {
@@ -223,16 +259,6 @@ export default function ChatPane({ sessionKey, paneIndex, onClose }) {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  // Extract plain text from content (handles string or array of blocks)
-  function extractText(content) {
-    if (!content) return ''
-    if (typeof content === 'string') return content
-    if (Array.isArray(content)) {
-      return content.filter(b => b.type === 'text').map(b => b.text).join('')
-    }
-    return String(content)
-  }
-
   function renderContent(content) {
     const text = extractText(content)
     if (!text) return null
@@ -242,22 +268,59 @@ export default function ChatPane({ sessionKey, paneIndex, onClose }) {
   const handleSend = () => {
     if (!input.trim()) return
     const msg = input
-    send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey, message: msg } })
+    const idempotencyKey = `octis-send-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    const reqId = `chat-send-${Date.now()}`
+    const ok = send({
+      type: 'req',
+      id: reqId,
+      method: 'chat.send',
+      params: { sessionKey, message: msg, deliver: false, idempotencyKey },
+    })
+    if (!ok) {
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: '⚠️ Not connected to gateway. Check your connection.',
+        id: `err-${Date.now()}`,
+      }])
+      return
+    }
     setMessages(prev => [...prev, { role: 'user', content: msg, id: Date.now() }])
     setLastRole(sessionKey, 'user')
     setInput('')
+
+    // Listen for gateway ack/error on this request
+    const errorHandler = (event) => {
+      try {
+        const m = JSON.parse(event.data)
+        if (m.type === 'res' && m.id === reqId) {
+          if (!m.ok) {
+            setMessages(prev => [...prev, {
+              role: 'assistant',
+              content: `⚠️ Gateway error: ${m.error?.message || JSON.stringify(m.error)}`,
+              id: `err-${Date.now()}`,
+            }])
+          }
+          ws.removeEventListener('message', errorHandler)
+        }
+      } catch {}
+    }
+    if (ws) ws.addEventListener('message', errorHandler)
+    // Clean up after 10s regardless
+    setTimeout(() => { if (ws) ws.removeEventListener('message', errorHandler) }, 10000)
   }
 
   const handleSave = () => {
     const msg = '💾 checkpoint — save any key decisions, context, or tasks from this session to MEMORY.md and TODOS.md now. One-line ack only.'
-    send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey, message: msg } })
+    const idempotencyKey = `octis-save-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey, message: msg, deliver: false, idempotencyKey } })
     setMessages(prev => [...prev, { role: 'user', content: '💾 Save checkpoint', id: Date.now() }])
   }
 
   const handleArchive = () => {
     if (confirm('Save and archive this session?')) {
       const msg = '💾 Final save — write any remaining decisions, tasks, or context to MEMORY.md and TODOS.md. One-line ack only.'
-      send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey, message: msg } })
+      const idempotencyKey = `octis-archive-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey, message: msg, deliver: false, idempotencyKey } })
       setTimeout(() => {
         send({ type: 'req', id: `sessions-delete-${Date.now()}`, method: 'sessions.delete', params: { sessionKey } })
         setSessions(sessions.filter(s => s.key !== sessionKey))
@@ -298,6 +361,15 @@ export default function ChatPane({ sessionKey, paneIndex, onClose }) {
               {lastHeartbeat.ok ? '❤️' : '🖤'}
             </span>
           )}
+          <button
+            onClick={toggleNoise}
+            title={noiseHidden ? 'Show tool calls & system msgs' : 'Hide tool calls & system msgs'}
+            className={`text-[10px] font-medium px-2 py-0.5 rounded-full border transition-colors shrink-0 ${
+              noiseHidden
+                ? 'bg-[#1e2330] border-[#2a3142] text-[#4b5563]'
+                : 'bg-[#6366f1]/20 border-[#6366f1] text-[#a5b4fc]'
+            }`}
+          >{noiseHidden ? 'chat only' : '+ tools'}</button>
           <button onClick={handleSave} title="Save checkpoint to memory" className="text-xs text-[#6b7280] hover:text-green-400 px-1.5 py-1 rounded hover:bg-[#2a3142] transition-colors">💾</button>
           <button onClick={handleArchive} title="Save & archive session" className="text-xs text-[#6b7280] hover:text-yellow-400 px-1.5 py-1 rounded hover:bg-[#2a3142] transition-colors">📦</button>
           <button onClick={() => setSidebarOpen(s => !s)} className="text-xs text-[#6b7280] hover:text-white px-1.5 py-1 rounded hover:bg-[#2a3142] transition-colors">
@@ -308,7 +380,7 @@ export default function ChatPane({ sessionKey, paneIndex, onClose }) {
 
         {/* Messages */}
         <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
-          {messages.filter(msg => !isHeartbeatMsg(msg)).map((msg, i) => (
+          {messages.filter(msg => !isHeartbeatMsg(msg) && !(noiseHidden && isNoiseMsg(msg))).map((msg, i) => (
             <div key={msg.id || i} className={`flex gap-2 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
               <div className={`max-w-[85%] px-3 py-2 rounded-xl ${
                 msg.role === 'user'

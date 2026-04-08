@@ -44,8 +44,15 @@ export default function MobileFullChat({ session, onBack }) {
 
   const handleSend = () => {
     if (!input.trim() || sending) return
-    send({ type: 'chat.send', sessionKey: session.key, message: input.trim() })
-    setMessages(prev => [...prev, { role: 'user', content: input.trim(), id: Date.now() }])
+    const msg = input.trim()
+    const idempotencyKey = `octis-mobile-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    send({
+      type: 'req',
+      id: `chat-send-${Date.now()}`,
+      method: 'chat.send',
+      params: { sessionKey: session.key, message: msg, deliver: false, idempotencyKey },
+    })
+    setMessages(prev => [...prev, { role: 'user', content: msg, id: Date.now() }])
     setInput('')
     setSending(true)
     setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 50)

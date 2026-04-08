@@ -11,6 +11,8 @@
     "dev:all": "concurrently \"npm run dev\" \"npm run server\""
   },
   "dependencies": {
+    "@clerk/backend": "^3.2.7",
+    "@clerk/clerk-react": "^5.61.4",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "pg": "^8.20.0",

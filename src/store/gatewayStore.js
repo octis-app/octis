@@ -61,7 +61,7 @@ export const useGatewayStore = create(
   persist(
     (set, get) => ({
       gatewayUrl: import.meta.env.VITE_GATEWAY_URL || '',
-      gatewayToken: '',
+      gatewayToken: import.meta.env.VITE_GATEWAY_TOKEN || '',
       connected: false,
       ws: null,
       pendingRequests: {},
@@ -75,9 +75,19 @@ export const useGatewayStore = create(
       },
 
       connect: () => {
-        const { gatewayUrl, gatewayToken, ws } = get()
-        if (ws) ws.close()
+        const { gatewayUrl, gatewayToken, ws: oldWs } = get()
         if (!gatewayUrl) return
+
+        // Close old socket — but don't let its onclose clobber the new connection
+        if (oldWs) {
+          oldWs.onclose = null
+          oldWs.onerror = null
+          oldWs.onmessage = null
+          try { oldWs.close() } catch {}
+        }
+
+        // Reset state before opening new socket
+        set({ connected: false, ws: null })
 
         const wsUrl = gatewayUrl.startsWith('http') ? gatewayUrl.replace(/^http/, 'ws') : gatewayUrl
         const socket = new WebSocket(wsUrl)
@@ -88,14 +98,14 @@ export const useGatewayStore = create(
         }
 
         socket.onmessage = async (event) => {
+          // Ignore messages from a stale socket that was replaced
+          if (get().ws !== socket) return
           try {
             const msg = JSON.parse(event.data)
             get().handleMessage(msg)
             emit(msg)
 
             // Handle challenge-response handshake
-            // No device identity sent — gateway runs with dangerouslyDisableDeviceAuth
-            // so any stale device key in localStorage would cause device-id-mismatch rejections
             if (msg.type === 'event' && msg.event === 'connect.challenge') {
               const token = get().gatewayToken
               socket.send(JSON.stringify({
@@ -129,10 +139,13 @@ export const useGatewayStore = create(
         }
 
         socket.onclose = (e) => {
+          // Only update state if this is still the active socket
+          if (get().ws !== socket) return
           console.log('[octis] WS closed:', e.code, e.reason)
           set({ connected: false, ws: null })
         }
         socket.onerror = (e) => {
+          if (get().ws !== socket) return
           console.warn('[octis] WS error', e)
           set({ connected: false })
         }
@@ -175,6 +188,21 @@ export const useGatewayStore = create(
           const raw = msg.payload?.sessions || []
           // Normalize: gateway uses sessionKey, our UI uses .key
           const sessions = raw.map(s => ({ ...s, key: s.key || s.sessionKey }))
+          // Seed label store: map sessionId (UUID) → gateway key so labels can be found
+          const labelStore = useLabelStore.getState()
+          sessions.forEach(s => {
+            const uuid = s.id || s.sessionId
+            const gKey = s.key
+            if (uuid && gKey && uuid !== gKey) {
+              // If we have a label keyed by UUID, copy it to gateway key
+              const uuidLabel = labelStore.labels[uuid]
+              if (uuidLabel && !labelStore.labels[gKey]) {
+                labelStore.setLabel(gKey, uuidLabel)
+              }
+              // Also store the reverse mapping for future seeding
+              labelStore.setLabel('__uuid__' + gKey, uuid)
+            }
+          })
           useSessionStore.getState().setSessions(sessions)
         }
 
@@ -212,6 +240,18 @@ export const useGatewayStore = create(
       name: 'octis-gateway',
       partialize: (s) => ({ gatewayUrl: s.gatewayUrl, gatewayToken: s.gatewayToken })
     }
+  )
+)
+
+// Persisted label overrides — survive hard refresh
+export const useLabelStore = create(
+  persist(
+    (set, get) => ({
+      labels: {}, // { [sessionKey]: string }
+      setLabel: (sessionKey, label) => set(s => ({ labels: { ...s.labels, [sessionKey]: label } })),
+      getLabel: (sessionKey, fallback) => get().labels[sessionKey] || fallback,
+    }),
+    { name: 'octis-labels' }
   )
 )
 

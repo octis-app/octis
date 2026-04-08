@@ -1,36 +1,42 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useGatewayStore } from '../store/gatewayStore'
 
 export default function ConnectModal({ onClose }) {
   const { gatewayUrl, gatewayToken, setCredentials, connect, connected } = useGatewayStore()
   const [url, setUrl] = useState(gatewayUrl || import.meta.env.VITE_GATEWAY_URL || 'wss://octis.duckdns.org/ws')
-  const [token, setToken] = useState(gatewayToken || '')
+  const [token, setToken] = useState(gatewayToken || import.meta.env.VITE_GATEWAY_TOKEN || '')
   const [status, setStatus] = useState('idle') // idle | connecting | error
   const [errorMsg, setErrorMsg] = useState('')
+  const timeoutRef = useRef(null)
 
   // Watch for successful connection
   useEffect(() => {
     if (status === 'connecting' && connected) {
+      clearTimeout(timeoutRef.current)
       setStatus('idle')
       onClose()
     }
   }, [connected, status])
 
+  // Cleanup timeout on unmount
+  useEffect(() => () => clearTimeout(timeoutRef.current), [])
+
   const handleConnect = () => {
     if (!url.trim()) { setErrorMsg('Gateway URL is required'); setStatus('error'); return }
     if (!token.trim()) { setErrorMsg('Token is required'); setStatus('error'); return }
+    clearTimeout(timeoutRef.current)
     setStatus('connecting')
     setErrorMsg('')
     setCredentials(url, token)
     connect()
 
-    // Timeout fallback — if not connected in 8s, show error
-    setTimeout(() => {
+    // Timeout fallback — cancel if connect succeeds first
+    timeoutRef.current = setTimeout(() => {
       if (!useGatewayStore.getState().connected) {
         setStatus('error')
         setErrorMsg('Connection timed out. Check the URL and token.')
       }
-    }, 8000)
+    }, 10000)
   }
 
   return (
