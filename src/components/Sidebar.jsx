@@ -221,6 +221,7 @@ export default function Sidebar({ onSettingsClick }) {
   const { sessions, getStatus, pinToPane, activePanes, paneCount, setSessions } = useSessionStore()
   const { connected, send } = useGatewayStore()
   const { getTag, setCard, getProjects } = useProjectStore()
+  const { getLabel } = useLabelStore()
   const [sidebarView, setSidebarView] = useState('sessions') // 'sessions' | 'projects'
   const [filter, setFilter] = useState('all')
   const [search, setSearch] = useState('')
