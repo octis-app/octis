@@ -1,9 +1,10 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useSessionStore, useGatewayStore, useProjectStore, useLabelStore } from '../store/gatewayStore'
 
 const STATUS = {
   working:     { color: '#a855f7', label: 'Working',   dot: 'animate-pulse' },
-  'needs-you': { color: '#3b82f6', label: 'Needs you', dot: '' },
+  'needs-you': { color: '#3b82f6', label: 'Needs you', dot: 'animate-pulse' },
+  stuck:       { color: '#f59e0b', label: 'Stuck?',    dot: 'animate-pulse' },
   active:      { color: '#22c55e', label: 'Active',    dot: '' },
   quiet:       { color: '#6b7280', label: 'Quiet',     dot: '' },
 }
@@ -117,6 +118,9 @@ function SessionItem({ session, isPinned, onPin, onRename, onArchive, onContinue
 
       <div className="flex items-center gap-2 mt-0.5 ml-3.5">
         <span className="text-xs" style={{ color: st.color }}>{st.label}</span>
+        {status === 'stuck' && (
+          <span className="text-[10px] text-amber-400">⚠️ no activity 5min+</span>
+        )}
         {tag.project && (
           <span className="text-[10px] bg-[#2a3142] text-[#a5b4fc] px-1.5 py-0.5 rounded font-medium">
             {tag.project}
@@ -218,7 +222,13 @@ function ProjectGroup({ name, sessions, activePanes, paneCount, onPin, onRename,
 
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 export default function Sidebar({ onSettingsClick }) {
-  const { sessions, getStatus, pinToPane, activePanes, paneCount, setSessions } = useSessionStore()
+  const { sessions, getStatus, getSortedSessions, pinToPane, activePanes, paneCount, setSessions } = useSessionStore()
+  // Re-render every 60s so stuck detection updates live
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    const t = setInterval(() => setTick(n => n + 1), 60_000)
+    return () => clearInterval(t)
+  }, [])
   const { connected, send } = useGatewayStore()
   const { getTag, setCard, getProjects } = useProjectStore()
   const { getLabel } = useLabelStore()
@@ -285,7 +295,8 @@ export default function Sidebar({ onSettingsClick }) {
     return key.includes(':cron:') || key.includes('subagent')
   }
 
-  const filtered = sessions.filter(s => {
+  const sorted = getSortedSessions()
+  const filtered = sorted.filter(s => {
     if (hideHeartbeat && isHeartbeatSession(s)) return false
     if (hideCron && isCronSession(s)) return false
     const status = getStatus(s)
@@ -302,6 +313,7 @@ export default function Sidebar({ onSettingsClick }) {
   const counts = {
     working:     sessions.filter(s => getStatus(s) === 'working').length,
     'needs-you': sessions.filter(s => getStatus(s) === 'needs-you').length,
+    stuck:       sessions.filter(s => getStatus(s) === 'stuck').length,
     active:      sessions.filter(s => getStatus(s) === 'active').length,
     quiet:       sessions.filter(s => getStatus(s) === 'quiet').length,
   }
@@ -353,8 +365,9 @@ export default function Sidebar({ onSettingsClick }) {
           <div className="flex flex-wrap gap-1 mt-2">
             {[
               { id: 'all',       label: 'All',       count: sessions.length,     color: '' },
-              { id: 'working',   label: 'Working',   count: counts.working,      color: '#a855f7' },
               { id: 'needs-you', label: 'Needs you', count: counts['needs-you'], color: '#3b82f6' },
+              { id: 'working',   label: 'Working',   count: counts.working,      color: '#a855f7' },
+              { id: 'stuck',     label: 'Stuck?',    count: counts.stuck,        color: '#f59e0b' },
               { id: 'active',    label: 'Active',    count: counts.active,       color: '#22c55e' },
               { id: 'quiet',     label: 'Quiet',     count: counts.quiet,        color: '#6b7280' },
             ].map(f => (

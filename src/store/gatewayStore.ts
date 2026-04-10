@@ -25,7 +25,7 @@ export interface ProjectTag {
   card?: string
 }
 
-export type SessionStatus = 'working' | 'needs-you' | 'active' | 'quiet'
+export type SessionStatus = 'working' | 'needs-you' | 'active' | 'stuck' | 'quiet'
 
 interface GatewayState {
   gatewayUrl: string
@@ -412,6 +412,8 @@ interface SessionState {
   setLastRole: (sessionKey: string, role: 'user' | 'assistant') => void
   markStreaming: (sessionKey: string) => void
   getStatus: (session: Session) => SessionStatus
+  getLastActivityMs: (session: Session) => number | null
+  getSortedSessions: () => Session[]
   setSessionProject: (sessionKey: string, projectTag: string) => void
   pinToPane: (paneIndex: number, sessionKey: string | null) => void
   setPaneCount: (n: number) => void
@@ -476,20 +478,43 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
     }))
   },
 
+  getLastActivityMs: (session) => {
+    const key = session.key || session.sessionKey || ''
+    const activity = get().sessionActivity[key]
+    const last = activity || session.updatedAt || session.lastActivity || session.updated_at
+    if (!last) return null
+    return typeof last === 'number' ? last : new Date(last).getTime()
+  },
+
   getStatus: (session) => {
     const key = session.key || session.sessionKey || ''
     const meta = get().sessionMeta[key] || {}
 
     if (meta.isStreaming) return 'working'
     if (meta.lastRole === 'assistant') return 'needs-you'
-    const activity = get().sessionActivity[key]
-    const last =
-      activity || session.updatedAt || session.lastActivity || session.updated_at
-    if (!last) return 'quiet'
-    const age =
-      Date.now() - (typeof last === 'number' ? last : new Date(last).getTime())
+
+    const lastMs = get().getLastActivityMs(session)
+    if (!lastMs) return 'quiet'
+    const age = Date.now() - lastMs
+    if (age > 5 * 60 * 1000) return 'stuck'   // >5min no activity
     if (age < 24 * 60 * 60 * 1000) return 'active'
     return 'quiet'
+  },
+
+  getSortedSessions: () => {
+    const { sessions, getStatus } = get()
+    const order: Record<SessionStatus, number> = {
+      'needs-you': 0,
+      'working':   1,
+      'stuck':     2,
+      'active':    3,
+      'quiet':     4,
+    }
+    return [...sessions].sort((a, b) => {
+      const sa = order[getStatus(a)] ?? 5
+      const sb = order[getStatus(b)] ?? 5
+      return sa - sb
+    })
   },
 
   setSessionProject: (sessionKey, projectTag) => {

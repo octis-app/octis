@@ -15,6 +15,7 @@ interface ChatMessage {
 const statusColors: Record<string, string> = {
   working: '#a855f7',
   'needs-you': '#3b82f6',
+  stuck: '#f59e0b',
   active: '#22c55e',
   quiet: '#6b7280',
 }
@@ -22,6 +23,7 @@ const statusColors: Record<string, string> = {
 const statusLabels: Record<string, string> = {
   working: 'Working',
   'needs-you': 'Needs you',
+  stuck: 'Stuck?',
   active: 'Active',
   quiet: 'Quiet',
 }

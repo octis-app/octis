@@ -506,6 +506,30 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
     }, 10000)
   }
 
+  const handleBriefMe = () => {
+    if (!sessionKey) return
+    const msg = 'Give me a 3-sentence status update: (1) what you last did, (2) what you\'re working on now, (3) what\'s next. No fluff.'
+    const idempotencyKey = `octis-brief-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey, message: msg, deliver: false, idempotencyKey } })
+    setMessages((prev) => [...prev, { role: 'user', content: '📋 Brief me', id: Date.now() }])
+  }
+
+  const handlePause = () => {
+    if (!sessionKey) return
+    const msg = 'Pause. Summarize the current state in 3-5 bullet points so we can resume cleanly later: what was decided, what\'s in progress, what\'s next, any blockers. Then stop and wait for me.'
+    const idempotencyKey = `octis-pause-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey, message: msg, deliver: false, idempotencyKey } })
+    setMessages((prev) => [...prev, { role: 'user', content: '⏸️ Pause', id: Date.now() }])
+  }
+
+  const handleContinue = () => {
+    if (!sessionKey) return
+    const msg = 'Continue from where we left off. Review the last state summary and resume the next action.'
+    const idempotencyKey = `octis-continue-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey, message: msg, deliver: false, idempotencyKey } })
+    setMessages((prev) => [...prev, { role: 'user', content: '▶️ Continue', id: Date.now() }])
+  }
+
   const handleSave = () => {
     if (!sessionKey) return
     const msg =
@@ -620,6 +644,27 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
             }`}
           >
             {noiseHidden ? 'chat only' : '+ tools'}
+          </button>
+          <button
+            onClick={handleBriefMe}
+            title="Brief me — 3-sentence status"
+            className="text-xs text-[#6b7280] hover:text-indigo-400 px-1.5 py-1 rounded hover:bg-[#2a3142] transition-colors"
+          >
+            📋
+          </button>
+          <button
+            onClick={handlePause}
+            title="Pause — summarize state and hold"
+            className="text-xs text-[#6b7280] hover:text-yellow-400 px-1.5 py-1 rounded hover:bg-[#2a3142] transition-colors"
+          >
+            ⏸️
+          </button>
+          <button
+            onClick={handleContinue}
+            title="Continue — resume from last state"
+            className="text-xs text-[#6b7280] hover:text-green-400 px-1.5 py-1 rounded hover:bg-[#2a3142] transition-colors"
+          >
+            ▶️
           </button>
           <button
             onClick={handleSteppingAway}
