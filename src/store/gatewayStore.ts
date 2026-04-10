@@ -496,7 +496,13 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
     const lastMs = get().getLastActivityMs(session)
     if (!lastMs) return 'quiet'
     const age = Date.now() - lastMs
-    if (age > 5 * 60 * 1000) return 'stuck'   // >5min no activity
+
+    // "Stuck" = was recently active (within last hour) but silent for 5min
+    // Old sessions with no recent activity are just "quiet"
+    const recentlyActive = age < 60 * 60 * 1000   // active in last hour
+    const silentTooLong  = age > 5 * 60 * 1000    // no activity for 5min
+    if (recentlyActive && silentTooLong) return 'stuck'
+
     if (age < 24 * 60 * 60 * 1000) return 'active'
     return 'quiet'
   },
