@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useGatewayStore, useSessionStore } from '../store/gatewayStore'
+import { useGatewayStore, useSessionStore, Session } from '../store/gatewayStore'
 import MobileSessionCard from './MobileSessionCard'
 import MobileFullChat from './MobileFullChat'
 import CostsPanel from './CostsPanel'
@@ -12,23 +12,26 @@ const TABS = [
   { id: 'memory', icon: '🧠', label: 'Memory' },
 ]
 
+type FilterType = 'all' | 'active' | 'idle'
+
 export default function MobileApp() {
   const { connected, gatewayUrl } = useGatewayStore()
   const { sessions, getStatus } = useSessionStore()
   const [tab, setTab] = useState('sessions')
-  const [fullChatSession, setFullChatSession] = useState(null)
+  const [fullChatSession, setFullChatSession] = useState<Session | null>(null)
   const [showConnect, setShowConnect] = useState(!gatewayUrl)
-  const [filter, setFilter] = useState('all')
+  const [filter, setFilter] = useState<FilterType>('all')
 
-  const filtered = sessions.filter(s => {
-    if (filter === 'active') return getStatus(s) === 'active'
-    if (filter === 'idle') return getStatus(s) === 'idle'
+  const filtered = sessions.filter((s: Session) => {
+    const st = getStatus(s)
+    if (filter === 'active') return st === 'active'
+    if (filter === 'idle') return st === 'quiet'
     return true
   })
 
   const counts = {
-    active: sessions.filter(s => getStatus(s) === 'active').length,
-    idle: sessions.filter(s => getStatus(s) === 'idle').length,
+    active: sessions.filter((s: Session) => getStatus(s) === 'active').length,
+    idle: sessions.filter((s: Session) => getStatus(s) === 'quiet').length,
   }
 
   if (fullChatSession) {
@@ -36,12 +39,15 @@ export default function MobileApp() {
   }
 
   return (
-    <div className="flex flex-col bg-[#0f1117] overflow-hidden"
-      style={{ height: '100dvh' }}>
-
+    <div
+      className="flex flex-col bg-[#0f1117] overflow-hidden"
+      style={{ height: '100dvh' }}
+    >
       {/* Status bar area */}
-      <div className="bg-[#181c24] border-b border-[#2a3142] shrink-0"
-        style={{ paddingTop: 'env(safe-area-inset-top)' }}>
+      <div
+        className="bg-[#181c24] border-b border-[#2a3142] shrink-0"
+        style={{ paddingTop: 'env(safe-area-inset-top)' }}
+      >
         <div className="flex items-center justify-between px-4 py-3">
           <div className="flex items-center gap-2">
             <span className="text-xl">🐙</span>
@@ -63,11 +69,13 @@ export default function MobileApp() {
           <>
             {/* Filter pills */}
             <div className="flex gap-2 px-4 pt-3 pb-2 shrink-0">
-              {[
-                { id: 'all', label: `All ${sessions.length}` },
-                { id: 'active', label: `🟢 ${counts.active}` },
-                { id: 'idle', label: `🟡 ${counts.idle}` },
-              ].map(f => (
+              {(
+                [
+                  { id: 'all', label: `All ${sessions.length}` },
+                  { id: 'active', label: `🟢 ${counts.active}` },
+                  { id: 'idle', label: `🟡 ${counts.idle}` },
+                ] as { id: FilterType; label: string }[]
+              ).map((f) => (
                 <button
                   key={f.id}
                   onClick={() => setFilter(f.id)}
@@ -111,9 +119,11 @@ export default function MobileApp() {
                   scrollbarWidth: 'none',
                 }}
               >
-                <div className="flex gap-4 px-4 h-full items-start pt-1 pb-3"
-                  style={{ width: `calc(${filtered.length} * (100vw - 1rem))` }}>
-                  {filtered.map(session => (
+                <div
+                  className="flex gap-4 px-4 h-full items-start pt-1 pb-3"
+                  style={{ width: `calc(${filtered.length} * (100vw - 1rem))` }}
+                >
+                  {filtered.map((session: Session) => (
                     <MobileSessionCard
                       key={session.key}
                       session={session}
@@ -162,7 +172,7 @@ export default function MobileApp() {
         style={{ paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom))' }}
       >
         <div className="flex">
-          {TABS.map(t => (
+          {TABS.map((t) => (
             <button
               key={t.id}
               onClick={() => setTab(t.id)}

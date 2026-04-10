@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
-import { useAuth, useUser, SignedIn, SignedOut, UserButton } from '@clerk/clerk-react'
-import { useGatewayStore, useSessionStore, useLabelStore } from './store/gatewayStore'
+import { useAuth, SignedIn, SignedOut, UserButton } from '@clerk/clerk-react'
+import { useGatewayStore, useSessionStore, useLabelStore, Session } from './store/gatewayStore'
 import Sidebar from './components/Sidebar'
 import ChatPane from './components/ChatPane'
 import ConnectModal from './components/ConnectModal'
@@ -11,7 +11,7 @@ import MobileApp from './components/MobileApp'
 import AuthGate from './components/AuthGate'
 
 // Detect mobile: screen width <768px or touch device
-function useIsMobile() {
+function useIsMobile(): boolean {
   const [mobile, setMobile] = useState(() => window.innerWidth < 768)
   useEffect(() => {
     const handler = () => setMobile(window.innerWidth < 768)
@@ -27,12 +27,11 @@ const NAV = [
   { id: 'memory', label: '🧠 Memory' },
 ]
 
-const API = import.meta.env.VITE_API_URL || ''
+const API = (import.meta.env.VITE_API_URL as string) || ''
 
 export default function App() {
   const { isSignedIn, isLoaded, getToken } = useAuth()
 
-  // Show auth gate while Clerk loads or when not signed in
   if (!isLoaded) {
     return (
       <div className="flex h-screen items-center justify-center bg-[#0f1117]">
@@ -45,95 +44,75 @@ export default function App() {
   return <AuthenticatedApp getToken={getToken} />
 }
 
-function AuthenticatedApp({ getToken }) {
-  const { connected, gatewayUrl, gatewayToken, agentId, connect, setCredentials } = useGatewayStore()
-  const { activePanes, paneCount, setPaneCount, pinToPane } = useSessionStore()
+function AuthenticatedApp({ getToken }: { getToken: () => Promise<string | null> }) {
+  const { connected, gatewayUrl, connect, setCredentials } = useGatewayStore()
+  const { activePanes, paneCount, setPaneCount, pinToPane, sessions } = useSessionStore()
   const { labels, setLabel } = useLabelStore()
   const [showConnect, setShowConnect] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [activeNav, setActiveNav] = useState('sessions')
   const isMobile = useIsMobile()
 
-  // Fetch gateway config from server using Clerk JWT (runs once after sign-in)
+  // Fetch fresh gateway config from server on every sign-in
   useEffect(() => {
-    if (gatewayUrl && gatewayToken) {
-      // Already have credentials (e.g. from localStorage) — just connect
-      // agentId is also persisted, so it will filter automatically
-      if (!connected) connect()
-      return
-    }
     const fetchConfig = async () => {
       try {
         const token = await getToken()
         const res = await fetch(`${API}/api/gateway-config`, {
-          headers: { Authorization: `Bearer ${token}` }
+          headers: { Authorization: `Bearer ${token}` },
         })
         if (!res.ok) throw new Error(`Config fetch failed: ${res.status}`)
-        const data = await res.json()
+        const data = (await res.json()) as { url: string; token: string; agentId?: string }
         setCredentials(data.url, data.token, data.agentId)
         connect()
       } catch (e) {
         console.error('[octis] Failed to fetch gateway config:', e)
-        // Fall back to connect modal
         setShowConnect(true)
       }
     }
-    fetchConfig()
+    void fetchConfig()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Seed session labels from DB — runs on startup and whenever sessions connect
-  const { sessions } = useSessionStore()
+  // Seed session labels from DB on mount
   useEffect(() => {
-    fetch(`${API}/api/session-labels`)
-      .then(r => r.json())
-      .then(data => {
-        if (typeof data === 'object' && !data.error) {
-          // data is { uuid: label }
-          // Store by UUID first
+    void fetch(`${API}/api/session-labels`)
+      .then((r) => r.json())
+      .then((data: Record<string, string>) => {
+        if (typeof data === 'object' && !('error' in data)) {
           Object.entries(data).forEach(([uuid, label]) => {
             if (!labels[uuid]) setLabel(uuid, label)
           })
-          // Also try to match against loaded sessions by their sessionId
-          sessions.forEach(s => {
+          sessions.forEach((s: Session) => {
             const uuid = s.id || s.sessionId
             const gKey = s.key
-            if (uuid && data[uuid] && !labels[gKey]) {
-              setLabel(gKey, data[uuid])
-            }
+            if (uuid && data[uuid] && !labels[gKey]) setLabel(gKey, data[uuid])
           })
         }
       })
       .catch(() => {})
-  }, []) // run once on mount
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Re-seed when sessions load from gateway
   useEffect(() => {
     if (!sessions.length) return
-    fetch(`${API}/api/session-labels`)
-      .then(r => r.json())
-      .then(data => {
-        if (typeof data === 'object' && !data.error) {
-          sessions.forEach(s => {
+    void fetch(`${API}/api/session-labels`)
+      .then((r) => r.json())
+      .then((data: Record<string, string>) => {
+        if (typeof data === 'object' && !('error' in data)) {
+          sessions.forEach((s: Session) => {
             const uuid = s.id || s.sessionId
             const gKey = s.key
-            if (uuid && data[uuid] && !labels[gKey]) {
-              setLabel(gKey, data[uuid])
-            }
+            if (uuid && data[uuid] && !labels[gKey]) setLabel(gKey, data[uuid])
           })
         }
       })
       .catch(() => {})
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions.length])
 
-
-  useEffect(() => {
-    if (!connected && !gatewayUrl) setShowConnect(true)
-  }, [connected, gatewayUrl])
-
-  // Render mobile layout on small screens
-  if (isMobile) {
-    return <MobileApp />
-  }
+  if (isMobile) return <MobileApp />
 
   const visiblePanes = activePanes.slice(0, paneCount)
 
@@ -141,8 +120,14 @@ function AuthenticatedApp({ getToken }) {
     <div className="flex h-screen overflow-hidden bg-[#0f1117]">
       {/* Left nav */}
       <div className="flex flex-col w-14 bg-[#181c24] border-r border-[#2a3142] items-center py-4 gap-2 shrink-0">
-        <button onClick={() => setShowSettings(true)} className="text-2xl mb-2 hover:opacity-70 transition-opacity" title="Settings">🐙</button>
-        {NAV.map(n => (
+        <button
+          onClick={() => setShowSettings(true)}
+          className="text-2xl mb-2 hover:opacity-70 transition-opacity"
+          title="Settings"
+        >
+          🐙
+        </button>
+        {NAV.map((n) => (
           <button
             key={n.id}
             onClick={() => setActiveNav(n.id)}
@@ -155,17 +140,15 @@ function AuthenticatedApp({ getToken }) {
           </button>
         ))}
         <div className="flex-1" />
-        {/* Connection status */}
         <button
           onClick={() => setShowConnect(true)}
-          title="Gateway Settings"
+          title={`Gateway: ${gatewayUrl || 'not configured'}`}
           className={`w-9 h-9 rounded-lg text-sm transition-colors flex items-center justify-center ${
             connected ? 'text-green-400 hover:bg-[#2a3142]' : 'text-red-400 hover:bg-[#2a3142]'
           }`}
         >
           {connected ? '🟢' : '🔴'}
         </button>
-        {/* User avatar / sign-out */}
         <div className="mt-2 mb-1">
           <UserButton
             appearance={{
@@ -175,7 +158,7 @@ function AuthenticatedApp({ getToken }) {
                 userButtonPopoverActionButton: 'text-[#e8eaf0] hover:bg-[#2a3142]',
                 userButtonPopoverActionButtonText: 'text-[#e8eaf0]',
                 userButtonPopoverFooter: 'hidden',
-              }
+              },
             }}
           />
         </div>
@@ -195,14 +178,15 @@ function AuthenticatedApp({ getToken }) {
               />
             ))}
           </div>
-          {/* Pane switcher */}
           <div className="fixed bottom-4 right-4 flex gap-1 bg-[#181c24] border border-[#2a3142] rounded-lg p-1 shadow-lg z-40">
-            {[1,2,3,4,5].map(n => (
+            {[1, 2, 3, 4, 5].map((n) => (
               <button
                 key={n}
                 onClick={() => setPaneCount(n)}
                 className={`w-7 h-7 text-xs rounded transition-colors ${
-                  paneCount === n ? 'bg-[#6366f1] text-white' : 'text-[#6b7280] hover:text-white hover:bg-[#2a3142]'
+                  paneCount === n
+                    ? 'bg-[#6366f1] text-white'
+                    : 'text-[#6b7280] hover:text-white hover:bg-[#2a3142]'
                 }`}
               >
                 {n}
@@ -235,3 +219,7 @@ function AuthenticatedApp({ getToken }) {
     </div>
   )
 }
+
+// Keep TS happy — SignedIn/SignedOut are imported but may be used in future
+void SignedIn
+void SignedOut

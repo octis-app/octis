@@ -1,36 +1,54 @@
 import { useState, useEffect, useRef } from 'react'
 import { useGatewayStore } from '../store/gatewayStore'
 
-export default function ConnectModal({ onClose }) {
-  const { gatewayUrl, gatewayToken, setCredentials, connect, connected } = useGatewayStore()
-  const [url, setUrl] = useState(gatewayUrl || import.meta.env.VITE_GATEWAY_URL || 'wss://octis.duckdns.org/ws')
-  const [token, setToken] = useState(gatewayToken || import.meta.env.VITE_GATEWAY_TOKEN || '')
-  const [status, setStatus] = useState('idle') // idle | connecting | error
-  const [errorMsg, setErrorMsg] = useState('')
-  const timeoutRef = useRef(null)
+interface ConnectModalProps {
+  onClose: () => void
+}
 
-  // Watch for successful connection
+export default function ConnectModal({ onClose }: ConnectModalProps) {
+  const { gatewayUrl, gatewayToken, setCredentials, connect, connected } = useGatewayStore()
+  const [url, setUrl] = useState(
+    gatewayUrl || (import.meta.env.VITE_GATEWAY_URL as string) || 'wss://octis.duckdns.org/ws'
+  )
+  const [token, setToken] = useState(
+    gatewayToken || (import.meta.env.VITE_GATEWAY_TOKEN as string) || ''
+  )
+  const [status, setStatus] = useState<'idle' | 'connecting' | 'error'>('idle')
+  const [errorMsg, setErrorMsg] = useState('')
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   useEffect(() => {
     if (status === 'connecting' && connected) {
-      clearTimeout(timeoutRef.current)
+      if (timeoutRef.current) clearTimeout(timeoutRef.current)
       setStatus('idle')
       onClose()
     }
-  }, [connected, status])
+  }, [connected, status, onClose])
 
-  // Cleanup timeout on unmount
-  useEffect(() => () => clearTimeout(timeoutRef.current), [])
+  useEffect(
+    () => () => {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current)
+    },
+    []
+  )
 
   const handleConnect = () => {
-    if (!url.trim()) { setErrorMsg('Gateway URL is required'); setStatus('error'); return }
-    if (!token.trim()) { setErrorMsg('Token is required'); setStatus('error'); return }
-    clearTimeout(timeoutRef.current)
+    if (!url.trim()) {
+      setErrorMsg('Gateway URL is required')
+      setStatus('error')
+      return
+    }
+    if (!token.trim()) {
+      setErrorMsg('Token is required')
+      setStatus('error')
+      return
+    }
+    if (timeoutRef.current) clearTimeout(timeoutRef.current)
     setStatus('connecting')
     setErrorMsg('')
     setCredentials(url, token)
     connect()
 
-    // Timeout fallback — cancel if connect succeeds first
     timeoutRef.current = setTimeout(() => {
       if (!useGatewayStore.getState().connected) {
         setStatus('error')
@@ -45,11 +63,13 @@ export default function ConnectModal({ onClose }) {
         <h2 className="text-lg font-semibold text-white mb-1">Connect to Gateway</h2>
         <p className="text-sm text-[#6b7280] mb-5">Enter your OpenClaw gateway URL and token.</p>
 
-        <label className="block text-xs text-[#6b7280] uppercase tracking-wider mb-1">Gateway URL</label>
+        <label className="block text-xs text-[#6b7280] uppercase tracking-wider mb-1">
+          Gateway URL
+        </label>
         <input
           className="w-full bg-[#0f1117] border border-[#2a3142] rounded-lg px-3 py-2 text-sm text-white mb-4 outline-none focus:border-[#6366f1]"
           value={url}
-          onChange={e => setUrl(e.target.value)}
+          onChange={(e) => setUrl(e.target.value)}
           placeholder="wss://octis.duckdns.org/ws"
           disabled={status === 'connecting'}
         />
@@ -59,10 +79,10 @@ export default function ConnectModal({ onClose }) {
           className="w-full bg-[#0f1117] border border-[#2a3142] rounded-lg px-3 py-2 text-sm text-white mb-4 outline-none focus:border-[#6366f1]"
           type="password"
           value={token}
-          onChange={e => setToken(e.target.value)}
+          onChange={(e) => setToken(e.target.value)}
           placeholder="Your gateway token"
           disabled={status === 'connecting'}
-          onKeyDown={e => e.key === 'Enter' && status !== 'connecting' && handleConnect()}
+          onKeyDown={(e) => e.key === 'Enter' && status !== 'connecting' && handleConnect()}
         />
 
         {status === 'error' && (

@@ -1,10 +1,14 @@
 steps:
-  # Build the Docker image
+  # Build the Docker image (includes Vite build)
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'build'
       - '-t'
       - 'northamerica-northeast1-docker.pkg.dev/igneous-aleph-468015-d8/octis/octis:latest'
+      - '--build-arg'
+      - 'VITE_CLERK_PUBLISHABLE_KEY=pk_test_b3JnYW5pYy1oaXBwby0xNC5jbGVyay5hY2NvdW50cy5kZXYk'
+      - '--build-arg'
+      - 'VITE_API_URL='
       - '.'
 
   # Push to Artifact Registry
@@ -13,7 +17,7 @@ steps:
       - 'push'
       - 'northamerica-northeast1-docker.pkg.dev/igneous-aleph-468015-d8/octis/octis:latest'
 
-  # Deploy to Cloud Run
+  # Deploy to Cloud Run (env vars already set on the service, just update the image)
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -24,7 +28,6 @@ steps:
       - '--region=northamerica-northeast1'
       - '--platform=managed'
       - '--allow-unauthenticated'
-      - '--set-secrets=CLERK_SECRET_KEY=octis-clerk-secret:latest,GATEWAY_TOKEN=octis-gateway-token:latest,PG_PASSWORD=octis-pg-password:latest,GATEWAY_URL=octis-gateway-url:latest'
 
 images:
   - 'northamerica-northeast1-docker.pkg.dev/igneous-aleph-468015-d8/octis/octis:latest'
