@@ -523,6 +523,28 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
     ])
   }
 
+  const handleSteppingAway = () => {
+    if (!sessionKey) return
+    const msg =
+      "I'm stepping away for a while. Please do the following:\n" +
+      "1. Summarize what you're currently working on (1-2 sentences).\n" +
+      "2. List anything you're blocked on or need from me before I go — be specific (credentials, a decision, a file, etc.).\n" +
+      "3. List everything you CAN do autonomously while I'm gone, in order.\n" +
+      "4. Estimate how long you can run without me.\n" +
+      "Be concise. I'll read this on my phone."
+    const idempotencyKey = `octis-away-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    send({
+      type: 'req',
+      id: `chat-send-${Date.now()}`,
+      method: 'chat.send',
+      params: { sessionKey, message: msg, deliver: false, idempotencyKey },
+    })
+    setMessages((prev) => [
+      ...prev,
+      { role: 'user', content: '🚪 Stepping away — what do you need from me?', id: Date.now() },
+    ])
+  }
+
   const handleArchive = () => {
     if (!sessionKey) return
     if (confirm('Save and archive this session?')) {
@@ -598,6 +620,13 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
             }`}
           >
             {noiseHidden ? 'chat only' : '+ tools'}
+          </button>
+          <button
+            onClick={handleSteppingAway}
+            title="Stepping away — ask agent for plan + blockers"
+            className="text-xs text-[#6b7280] hover:text-blue-400 px-1.5 py-1 rounded hover:bg-[#2a3142] transition-colors"
+          >
+            🚪
           </button>
           <button
             onClick={handleSave}
