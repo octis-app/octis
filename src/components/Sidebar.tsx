@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useSessionStore, useGatewayStore, useProjectStore, useLabelStore } from '../store/gatewayStore'
+import { useSessionStore, useGatewayStore, useProjectStore, useLabelStore, Session, SessionStatus } from '../store/gatewayStore'
 
 const STATUS = {
   working:     { color: '#a855f7', label: 'Working',   dot: 'animate-pulse' },
@@ -12,11 +12,11 @@ const STATUS = {
 // ─── Project tag picker popup ─────────────────────────────────────────────────
 const PRESET_PROJECTS = ['Quantum', 'Portal', 'Billing', 'Sage', 'Octis', 'Centurion', 'Infra', 'Personal']
 
-function ProjectPicker({ sessionKey, current, onClose }) {
+function ProjectPicker({ sessionKey, current, onClose }: { sessionKey: string; current: string; onClose: () => void }) {
   const { setTag } = useProjectStore()
   const [custom, setCustom] = useState('')
 
-  const pick = (p) => { setTag(sessionKey, p); onClose() }
+  const pick = (p: string) => { setTag(sessionKey, p); onClose() }
   const clear = () => { setTag(sessionKey, ''); onClose() }
 
   return (
@@ -50,7 +50,12 @@ function ProjectPicker({ sessionKey, current, onClose }) {
 }
 
 // ─── Single session row ───────────────────────────────────────────────────────
-function SessionItem({ session, isPinned, onPin, onRename, onArchive, onContinue }) {
+function SessionItem({ session, isPinned, onPin, onRename, onArchive, onContinue }: {
+  session: Session; isPinned: boolean; onPin: () => void
+  onRename: (key: string, label: string) => void
+  onArchive: (key: string) => void
+  onContinue: (session: Session) => void
+}) {
   const { getStatus } = useSessionStore()
   const { getTag } = useProjectStore()
   const { getLabel, setLabel: saveLabel } = useLabelStore()
@@ -161,7 +166,7 @@ function SessionItem({ session, isPinned, onPin, onRename, onArchive, onContinue
       {showProjectPicker && (
         <ProjectPicker
           sessionKey={session.key}
-          current={tag.project}
+          current={tag.project ?? ''}
           onClose={() => setShowProjectPicker(false)}
         />
       )}
@@ -175,20 +180,25 @@ function SessionItem({ session, isPinned, onPin, onRename, onArchive, onContinue
 }
 
 // ─── Project group ────────────────────────────────────────────────────────────
-function ProjectGroup({ name, sessions, activePanes, paneCount, onPin, onRename, onArchive, onContinue }) {
+function ProjectGroup({ name, sessions, activePanes, paneCount, onPin, onRename, onArchive, onContinue }: {
+  name: string; sessions: Session[]; activePanes: (string | null)[]; paneCount: number
+  onPin: (key: string) => void
+  onRename: (key: string, label: string) => void
+  onArchive: (key: string) => void
+  onContinue: (session: Session) => void
+}) {
   const { getStatus } = useSessionStore()
-  const { getTag } = useProjectStore()
   const [open, setOpen] = useState(true)
 
   // Bubble up highest-urgency status
+  const order: SessionStatus[] = ['working', 'needs-you', 'stuck', 'active', 'quiet']
   const topStatus = sessions.reduce((best, s) => {
-    const order = ['working', 'needs-you', 'active', 'quiet']
-    const rank = i => order.indexOf(i)
+    const rank = (i: SessionStatus) => order.indexOf(i)
     const st = getStatus(s)
     return rank(st) < rank(best) ? st : best
-  }, 'quiet')
+  }, 'quiet' as SessionStatus)
 
-  const st = STATUS[topStatus] || STATUS.quiet
+  const st = STATUS[topStatus] ?? STATUS.quiet
 
   return (
     <div className="mx-2 mb-2">
@@ -221,7 +231,7 @@ function ProjectGroup({ name, sessions, activePanes, paneCount, onPin, onRename,
 }
 
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
-export default function Sidebar({ onSettingsClick }) {
+export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => void }) {
   const { sessions, getStatus, getSortedSessions, pinToPane, activePanes, paneCount, setSessions } = useSessionStore()
   // Re-render every 60s so stuck detection updates live
   const [, setTick] = useState(0)
@@ -230,25 +240,25 @@ export default function Sidebar({ onSettingsClick }) {
     return () => clearInterval(t)
   }, [])
   const { connected, send } = useGatewayStore()
-  const { getTag, setCard, getProjects } = useProjectStore()
+  const { getTag, getProjects } = useProjectStore()
   const { getLabel } = useLabelStore()
   const [sidebarView, setSidebarView] = useState('sessions') // 'sessions' | 'projects'
   const [filter, setFilter] = useState('all')
   const [search, setSearch] = useState('')
 
-  const handlePin = (sessionKey) => {
+  const handlePin = (sessionKey: string) => {
     const alreadyAt = activePanes.indexOf(sessionKey)
     if (alreadyAt >= 0 && alreadyAt < paneCount) return
     const emptyPane = activePanes.findIndex((p, i) => i < paneCount && !p)
     pinToPane(emptyPane >= 0 ? emptyPane : paneCount - 1, sessionKey)
   }
 
-  const handleRename = (sessionKey, newLabel) => {
+  const handleRename = (sessionKey: string, newLabel: string) => {
     send({ type: 'req', id: `sessions-patch-${Date.now()}`, method: 'sessions.patch', params: { sessionKey, patch: { label: newLabel } } })
     setSessions(sessions.map(s => s.key === sessionKey ? { ...s, label: newLabel } : s))
   }
 
-  const handleArchive = (sessionKey) => {
+  const handleArchive = (sessionKey: string) => {
     if (confirm(`Archive this session?`)) {
       send({ type: 'req', id: `sessions-delete-${Date.now()}`, method: 'sessions.delete', params: { sessionKey } })
       setSessions(sessions.filter(s => s.key !== sessionKey))
@@ -257,7 +267,7 @@ export default function Sidebar({ onSettingsClick }) {
   }
 
   // Continue: create new session pre-seeded with last thread's card
-  const handleContinue = (session) => {
+  const handleContinue = (session: Session) => {
     const tag = getTag(session.key)
     const prevLabel = session.label || session.key
     const card = tag.card || ''
@@ -285,18 +295,18 @@ export default function Sidebar({ onSettingsClick }) {
   const hideHeartbeat = localStorage.getItem('octis-show-heartbeat-sessions') !== 'true'
   const hideCron = localStorage.getItem('octis-show-cron-sessions') !== 'true'
 
-  const isHeartbeatSession = (s) => {
+  const isHeartbeatSession = (s: Session) => {
     const lbl = (getLabel(s.key, s.label || s.key) || '').toLowerCase()
     const key = (s.key || '').toLowerCase()
     return key.includes(':cron:') || lbl.includes('heartbeat') || lbl.startsWith('read heartbeat')
   }
-  const isCronSession = (s) => {
+  const isCronSession = (s: Session) => {
     const key = (s.key || '').toLowerCase()
     return key.includes(':cron:') || key.includes('subagent')
   }
 
   const sorted = getSortedSessions()
-  const filtered = sorted.filter(s => {
+  const filtered = sorted.filter((s: Session) => {
     if (hideHeartbeat && isHeartbeatSession(s)) return false
     if (hideCron && isCronSession(s)) return false
     const status = getStatus(s)
@@ -311,11 +321,11 @@ export default function Sidebar({ onSettingsClick }) {
   })
 
   const counts = {
-    working:     sessions.filter(s => getStatus(s) === 'working').length,
-    'needs-you': sessions.filter(s => getStatus(s) === 'needs-you').length,
-    stuck:       sessions.filter(s => getStatus(s) === 'stuck').length,
-    active:      sessions.filter(s => getStatus(s) === 'active').length,
-    quiet:       sessions.filter(s => getStatus(s) === 'quiet').length,
+    working:     sessions.filter((s: Session) => getStatus(s) === 'working').length,
+    'needs-you': sessions.filter((s: Session) => getStatus(s) === 'needs-you').length,
+    stuck:       sessions.filter((s: Session) => getStatus(s) === 'stuck').length,
+    active:      sessions.filter((s: Session) => getStatus(s) === 'active').length,
+    quiet:       sessions.filter((s: Session) => getStatus(s) === 'quiet').length,
   }
 
   // Projects view data

@@ -1,23 +1,21 @@
 import { useEffect, useState, useMemo } from 'react'
+import React from 'react'
 
 const API = import.meta.env.VITE_API_URL || ''
 
+interface ProjectData { name: string; content?: string; mtime?: string; size?: number }
+interface LogEntry { date: string; content?: string }
+interface MemData { todos?: string; recentLogs?: LogEntry[]; memory?: string }
+interface ProjData { projects?: ProjectData[] }
+
 // ─── Markdown renderer ────────────────────────────────────────────────────────
-// Renders headings, bold/italic, code, lists, and task checkboxes.
-// Handles [YOU] / [ME] / [BOTH] / [WAIT] / [UNLOCK→ME] badges with colors.
-function renderMarkdown(text) {
+function renderMarkdown(text: string): React.ReactNode[] | null {
   if (!text) return null
   const lines = text.split('\n')
-  const elements = []
+  const elements: React.ReactNode[] = []
   let i = 0
 
-  const badge = (content, color, bg) => (
-    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${bg} ${color} mr-1.5 shrink-0`}>
-      {content}
-    </span>
-  )
-
-  const renderInline = (str) => {
+  const renderInline = (str: string): React.ReactNode[] => {
     // Replace [YOU], [ME], [BOTH], [WAIT], [UNLOCK→ME] with colored badges
     const parts = str.split(/(\[YOU\]|\[ME\]|\[BOTH\]|\[WAIT\]|\[UNLOCK→ME\]|\[UNLOCK->ME\])/g)
     return parts.map((p, i) => {
@@ -28,19 +26,19 @@ function renderMarkdown(text) {
       if (p === '[UNLOCK→ME]' || p === '[UNLOCK->ME]') return <span key={i} className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-orange-500/20 text-orange-300 mr-1.5">🔓 Unlock→Me</span>
       // Bold
       const boldParts = p.split(/(\*\*[^*]+\*\*)/g)
-      return boldParts.map((bp, j) => {
+      return boldParts.map((bp: string, j: number) => {
         if (bp.startsWith('**') && bp.endsWith('**')) {
           return <strong key={j} className="text-white font-semibold">{bp.slice(2, -2)}</strong>
         }
         // Italic
         const italicParts = bp.split(/(\*[^*]+\*)/g)
-        return italicParts.map((ip, k) => {
+        return italicParts.map((ip: string, k: number) => {
           if (ip.startsWith('*') && ip.endsWith('*') && ip.length > 2) {
             return <em key={k} className="text-[#c4cce0] italic">{ip.slice(1, -1)}</em>
           }
           // Inline code
           const codeParts = ip.split(/(`[^`]+`)/g)
-          return codeParts.map((cp, l) => {
+          return codeParts.map((cp: string, l: number) => {
             if (cp.startsWith('`') && cp.endsWith('`') && cp.length > 2) {
               return <code key={l} className="bg-[#0f1117] text-[#a5b4fc] px-1 py-0.5 rounded text-[11px] font-mono">{cp.slice(1, -1)}</code>
             }
@@ -167,7 +165,7 @@ function renderMarkdown(text) {
 }
 
 // ─── Collapsible section ──────────────────────────────────────────────────────
-function Section({ title, children, defaultOpen = true, badge }) {
+function Section({ title, children, defaultOpen = true, badge }: { title: string; children: React.ReactNode; defaultOpen?: boolean; badge?: string }) {
   const [open, setOpen] = useState(defaultOpen)
   return (
     <div className="bg-[#181c24] border border-[#2a3142] rounded-xl overflow-hidden">
@@ -187,7 +185,7 @@ function Section({ title, children, defaultOpen = true, badge }) {
 }
 
 // ─── Project card ─────────────────────────────────────────────────────────────
-function ProjectCard({ project }) {
+function ProjectCard({ project }: { project: ProjectData }) {
   const [expanded, setExpanded] = useState(false)
   const content = project.content || ''
   const lineCount = content.split('\n').length
@@ -234,16 +232,16 @@ const SORT_OPTIONS = [
 ]
 
 const URGENCY_KEYWORDS = ['blocked', 'urgent', 'pending', 'asap', 'critical', 'in progress', 'todo', 'action']
-function urgencyScore(content) {
+function urgencyScore(content: string): number {
   const lower = (content || '').toLowerCase()
   return URGENCY_KEYWORDS.reduce((n, kw) => n + (lower.includes(kw) ? 1 : 0), 0)
 }
 
 // ─── Main panel ───────────────────────────────────────────────────────────────
 export default function MemoryPanel() {
-  const [memData, setMemData] = useState(null)
-  const [projData, setProjData] = useState(null)
-  const [error, setError] = useState(null)
+  const [memData, setMemData] = useState<MemData | null>(null)
+  const [projData, setProjData] = useState<ProjData | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState('overview')
   const [projectSearch, setProjectSearch] = useState('')
@@ -268,12 +266,12 @@ export default function MemoryPanel() {
   const sortedProjects = useMemo(() => {
     const projects = projData?.projects || []
     const filtered = projectSearch
-      ? projects.filter(p => p.name.toLowerCase().includes(projectSearch.toLowerCase()) || (p.content || '').toLowerCase().includes(projectSearch.toLowerCase()))
+      ? projects.filter((p: ProjectData) => p.name.toLowerCase().includes(projectSearch.toLowerCase()) || (p.content || '').toLowerCase().includes(projectSearch.toLowerCase()))
       : projects
-    return [...filtered].sort((a, b) => {
-      if (projectSort === 'recency') return new Date(b.mtime || 0) - new Date(a.mtime || 0)
+    return [...filtered].sort((a: ProjectData, b: ProjectData) => {
+      if (projectSort === 'recency') return new Date(b.mtime || 0).getTime() - new Date(a.mtime || 0).getTime()
       if (projectSort === 'size') return (b.size || 0) - (a.size || 0)
-      if (projectSort === 'urgency') return urgencyScore(b.content) - urgencyScore(a.content)
+      if (projectSort === 'urgency') return urgencyScore(b.content || '') - urgencyScore(a.content || '')
       if (projectSort === 'alpha') return a.name.localeCompare(b.name)
       return 0
     })
@@ -339,8 +337,8 @@ export default function MemoryPanel() {
             {(memData?.recentLogs || []).length === 0 && (
               <div className="text-[#6b7280] text-sm">No recent daily logs.</div>
             )}
-            {(memData?.recentLogs || []).map(log => (
-              <Section key={log.date} title={`📅 ${log.date}`} defaultOpen={true}>
+            {(memData?.recentLogs || []).map((log: LogEntry) => (
+              <Section key={log.date} title={`📅 ${log.date}`} defaultOpen={true} badge={undefined}>
                 <div className="space-y-0.5">
                   {renderMarkdown(log.content || '(empty)')}
                 </div>

@@ -3,7 +3,7 @@ import { useLabelStore, useSessionStore } from '../store/gatewayStore'
 
 const API = import.meta.env.VITE_API_URL || ''
 
-function Toggle({ value, onChange, label, description }) {
+function Toggle({ value, onChange, label, description }: { value: boolean; onChange: (v: boolean) => void; label: string; description?: string }) {
   return (
     <div className="flex items-center justify-between py-3 border-b border-[#2a3142]">
       <div>
@@ -20,7 +20,7 @@ function Toggle({ value, onChange, label, description }) {
   )
 }
 
-export default function SettingsPanel({ onClose }) {
+export default function SettingsPanel({ onClose }: { onClose: () => void }) {
   const { labels, setLabel } = useLabelStore()
   const { sessions } = useSessionStore()
 
@@ -41,7 +41,7 @@ export default function SettingsPanel({ onClose }) {
   const [renaming, setRenaming] = useState(false)
   const [renameStatus, setRenameStatus] = useState('')
 
-  const save = (key, val) => localStorage.setItem(key, String(val))
+  const save = (key: string, val: boolean) => localStorage.setItem(key, String(val))
 
   const handleRenameAll = async () => {
     setRenaming(true)
@@ -52,22 +52,23 @@ export default function SettingsPanel({ onClose }) {
       if (data.error) throw new Error(data.error)
       // Match against loaded sessions
       let count = 0
+      const dataMap = data as Record<string, string>
       sessions.forEach(s => {
         const uuid = s.id || s.sessionId
         const gKey = s.key
-        if (uuid && data[uuid]) {
-          setLabel(gKey, data[uuid])
-          setLabel(uuid, data[uuid])
+        if (uuid && dataMap[uuid]) {
+          setLabel(gKey, dataMap[uuid])
+          setLabel(uuid, dataMap[uuid])
           count++
         }
       })
       // Also store all by UUID for future matching
-      Object.entries(data).forEach(([uuid, label]) => {
+      Object.entries(data as Record<string, string>).forEach(([uuid, label]) => {
         if (!labels[uuid]) setLabel(uuid, label)
       })
       setRenameStatus(`✅ Applied ${count} labels (${Object.keys(data).length} total in DB)`)
     } catch (e) {
-      setRenameStatus(`❌ Error: ${e.message}`)
+      setRenameStatus(`❌ Error: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setRenaming(false)
     }
