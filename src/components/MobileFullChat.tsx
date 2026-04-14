@@ -9,7 +9,21 @@ interface MobileFullChatProps {
 interface ChatMessage {
   id?: string | number
   role: string
-  content: string
+  content: string | unknown
+}
+
+function normalizeContent(content: string | unknown): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map((b: unknown) => {
+        if (typeof b === 'string') return b
+        if (b && typeof b === 'object' && 'text' in b) return String((b as {text: unknown}).text)
+        return ''
+      })
+      .join('')
+  }
+  return String(content ?? '')
 }
 
 export default function MobileFullChat({ session, onBack }: MobileFullChatProps) {
@@ -134,7 +148,7 @@ export default function MobileFullChat({ session, onBack }: MobileFullChatProps)
                   : 'bg-[#1e2330] text-[#e8eaf0] rounded-bl-sm'
               }`}
             >
-              {msg.content}
+              {normalizeContent(msg.content)}
             </div>
           </div>
         ))}

@@ -22,8 +22,17 @@ export default class ErrorBoundary extends Component<Props, State> {
     console.error('[octis] Uncaught error:', error, info)
   }
 
-  handleReset() {
-    localStorage.removeItem('octis-gateway')
+  async handleReset() {
+    // Unregister all service workers + clear caches
+    if ('serviceWorker' in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations()
+      await Promise.all(regs.map(r => r.unregister()))
+    }
+    if ('caches' in window) {
+      const keys = await caches.keys()
+      await Promise.all(keys.map(k => caches.delete(k)))
+    }
+    localStorage.clear()
     window.location.reload()
   }
 
@@ -38,10 +47,10 @@ export default class ErrorBoundary extends Component<Props, State> {
               {this.state.error?.message || 'Unexpected error'}
             </p>
             <button
-              onClick={this.handleReset}
+              onClick={() => void this.handleReset()}
               className="bg-[#6366f1] hover:bg-[#818cf8] text-white rounded-lg px-5 py-2 text-sm font-medium transition-colors"
             >
-              Clear state &amp; reload
+              Clear cache &amp; reload
             </button>
           </div>
         </div>

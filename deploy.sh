@@ -23,3 +23,6 @@ systemctl reload nginx
 echo ""
 echo "✅ Deployed. Live at https://octis.duckdns.org"
 curl -s https://octis.duckdns.org/api/health && echo ""
+
+echo "[octis] Running QA..."
+node /root/.openclaw/workspace/scripts/octis-qa.js || echo "⚠️  QA found issues"

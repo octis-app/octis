@@ -4,12 +4,28 @@ import { useGatewayStore, useSessionStore, Session } from '../store/gatewayStore
 interface MobileSessionCardProps {
   session: Session
   onOpenFull?: (session: Session) => void
+  onArchive?: (session: Session) => void
 }
 
 interface ChatMessage {
   id?: string | number
   role: string
-  content: string
+  content: string | unknown
+}
+
+// Gateway can return content as string or array of content blocks [{type:'text',text:'...'}]
+function normalizeContent(content: string | unknown): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map((b: unknown) => {
+        if (typeof b === 'string') return b
+        if (b && typeof b === 'object' && 'text' in b) return String((b as {text: unknown}).text)
+        return ''
+      })
+      .join('')
+  }
+  return String(content ?? '')
 }
 
 const statusColors: Record<string, string> = {
@@ -28,7 +44,7 @@ const statusLabels: Record<string, string> = {
   quiet: 'Quiet',
 }
 
-export default function MobileSessionCard({ session, onOpenFull }: MobileSessionCardProps) {
+export default function MobileSessionCard({ session, onOpenFull, onArchive }: MobileSessionCardProps) {
   const { send, ws } = useGatewayStore()
   const { getStatus } = useSessionStore()
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -152,6 +168,15 @@ export default function MobileSessionCard({ session, onOpenFull }: MobileSession
             Open ↗
           </button>
         )}
+        {onArchive && (
+          <button
+            onClick={() => onArchive(session)}
+            className="text-xs text-[#4b5563] hover:text-red-400 ml-1 transition-colors shrink-0 px-1"
+            title="Archive session"
+          >
+            🗑
+          </button>
+        )}
       </div>
 
       {/* Messages */}
@@ -179,7 +204,7 @@ export default function MobileSessionCard({ session, onOpenFull }: MobileSession
                   : 'bg-[#0f1117] text-[#e8eaf0] rounded-bl-sm'
               }`}
             >
-              {msg.content}
+              {normalizeContent(msg.content)}
             </div>
           </div>
         ))}

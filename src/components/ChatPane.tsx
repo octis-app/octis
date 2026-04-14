@@ -1,5 +1,67 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { useGatewayStore, useSessionStore, useProjectStore, Session } from '../store/gatewayStore'
+import { useGatewayStore, useSessionStore, useProjectStore, useLabelStore, useDraftStore, useHiddenStore, Session } from '../store/gatewayStore'
+
+// ─── Session cost/health badge (for panel header) ─────────────────────────────
+function SessionCostBadge({ sessionKey }: { sessionKey: string }) {
+  const { sessions, getCostDelta } = useSessionStore()
+  const { send } = useGatewayStore()
+  const [expanded, setExpanded] = useState(false)
+
+  const session = sessions.find((s: Session) => s.key === sessionKey)
+  const cost = session?.estimatedCostUsd
+  if (cost == null || cost < 0.01) return null
+
+  const delta = getCostDelta(sessionKey)
+
+  let icon = '🟢'
+  let level = 'Healthy'
+  let pillClass = 'bg-emerald-900/40 text-emerald-400 border-emerald-700/40'
+  if (cost > 60 || (delta != null && delta > 0.20)) {
+    icon = '🔥'; level = 'Hot'; pillClass = 'bg-red-900/40 text-red-400 border-red-700/40'
+  } else if (cost > 15 || (delta != null && delta > 0.05)) {
+    icon = '⚠️'; level = 'Warm'; pillClass = 'bg-amber-900/40 text-amber-400 border-amber-700/40'
+  }
+
+  const sendCompact = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    send({ type: 'req', id: `compact-${Date.now()}`, method: 'chat.send', params: { sessionKey, message: '/compact' } })
+    setExpanded(false)
+  }
+
+  return (
+    <div className="relative shrink-0" onMouseEnter={() => setExpanded(true)} onMouseLeave={() => setExpanded(false)}>
+      <div
+        className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-mono cursor-default select-none ${pillClass}`}
+        title={`Session cost: $${cost.toFixed(2)}`}
+      >
+        <span className="leading-none" style={{ fontSize: '10px' }}>{icon}</span>
+        <span>${cost.toFixed(2)}</span>
+      </div>
+      {expanded && (
+        <div className="absolute right-0 top-7 z-50 bg-[#1a1f2e] border border-[#2a3142] rounded-xl shadow-2xl p-3 min-w-[180px] text-xs">
+          <div className="text-white font-semibold mb-1">Context cost</div>
+          <div className="text-[#e8eaf0] mb-0.5">
+            Total: <span className="font-mono text-amber-400">${cost.toFixed(3)}</span>
+          </div>
+          {delta != null && (
+            <div className="text-[#e8eaf0] mb-2">
+              +<span className="font-mono text-[10px]" style={{ color: level === 'Hot' ? '#ef4444' : level === 'Warm' ? '#f59e0b' : '#22c55e' }}>${delta.toFixed(3)}</span>/30s
+            </div>
+          )}
+          <div className="text-[10px] text-[#6b7280] mb-2">{level === 'Hot' ? 'Context is large — compact now' : level === 'Warm' ? 'Consider compacting soon' : 'Context healthy'}</div>
+          {level !== 'Healthy' && (
+            <button
+              onClick={sendCompact}
+              className="w-full bg-[#6366f1] hover:bg-[#818cf8] text-white rounded px-2 py-1 text-[10px] font-medium transition-colors"
+            >Compact context</button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+const API = (import.meta.env.VITE_API_URL as string) || ''
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -45,7 +107,7 @@ function CollapsibleCode({ lang, code }: { lang: string; code: string }) {
       </button>
       {!open && (
         <div className="px-3 py-1.5 bg-[#0a0d14] text-[11px] font-mono text-[#6b7280] truncate">
-          {preview}…
+          {preview}...
         </div>
       )}
       {open && (
@@ -250,14 +312,31 @@ function isNoiseMsg(msg: ChatMessage): boolean {
 
 export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }: ChatPaneProps) {
   const { send, ws, connected } = useGatewayStore()
-  const { setSessions, sessions, setLastRole } = useSessionStore()
+  const { setSessions, sessions, setLastRole, markStreaming: markSessionStreaming, incrementUnread, clearUnread, sessionMeta } = useSessionStore()
   const { setCard } = useProjectStore()
+  const { setLabel: saveLabelLocal, getLabel } = useLabelStore()
+  const { setDraft, getDraft, clearDraft } = useDraftStore()
   const [messages, setMessages] = useState<ChatMessage[]>([])
-  const [input, setInput] = useState('')
+  const [input, setInput] = useState(() => (sessionKey ? getDraft(sessionKey) : ''))
   const [sessionCard, setSessionCard] = useState<string | null>(null)
-  const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [cardOpen, setCardOpen] = useState(false)
   const [autoRenamed, setAutoRenamed] = useState(false)
   const [lastHeartbeat, setLastHeartbeat] = useState<{ ts: Date; ok: boolean } | null>(null)
+  const [isWorking, setIsWorking] = useState(false)
+  const [workingTool, setWorkingTool] = useState<string | null>(null)
+  // Sent queue: tracks recent sends with status for user feedback
+  type SentEntry = { id: number; text: string; status: 'sending' | 'delivered' }
+  const [sentQueue, setSentQueue] = useState<SentEntry[]>([])
+  const confirmedOptimisticRef = useRef<number | null>(null) // tracks just-confirmed optimistic ID
+  const lastSentRef = useRef<number>(0) // timestamp of last sent message
+  const preSendCountRef = useRef<number>(0) // server message count at time of send
+  const pendingOptimisticIdRef = useRef<number | null>(null) // id of current optimistic message
+  // Show thinking indicator if: local state says working, OR the global session store says this
+  // session is streaming (e.g. driven from another pane or another surface like Slack)
+  const globalStreaming = sessionKey ? (sessionMeta[sessionKey]?.isStreaming ?? false) : false
+  const showWorking = isWorking || globalStreaming
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
   const [noiseHidden, setNoiseHidden] = useState(() => {
     try {
       return localStorage.getItem('octis-noise-hidden') !== 'false'
@@ -266,6 +345,8 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
     }
   })
   const bottomRef = useRef<HTMLDivElement>(null)
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
+  const userScrolledUpRef = useRef(false)
 
   const toggleNoise = () =>
     setNoiseHidden((v) => {
@@ -277,6 +358,28 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
     })
 
   // Load chat history when session or ws changes
+  // Clear unread count when this pane is active on a session
+  useEffect(() => {
+    if (sessionKey) clearUnread(sessionKey)
+  }, [sessionKey, clearUnread])
+
+  // Trigger a sessions.list refresh on mount so the cost badge populates immediately
+  // (Sidebar polls every 30s — without this, a newly-opened pane can wait up to 30s)
+  useEffect(() => {
+    if (!sessionKey || !connected) return
+    send({ type: 'req', id: `sessions-list-pane-${Date.now()}`, method: 'sessions.list', params: {} })
+  }, [sessionKey, connected, send])
+
+  // Handle sent queue delivery confirmation outside of setMessages callbacks
+  useEffect(() => {
+    const confirmed = confirmedOptimisticRef.current
+    if (confirmed === null) return
+    confirmedOptimisticRef.current = null
+    setSentQueue(prev => prev.map(e => e.id === confirmed ? { ...e, status: 'delivered' as const } : e))
+    const timer = setTimeout(() => setSentQueue(prev => prev.filter(e => e.id !== confirmed)), 4000)
+    return () => clearTimeout(timer)
+  }, [messages]) // runs after messages state settles
+
   useEffect(() => {
     if (!sessionKey || !ws) return
     setMessages([])
@@ -306,15 +409,50 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
           msg.id?.startsWith(`chat-poll-${sessionKey}`)
         if (isPoll) {
           const msgs = msg.payload?.messages || []
+          // Clear working state based on last message role
+          const lastPollMsg = msgs[msgs.length - 1]
+          if (lastPollMsg?.role === 'assistant' && extractText(lastPollMsg.content).trim()) {
+            // Assistant replied — clear working indicator
+            // Use timestamp check only as a secondary guard (allow 2s slack for clock skew)
+            const rawTs = (lastPollMsg as {ts?: string | number; created_at?: string | number}).ts ||
+                          (lastPollMsg as {ts?: string | number; created_at?: string | number}).created_at
+            const msgTs = rawTs ? new Date(rawTs as string | number).getTime() : 0
+            // Clear if: no lastSent recorded yet, OR timestamp is valid and within 2s slack of send time
+            if (lastSentRef.current === 0 || msgTs === 0 || msgTs >= lastSentRef.current - 2000) {
+              setIsWorking(false)
+              setWorkingTool(null)
+              if (sessionKey) {
+                setLastRole(sessionKey, 'assistant')
+              }
+            }
+          } else if (lastPollMsg?.role === 'user' && isWorking) {
+            // Still waiting — keep working state, nothing to do
+          }
           setMessages((prev) => {
-            if (msgs.length <= prev.length) return prev
+            if (msgs.length === 0) return prev
+            const oid = pendingOptimisticIdRef.current
+            // Search ALL of prev for the tracked optimistic
+            const optimisticIdx = oid !== null ? prev.findIndex((m) => m.id === oid) : -1
+            const isOptimistic = optimisticIdx >= 0
+            if (isOptimistic) {
+              // Keep optimistic until server has our message (count > preSendCount)
+              if (msgs.length <= preSendCountRef.current) {
+                return [...msgs, prev[optimisticIdx]] // server hasn't received our msg yet
+              }
+              // Server has our message - drop optimistic, signal delivery
+              confirmedOptimisticRef.current = oid
+              pendingOptimisticIdRef.current = null
+              return msgs
+            }
+            // Always apply server list — this is the authoritative source.
+            // Skip only if count AND last ID both match (prevents skipping when duplicates
+            // inflated prev.length beyond what the server returned).
             const lastNew = msgs[msgs.length - 1]
-            const lastPrev = prev[prev.length - 1]
-            if (
-              lastNew?.id === lastPrev?.id &&
-              lastNew?.content === lastPrev?.content
-            )
-              return prev
+            const lastInPrev = prev[prev.length - 1]
+            const hasOrphans = prev.some((m) => typeof m.id === 'number')
+            if (!hasOrphans && msgs.length === prev.length && lastNew?.id !== undefined && lastNew?.id !== null && lastNew.id === lastInPrev?.id) {
+              return prev // same count + same last ID = nothing new, safe to skip
+            }
             return msgs
           })
           return
@@ -331,6 +469,26 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
               ts: new Date((lastHB.ts || lastHB.created_at || Date.now()) as string | number),
               ok: true,
             })
+          // Set/clear working based on last message after history load
+          const lastMsg = msgs[msgs.length - 1]
+          const lastMsgText = lastMsg ? extractText(lastMsg.content).trim() : ''
+          if (lastMsg?.role === 'assistant' && lastMsgText && !isHeartbeatResponse(lastMsg.content)) {
+            // Last message is a real assistant reply — done
+            setIsWorking(false)
+            setWorkingTool(null)
+          } else if (lastMsg && (
+            lastMsg.role === 'user' ||
+            lastMsg.role === 'toolCall' ||
+            lastMsg.role === 'tool' ||
+            (lastMsg.role === 'assistant' && !lastMsgText) // assistant with no text = tool-only turn
+          )) {
+            // Mid-task: user sent, or we’re in a tool loop with no final reply yet
+            setIsWorking(true)
+            setWorkingTool(null)
+            // Anchor lastSentRef so the poll doesn’t immediately clear working
+            // (poll clears when lastSentRef===0, which would wipe our just-set state)
+            lastSentRef.current = Date.now()
+          }
           setMessages(msgs)
           const card = msgs.find((m) => m.role === 'assistant')
           if (card) setSessionCard(extractText(card.content).slice(0, 300))
@@ -350,6 +508,42 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
           if (chatMsg.role === 'assistant' && isHeartbeatResponse(chatMsg.content)) {
             setLastHeartbeat({ ts: new Date(), ok: true })
           }
+          // Track working state from tool calls / assistant replies
+          if (chatMsg.role === 'toolCall' || chatMsg.role === 'tool') {
+            if (Array.isArray(chatMsg.content)) {
+              const tb = (chatMsg.content as ContentBlock[]).find(
+                (b) => b.type === 'tool_use' || b.type === 'toolCall'
+              )
+              if (tb) setWorkingTool((tb as { name?: string }).name || 'tool')
+            } else {
+              setWorkingTool('tool')
+            }
+          } else if (chatMsg.role === 'assistant') {
+            // Update the tool name shown in the indicator, but do NOT clear isWorking here.
+            // Only the poll handler clears it (it has the authoritative final state).
+            // Clearing from streaming events causes the bubble to disappear mid-task when
+            // the agent sends a partial reply before continuing with more tool calls.
+            if (Array.isArray(chatMsg.content)) {
+              const blocks = chatMsg.content as ContentBlock[]
+              const hasToolCall = blocks.some((b) => b.type === 'tool_use' || b.type === 'toolCall')
+              if (hasToolCall) {
+                const tb = blocks.find((b) => b.type === 'tool_use' || b.type === 'toolCall')
+                setWorkingTool((tb as { name?: string })?.name || 'tool')
+              }
+            }
+          }
+          // Increment unread for new assistant replies — but only when this pane is NOT
+          // the one the user is currently focused on (i.e., it's a background pane).
+          // We detect this by checking if another pane is pinned to a LOWER index.
+          if (chatMsg.role === 'assistant' && !isHeartbeatResponse(chatMsg.content)) {
+            const { activePanes, paneCount } = useSessionStore.getState()
+            const myPaneIndex = activePanes.findIndex(k => k === sessionKey)
+            const isBackgroundPane = myPaneIndex > 0 && activePanes.slice(0, myPaneIndex).some(k => k !== null)
+            if (isBackgroundPane && extractText(chatMsg.content).trim()) {
+              incrementUnread(sessionKey)
+            }
+          }
+
           setMessages((prev) => {
             const idx = prev.findIndex((m) => m.id === chatMsg.id)
             if (idx >= 0) {
@@ -357,7 +551,26 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
               next[idx] = { ...next[idx], content: chatMsg.content }
               return next
             }
-            return [...prev, chatMsg]
+            if (chatMsg.role === 'user') {
+              // Replace the specific pending optimistic if it exists
+              const oid = pendingOptimisticIdRef.current
+              if (oid !== null) {
+                const optimisticIdx = prev.findIndex((m) => m.id === oid)
+                if (optimisticIdx >= 0) {
+                  const next = [...prev]
+                  next[optimisticIdx] = chatMsg
+                  pendingOptimisticIdRef.current = null
+                  return next
+                }
+              }
+              // No pending optimistic - don't append (poll handles it)
+              return prev
+            }
+            // New messages from streaming events are intentionally NOT appended here.
+            // The poll (1s) is the single source of truth for new messages.
+            // Appending from both streaming and poll creates duplicates when IDs differ
+            // (e.g. one event has id='abc', another has id=undefined for the same message).
+            return prev
           })
           if (chatMsg.role === 'assistant') {
             const text = extractText(chatMsg.content)
@@ -366,9 +579,11 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
         }
 
         // Flat chat event (older gateway versions)
-        if (msg.type === 'chat' && msg.sessionKey === sessionKey) {
+        // Only process if both id and role are explicitly present — avoids appending
+        // user messages as 'assistant' when role is undefined
+        if (msg.type === 'chat' && msg.sessionKey === sessionKey && msg.id_msg && msg.role) {
           const flatMsg: ChatMessage = {
-            role: (msg.role as ChatMessage['role']) || 'assistant',
+            role: msg.role as ChatMessage['role'],
             content: msg.content,
             id: msg.id_msg,
           }
@@ -379,7 +594,22 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
               next[idx] = { ...next[idx], content: flatMsg.content }
               return next
             }
-            return [...prev, flatMsg]
+            // User messages: replace pending optimistic if exists, otherwise skip (poll handles it)
+            if (flatMsg.role === 'user') {
+              const oid = pendingOptimisticIdRef.current
+              if (oid !== null) {
+                const optimisticIdx = prev.findIndex((m) => m.id === oid)
+                if (optimisticIdx >= 0) {
+                  const next = [...prev]
+                  next[optimisticIdx] = flatMsg
+                  pendingOptimisticIdRef.current = null
+                  return next
+                }
+              }
+              return prev // no pending optimistic — poll handles it
+            }
+            // Non-user messages: poll is authoritative, don't append from flat events
+            return prev
           })
         }
       } catch {}
@@ -400,7 +630,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
         method: 'chat.history',
         params: { sessionKey, limit: 100 },
       })
-    }, 3000)
+    }, 1000)
     return () => clearInterval(interval)
   }, [sessionKey, ws, connected, send])
 
@@ -413,28 +643,44 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
     const firstUser = messages.find((m) => m.role === 'user')
     const firstAssistant = messages.find((m) => m.role === 'assistant')
     if (!firstUser || !firstAssistant) return
+    // If a persisted label exists in the store, never auto-overwrite it
+    const persistedLabel = getLabel(sessionKey)
+    if (persistedLabel) return
     const session = sessionsRef.current.find((s: Session) => s.key === sessionKey)
     const currentLabel = session?.label || ''
     if (currentLabel && !currentLabel.startsWith('session-') && currentLabel !== sessionKey)
       return
-    const rawLabel = extractText(firstUser.content)
-      .trim()
-      .replace(/\n/g, ' ')
-      .slice(0, 50)
-    if (rawLabel.length > 5) {
+    // Use AI autoname instead of raw-slice to get meaningful labels
+    setAutoRenamed(true)
+    const slim = messages
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .slice(0, 6)
+      .map((m) => ({ role: m.role, content: extractText(m.content).slice(0, 300) }))
+    void fetch(`${API}/api/session-autoname`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: slim }),
+    }).then((r) => r.json()).then((data: { label?: string }) => {
+      const label = data.label
+      if (!label) return
       send({
         type: 'req',
         id: `sessions-patch-${Date.now()}`,
         method: 'sessions.patch',
-        params: { sessionKey, patch: { label: rawLabel } },
+        params: { sessionKey, patch: { label } },
       })
       setSessions(
         sessionsRef.current.map((s: Session) =>
-          s.key === sessionKey ? { ...s, label: rawLabel } : s
+          s.key === sessionKey ? { ...s, label } : s
         )
       )
-      setAutoRenamed(true)
-    }
+      saveLabelLocal(sessionKey, label)
+      void fetch(`${API}/api/session-rename`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionKey, label }),
+      })
+    }).catch(() => { /* silently fail - label stays as session key */ })
   }, [autoRenamed, sessionKey, messages, send, setSessions])
 
   useEffect(() => {
@@ -442,25 +688,233 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
   }, [autoRename])
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    if (!userScrolledUpRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
   }, [messages])
 
+  // Extract actual message content from OpenClaw webchat metadata envelope
+  function extractEnvelopeContent(text: string): MessageContent | null {
+    if (!text.includes('Sender (untrusted metadata):')) return null
+    // Match content after the [Day YYYY-MM-DD HH:MM UTC] timestamp
+    const match = text.match(/\[\w+\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+UTC\]\s*([\s\S]*)$/)
+    if (!match) return null
+    const raw = match[1].trim()
+    if (!raw) return null
+    // Try to parse as JSON array (image+text blocks)
+    if (raw.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(raw)
+        if (Array.isArray(parsed)) return parsed as ContentBlock[]
+      } catch {}
+    }
+    return raw
+  }
+
+  // Try to parse content that looks like a JSON content-block array (or single object).
+  // Returns the parsed blocks, or null if it doesn't look like one / fails to parse.
+  function tryParseBlocks(raw: string): ContentBlock[] | null {
+    const trimmed = raw.trimStart()
+    // Try as JSON array
+    if (trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(raw)
+        if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === 'object' && 'type' in parsed[0]) {
+          return parsed as ContentBlock[]
+        }
+      } catch {}
+    }
+    // Try as a single JSON object (server may return unwrapped object)
+    if (trimmed.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(raw)
+        if (parsed && typeof parsed === 'object' && 'type' in parsed) {
+          return [parsed] as ContentBlock[]
+        }
+      } catch {}
+    }
+    return null
+  }
+
+  // Render an image block — handles both Anthropic format and OpenClaw native format
+  function renderImageBlock(b: ContentBlock | Record<string, unknown>, key: number): React.ReactNode {
+    const block = b as Record<string, unknown>
+    // Anthropic format: {type:'image', source:{type:'base64', media_type:..., data:...}}
+    const src = block.source as { type?: string; data?: string; media_type?: string; url?: string } | undefined
+    // OpenClaw native format: {type:'image', data:..., mimeType:...}
+    const directData = block.data as string | undefined
+    const directMime = (block.mimeType || block.media_type) as string | undefined
+    let imgSrc = ''
+    if (src?.type === 'base64' && src.data) {
+      imgSrc = `data:${src.media_type || 'image/png'};base64,${src.data}`
+    } else if (src?.url) {
+      imgSrc = src.url
+    } else if (directData) {
+      imgSrc = `data:${directMime || 'image/png'};base64,${directData}`
+    }
+    return imgSrc
+      ? <img key={key} src={imgSrc} alt="image" className="max-w-full rounded-lg my-1 max-h-64 object-contain" />
+      : <span key={key} className="text-[#6b7280] text-xs italic">[Image]</span>
+  }
+
+  const API = (window as {VITE_API_URL?: string}).VITE_API_URL ||
+    (import.meta as {env?: {VITE_API_URL?: string}}).env?.VITE_API_URL || ''
+
+  // Render text block — detects [media attached: /path...] and swaps in image or PDF indicator
+  function renderTextWithMedia(text: string, key: number): React.ReactNode {
+    // Match: [media attached: /root/.openclaw/media/inbound/FILENAME.EXT (mime/type) | ...]
+    const mediaMatch = text.match(/\[media attached:\s*([^\s)]+)\s+\(([^)]+)\)/)
+    if (mediaMatch) {
+      const filePath = mediaMatch[1]
+      const mimeType = mediaMatch[2] || ''
+      const filename = filePath.split('/').pop() || ''
+      const mediaSrc = `${API}/api/media/${encodeURIComponent(filename)}`
+      // Strip metadata lines so only actual user text remains
+      const afterMeta = text
+        .replace(/\[media attached:[^\]]+\]/g, '')
+        .replace(/\nTo send an image back[^\n]*(\n|$)/g, '')
+        .replace(/\nTo send a document back[^\n]*(\n|$)/g, '')
+        .replace(/System: \[.*?\]/gs, '')
+        .replace(/\nSender \(untrusted[\s\S]*?UTC\]/g, '')
+        .trim()
+      const isPdf = mimeType.includes('pdf') || filename.endsWith('.pdf')
+      return (
+        <span key={key}>
+          {isPdf
+            ? (
+              <a href={mediaSrc} target="_blank" rel="noopener noreferrer"
+                className="flex items-center gap-2 bg-[#2a3142] rounded-lg px-3 py-2 my-1 max-w-xs hover:bg-[#3a4152] transition-colors no-underline">
+                <span className="text-2xl">📄</span>
+                <span className="text-xs text-white truncate">{filename}</span>
+                <span className="text-[10px] text-[#6b7280] ml-auto shrink-0">↗️</span>
+              </a>
+            )
+            : (
+              <img src={mediaSrc} alt="image" className="max-w-full rounded-lg my-1 max-h-64 object-contain"
+                onError={(e) => { (e.target as HTMLImageElement).style.display='none' }} />
+            )
+          }
+          {afterMeta && <ChatMarkdown text={afterMeta} />}
+        </span>
+      )
+    }
+    return <ChatMarkdown key={key} text={text} />
+  }
+
   function renderContent(content: MessageContent) {
+    // Parse JSON strings that may represent array content (e.g. image+text blocks sent via chat.send)
+    if (typeof content === 'string') {
+      const blocks = tryParseBlocks(content)
+      if (blocks) content = blocks
+    }
+    // Extract from OpenClaw metadata envelope stored in text blocks
+    if (Array.isArray(content) && content.length === 1) {
+      const b = content[0] as ContentBlock
+      if (b.type === 'text') {
+        const extracted = extractEnvelopeContent((b as {type:'text';text:string}).text)
+        if (extracted !== null) {
+          if (typeof extracted === 'string') {
+            // Could be a JSON content-block string embedded in envelope
+            const blocks = tryParseBlocks(extracted)
+            content = blocks ?? extracted
+          } else {
+            content = extracted
+          }
+        }
+      }
+    } else if (typeof content === 'string') {
+      const extracted = extractEnvelopeContent(content)
+      if (extracted !== null) {
+        if (typeof extracted === 'string') {
+          const blocks = tryParseBlocks(extracted)
+          content = blocks ?? extracted
+        } else {
+          content = extracted
+        }
+      }
+    }
+    // Handle array content with possible image blocks
+    if (Array.isArray(content)) {
+      const blocks = content as ContentBlock[]
+      return (
+        <>
+          {blocks.map((b, i) => {
+            if (b.type === 'image') {
+              return renderImageBlock(b, i)
+            }
+            if (b.type === 'document') {
+              const block = b as Record<string, unknown>
+              const name = (block.name as string) || 'document.pdf'
+              return (
+                <div key={i} className="flex items-center gap-2 bg-[#2a3142] rounded-lg px-3 py-2 my-1 max-w-xs">
+                  <span className="text-2xl">📄</span>
+                  <span className="text-xs text-white truncate">{name}</span>
+                </div>
+              )
+            }
+            if (b.type === 'text') {
+              const rawText = (b as { type: 'text'; text: string }).text
+              return rawText?.trim() ? renderTextWithMedia(rawText, i) : null
+            }
+            return null
+          })}
+        </>
+      )
+    }
+    // Last-chance: if content is a plain object with a 'type' field, treat as single block
+    if (content !== null && typeof content === 'object' && !Array.isArray(content)) {
+      const obj = content as Record<string, unknown>
+      if (obj.type === 'image') return renderImageBlock(obj as ContentBlock, 0)
+      if (obj.type === 'text' && typeof obj.text === 'string') return <ChatMarkdown text={obj.text} />
+    }
     const text = extractText(content)
     if (!text) return null
+    // Never render raw JSON content-block arrays or metadata envelopes
+    const trimmed = text.trim()
+    // Detect document/image blocks regardless of envelope wrapping
+    const hasDocumentBlock = trimmed.includes('"type":"document"') || trimmed.includes('"type": "document"')
+    const hasImageBlock = trimmed.includes('"type":"image"') || trimmed.includes('"type": "image"')
+    const hasTimestampEnvelope = /^\[\w+\s+\d{4}-\d{2}-\d{2}/.test(trimmed)
+    if (
+      trimmed.startsWith('[{') ||                                // JSON array of objects
+      trimmed.startsWith('{"type"') ||                          // bare JSON object with type
+      trimmed.startsWith('{ "type"') ||
+      (trimmed.startsWith('[') && trimmed.includes('"source"')) || // image/doc block in array
+      hasImageBlock || hasDocumentBlock ||                       // any block type anywhere
+      hasTimestampEnvelope ||                                    // timestamp envelope we couldn't strip
+      trimmed.startsWith('Sender (untrusted metadata):')
+    ) {
+      // Try to show a meaningful label instead of raw JSON
+      if (hasDocumentBlock) {
+        return <div className="flex items-center gap-2 bg-[#2a3142] rounded-lg px-3 py-2 my-1 max-w-xs"><span className="text-2xl">📄</span><span className="text-xs text-[#6b7280]">PDF attachment</span></div>
+      }
+      if (hasImageBlock) {
+        return <span className="text-[#6b7280] text-xs italic">[Image attachment]</span>
+      }
+      return <span className="text-[#6b7280] text-xs italic">[Attachment]</span>
+    }
     return <ChatMarkdown text={text} />
   }
 
   const handleSend = () => {
-    if (!input.trim() || !sessionKey) return
-    const msg = input
+    if ((!input.trim() && !pendingFile) || !sessionKey) return
+    const msg = input || (pendingFile ? `(${pendingFile.kind})` : '')
     const idempotencyKey = `octis-send-${Date.now()}-${Math.random().toString(36).slice(2)}`
     const reqId = `chat-send-${Date.now()}`
+    // Build content — include file if present (image or document)
+    const messageContent = pendingFile
+      ? JSON.stringify([
+          pendingFile.kind === 'image'
+            ? { type: 'image', source: { type: 'base64', media_type: pendingFile.mimeType, data: pendingFile.dataUrl.split(',')[1] } }
+            : { type: 'document', source: { type: 'base64', media_type: pendingFile.mimeType, data: pendingFile.dataUrl.split(',')[1] } },
+          ...(input.trim() ? [{ type: 'text', text: input }] : []),
+        ])
+      : msg
     const ok = send({
       type: 'req',
       id: reqId,
       method: 'chat.send',
-      params: { sessionKey, message: msg, deliver: false, idempotencyKey },
+      params: { sessionKey, message: messageContent, deliver: false, idempotencyKey },
     })
     if (!ok) {
       setMessages((prev) => [
@@ -473,9 +927,36 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
       ])
       return
     }
-    setMessages((prev) => [...prev, { role: 'user', content: msg, id: Date.now() }])
+    // Use structured content for optimistic message so files render immediately
+    const optimisticContent: MessageContent = pendingFile
+      ? [
+          pendingFile.kind === 'image'
+            ? { type: 'image', source: { type: 'base64', media_type: pendingFile.mimeType, data: pendingFile.dataUrl.split(',')[1] } }
+            : { type: 'document', source: { type: 'base64', media_type: pendingFile.mimeType, data: pendingFile.dataUrl.split(',')[1] }, name: pendingFile.name } as ContentBlock,
+          ...(input.trim() ? [{ type: 'text', text: input }] : []),
+        ]
+      : msg
+    const optimisticId = Date.now()
+    pendingOptimisticIdRef.current = optimisticId
+    setMessages((prev) => [...prev, { role: 'user', content: optimisticContent, id: optimisticId }])
     setLastRole(sessionKey, 'user')
+    setIsWorking(true)
+    setWorkingTool(null)
+    lastSentRef.current = Date.now()
+    preSendCountRef.current = messages.filter(m => typeof m.id !== 'number').length
+    // Add to sent queue for user feedback
+    const queueEntry: SentEntry = { id: optimisticId, text: msg.slice(0, 60) + (msg.length > 60 ? '…' : ''), status: 'sending' }
+    setSentQueue(prev => [...prev.slice(-4), queueEntry]) // keep last 5
+    // Tell sidebar this session is now working
+    if (sessionKey) markSessionStreaming(sessionKey)
     setInput('')
+    if (sessionKey) clearDraft(sessionKey)
+    setPendingFile(null)
+    userScrolledUpRef.current = false // snap back to bottom on send
+    // Reset textarea height
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto'
+    }
 
     const errorHandler = (event: MessageEvent) => {
       try {
@@ -506,74 +987,107 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
     }, 10000)
   }
 
-  const handleBriefMe = () => {
-    if (!sessionKey) return
-    const msg = 'Give me a 3-sentence status update: (1) what you last did, (2) what you\'re working on now, (3) what\'s next. No fluff.'
-    const idempotencyKey = `octis-brief-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey, message: msg, deliver: false, idempotencyKey } })
-    setMessages((prev) => [...prev, { role: 'user', content: '📋 Brief me', id: Date.now() }])
+  const [autoNaming, setAutoNaming] = useState(false)
+  const [pendingFile, setPendingFile] = useState<{ dataUrl: string; mimeType: string; name: string; kind: 'image' | 'document' } | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const handleAttachFile = (file: File) => {
+    const isImage = file.type.startsWith('image/')
+    const isPdf = file.type === 'application/pdf'
+    if (!isImage && !isPdf) return
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      const dataUrl = e.target?.result as string
+      setPendingFile({ dataUrl, mimeType: file.type, name: file.name, kind: isImage ? 'image' : 'document' })
+    }
+    reader.readAsDataURL(file)
   }
 
-  const handlePause = () => {
-    if (!sessionKey) return
-    const msg = 'Pause. Summarize the current state in 3-5 bullet points so we can resume cleanly later: what was decided, what\'s in progress, what\'s next, any blockers. Then stop and wait for me.'
-    const idempotencyKey = `octis-pause-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey, message: msg, deliver: false, idempotencyKey } })
-    setMessages((prev) => [...prev, { role: 'user', content: '⏸️ Pause', id: Date.now() }])
+  const handlePaste = (e: React.ClipboardEvent) => {
+    const item = Array.from(e.clipboardData.items).find((i) => i.type.startsWith('image/'))
+    if (item) {
+      e.preventDefault()
+      const file = item.getAsFile()
+      if (file) handleAttachFile(file)
+    }
   }
 
-  const handleContinue = () => {
-    if (!sessionKey) return
-    const msg = 'Continue from where we left off. Review the last state summary and resume the next action.'
-    const idempotencyKey = `octis-continue-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey, message: msg, deliver: false, idempotencyKey } })
-    setMessages((prev) => [...prev, { role: 'user', content: '▶️ Continue', id: Date.now() }])
+  const handleAutoRename = async () => {
+    if (!sessionKey || messages.length === 0 || autoNaming) return
+    setAutoNaming(true)
+    try {
+      // Send only first 8 messages, text-only, trimmed - avoid payload limit
+      const slim = messages
+        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        .slice(0, 8)
+        .map((m) => ({ role: m.role, content: extractText(m.content).slice(0, 400) }))
+      const res = await fetch(`${API}/api/session-autoname`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: slim }),
+      })
+      const data = await res.json() as { label?: string; error?: string }
+      const label = data.label
+      if (!label) return
+      send({
+        type: 'req',
+        id: `sessions-patch-${Date.now()}`,
+        method: 'sessions.patch',
+        params: { sessionKey, patch: { label } },
+      })
+      setSessions(sessions.map((s: Session) => s.key === sessionKey ? { ...s, label } : s))
+      saveLabelLocal(sessionKey, label)
+      void fetch(`${API}/api/session-rename`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionKey, label }),
+      })
+    } catch (e) {
+      console.error('[autoname]', e)
+    } finally {
+      setAutoNaming(false)
+    }
   }
 
-  const handleSave = () => {
+  // Helper: send a quick-action message without adding an optimistic to the local state.
+  // The poll will surface the message naturally. The thinking indicator confirms it was sent.
+  const sendQuickAction = (msg: string, prefix: string) => {
     if (!sessionKey) return
-    const msg =
-      '💾 checkpoint — save any key decisions, context, or tasks from this session to MEMORY.md and TODOS.md now. One-line ack only.'
-    const idempotencyKey = `octis-save-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    send({
+    const ok = send({
       type: 'req',
       id: `chat-send-${Date.now()}`,
       method: 'chat.send',
-      params: { sessionKey, message: msg, deliver: false, idempotencyKey },
+      params: { sessionKey, message: msg, deliver: false, idempotencyKey: `octis-${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}` },
     })
-    setMessages((prev) => [
-      ...prev,
-      { role: 'user', content: '💾 Save checkpoint', id: Date.now() },
-    ])
+    if (ok) {
+      setIsWorking(true)
+      setWorkingTool(null)
+      setLastRole(sessionKey, 'user')
+      lastSentRef.current = Date.now()
+      preSendCountRef.current = messages.filter(m => typeof m.id !== 'number').length
+      if (sessionKey) markSessionStreaming(sessionKey)
+    }
   }
 
-  const handleSteppingAway = () => {
-    if (!sessionKey) return
-    const msg =
-      "I'm stepping away for a while. Please do the following:\n" +
-      "1. Summarize what you're currently working on (1-2 sentences).\n" +
-      "2. List anything you're blocked on or need from me before I go — be specific (credentials, a decision, a file, etc.).\n" +
-      "3. List everything you CAN do autonomously while I'm gone, in order.\n" +
-      "4. Estimate how long you can run without me.\n" +
-      "Be concise. I'll read this on my phone."
-    const idempotencyKey = `octis-away-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    send({
-      type: 'req',
-      id: `chat-send-${Date.now()}`,
-      method: 'chat.send',
-      params: { sessionKey, message: msg, deliver: false, idempotencyKey },
-    })
-    setMessages((prev) => [
-      ...prev,
-      { role: 'user', content: '🚪 Stepping away — what do you need from me?', id: Date.now() },
-    ])
-  }
+  const handleBriefMe    = () => sendQuickAction('Give me a 3-sentence status update: (1) what you last did, (2) what you\'re working on now, (3) what\'s next. No fluff.', 'brief')
+  const handlePause      = () => sendQuickAction('Pause. Summarize the current state in 3-5 bullet points so we can resume cleanly later: what was decided, what\'s in progress, what\'s next, any blockers. Then stop and wait for me.', 'pause')
+  const handleContinue   = () => sendQuickAction('Continue from where we left off. Review the last state summary and resume the next action.', 'continue')
+  const handleSave       = () => sendQuickAction('💾 checkpoint - save any key decisions, context, or tasks from this session to MEMORY.md and TODOS.md now. One-line ack only.', 'save')
+  const handleSteppingAway = () => sendQuickAction(
+    "I'm stepping away for a while. Please do the following:\n" +
+    "1. Summarize what you're currently working on (1-2 sentences).\n" +
+    "2. List anything you're blocked on or need from me before I go - be specific (credentials, a decision, a file, etc.).\n" +
+    "3. List everything you CAN do autonomously while I'm gone, in order.\n" +
+    "4. Estimate how long you can run without me.\n" +
+    "Be concise. I'll read this on my phone.", 'away'
+  )
 
   const handleArchive = () => {
     if (!sessionKey) return
     if (confirm('Save and archive this session?')) {
+      // Send save instruction to agent (fire-and-forget — NO_REPLY expected)
       const msg =
-        '💾 Final save — write any remaining decisions, tasks, or context to MEMORY.md and TODOS.md. One-line ack only.'
+        '💾 Final save - write any remaining decisions, tasks, or context to MEMORY.md and TODOS.md. Reply with NO_REPLY only.'
       const idempotencyKey = `octis-archive-${Date.now()}-${Math.random().toString(36).slice(2)}`
       send({
         type: 'req',
@@ -581,132 +1095,262 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
         method: 'chat.send',
         params: { sessionKey, message: msg, deliver: false, idempotencyKey },
       })
-      setTimeout(() => {
-        send({
-          type: 'req',
-          id: `sessions-delete-${Date.now()}`,
-          method: 'sessions.delete',
-          params: { sessionKey },
-        })
-        setSessions(sessions.filter((s: Session) => s.key !== sessionKey))
-        onClose()
-      }, 3000)
+      // Delete session immediately so any agent reply lands in a dead session
+      send({
+        type: 'req',
+        id: `sessions-delete-${Date.now()}`,
+        method: 'sessions.delete',
+        params: { sessionKey },
+      })
+      // Permanently hide from sidebar so gateway sessions.list can't re-surface it
+      useHiddenStore.getState().hide(sessionKey)
+      setSessions(sessions.filter((s: Session) => s.key !== sessionKey))
+      onClose()
     }
   }
 
   if (!sessionKey) {
+    const handleNewSession = () => {
+      const key = `session-${Date.now()}`
+      setSessions([{ key, label: 'New session', sessionKey: key }, ...sessions])
+      const emptyPane = useSessionStore.getState().activePanes.findIndex((p, i) => i < useSessionStore.getState().paneCount && !p)
+      useSessionStore.getState().pinToPane(emptyPane >= 0 ? emptyPane : _paneIndex, key)
+    }
     return (
       <div className="flex-1 flex items-center justify-center bg-[#0f1117] border-r border-[#2a3142]">
         <div className="text-center">
           <div className="text-4xl mb-3">🐙</div>
-          <div className="text-[#6b7280] text-sm">Click a session to open it here</div>
+          <div className="text-[#6b7280] text-sm mb-4">No session open</div>
+          <button
+            onClick={handleNewSession}
+            className="bg-[#6366f1] hover:bg-[#818cf8] text-white text-sm font-medium px-5 py-2 rounded-lg transition-colors"
+          >
+            + New Session
+          </button>
         </div>
       </div>
     )
   }
 
   const displayName = (() => {
+    const stored = getLabel(sessionKey)
     const s = sessions.find((s: Session) => s.key === sessionKey)
-    const label = s?.label || sessionKey
-    return label.length > 40 ? label.slice(0, 40) + '…' : label
+    const label = stored || s?.label || sessionKey
+    return label.length > 40 ? label.slice(0, 40) + '...' : label
+  })()
+
+  const lastMsgTime = (() => {
+    const visible = messages.filter(m => m.role === 'user' || m.role === 'assistant')
+    const last = visible[visible.length - 1]
+    if (!last) return null
+    const ts = (last as {ts?: string | number; created_at?: string | number}).ts ||
+                (last as {ts?: string | number; created_at?: string | number}).created_at
+    if (!ts) return null
+    const ms = typeof ts === 'number' ? ts : new Date(ts).getTime()
+    if (isNaN(ms)) return null
+    const diff = Date.now() - ms
+    const s = Math.floor(diff / 1000)
+    if (s < 60) return `${s}s ago`
+    const m = Math.floor(s / 60)
+    if (m < 60) return `${m}m ago`
+    const h = Math.floor(m / 60)
+    if (h < 24) return `${h}h ago`
+    return `${Math.floor(h / 24)}d ago`
   })()
 
   return (
     <div className="flex flex-1 min-w-0 border-r border-[#2a3142]">
-      <div className="flex flex-col flex-1 min-w-0">
-        {/* Header */}
-        <div className="flex items-center gap-1 px-3 py-2.5 border-b border-[#2a3142] bg-[#181c24] shrink-0">
-          <span
-            className="text-sm font-medium text-white truncate flex-1"
-            title={sessionKey}
-          >
-            {displayName}
-          </span>
-          {lastHeartbeat && (
-            <span
-              title={`Last heartbeat: ${lastHeartbeat.ts.toLocaleTimeString()}`}
-              className="text-xs px-1"
-            >
-              {lastHeartbeat.ok ? '❤️' : '🖤'}
-            </span>
+      <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+        {/* Status bar at top: animated purple when running, solid green when idle */}
+        <div className="h-0.5 w-full shrink-0 overflow-hidden">
+          {showWorking ? (
+            <div
+              className="h-full bg-gradient-to-r from-transparent via-[#a855f7] to-transparent"
+              style={{ animation: 'slide 1.4s ease-in-out infinite', width: '60%' }}
+            />
+          ) : (
+            <div className="h-full w-full bg-[#22c55e]" />
           )}
-          <button
-            onClick={toggleNoise}
-            title={
-              noiseHidden
-                ? 'Show tool calls & system msgs'
-                : 'Hide tool calls & system msgs'
-            }
-            className={`text-[10px] font-medium px-2 py-0.5 rounded-full border transition-colors shrink-0 ${
-              noiseHidden
-                ? 'bg-[#1e2330] border-[#2a3142] text-[#4b5563]'
-                : 'bg-[#6366f1]/20 border-[#6366f1] text-[#a5b4fc]'
-            }`}
-          >
-            {noiseHidden ? 'chat only' : '+ tools'}
-          </button>
-          <button
-            onClick={handleBriefMe}
-            title="Brief me — 3-sentence status"
-            className="text-xs text-[#6b7280] hover:text-indigo-400 px-1.5 py-1 rounded hover:bg-[#2a3142] transition-colors"
-          >
-            📋
-          </button>
-          <button
-            onClick={handlePause}
-            title="Pause — summarize state and hold"
-            className="text-xs text-[#6b7280] hover:text-yellow-400 px-1.5 py-1 rounded hover:bg-[#2a3142] transition-colors"
-          >
-            ⏸️
-          </button>
-          <button
-            onClick={handleContinue}
-            title="Continue — resume from last state"
-            className="text-xs text-[#6b7280] hover:text-green-400 px-1.5 py-1 rounded hover:bg-[#2a3142] transition-colors"
-          >
-            ▶️
-          </button>
-          <button
-            onClick={handleSteppingAway}
-            title="Stepping away — ask agent for plan + blockers"
-            className="text-xs text-[#6b7280] hover:text-blue-400 px-1.5 py-1 rounded hover:bg-[#2a3142] transition-colors"
-          >
-            🚪
-          </button>
-          <button
-            onClick={handleSave}
-            title="Save checkpoint to memory"
-            className="text-xs text-[#6b7280] hover:text-green-400 px-1.5 py-1 rounded hover:bg-[#2a3142] transition-colors"
-          >
-            💾
-          </button>
-          <button
-            onClick={handleArchive}
-            title="Save & archive session"
-            className="text-xs text-[#6b7280] hover:text-yellow-400 px-1.5 py-1 rounded hover:bg-[#2a3142] transition-colors"
-          >
-            📦
-          </button>
-          <button
-            onClick={() => setSidebarOpen((s) => !s)}
-            className="text-xs text-[#6b7280] hover:text-white px-1.5 py-1 rounded hover:bg-[#2a3142] transition-colors"
-          >
-            {sidebarOpen ? '→' : '←'}
-          </button>
-          <button
-            onClick={onClose}
-            className="text-xs text-[#6b7280] hover:text-red-400 px-1.5 py-1 rounded hover:bg-[#2a3142] transition-colors"
-          >
-            ✕
-          </button>
+        </div>
+        <style>{`@keyframes slide { 0% { transform: translateX(-100%) } 100% { transform: translateX(280%) } }`}</style>
+        {/* Header */}
+        <div className="flex flex-col border-b border-[#2a3142] bg-[#181c24] shrink-0">
+          {/* Title row */}
+          <div className="flex items-center gap-1 px-3 pt-2 pb-1">
+            <div className="flex items-center gap-1.5 flex-1 min-w-0">
+              {showWorking && (
+                <span className="w-2 h-2 rounded-full bg-[#a855f7] animate-pulse shrink-0" title={workingTool ? `Running: ${workingTool}` : 'Working...'} />
+              )}
+              <span
+                className="text-sm font-medium text-white truncate leading-none"
+                title={sessionKey}
+              >
+                {displayName}
+              </span>
+              {showWorking && workingTool && (
+                <span className="text-[10px] text-[#a855f7] shrink-0 truncate max-w-[120px]">{workingTool}...</span>
+              )}
+            </div>
+            {!showWorking && lastMsgTime && (
+              <span className="text-[10px] text-[#4b5563] shrink-0" title="Last message">{lastMsgTime}</span>
+            )}
+            {lastHeartbeat && (
+              <span
+                title={`Last heartbeat: ${lastHeartbeat.ts.toLocaleTimeString()}`}
+                className="text-xs px-1"
+              >
+                {lastHeartbeat.ok ? '❤️' : '🖤'}
+              </span>
+            )}
+            <SessionCostBadge sessionKey={sessionKey} />
+            <button
+              onClick={onClose}
+              className="h-6 w-6 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-xs text-[#6b7280] hover:text-red-400 shrink-0"
+            >
+              ✕
+            </button>
+          </div>
+          {/* Action row */}
+          <div className="flex items-center gap-1 px-3 pb-1.5">
+            <button
+              onClick={toggleNoise}
+              title={
+                noiseHidden
+                  ? 'Show tool calls & system msgs'
+                  : 'Hide tool calls & system msgs'
+              }
+              className={`text-[10px] font-medium h-6 px-2 rounded-full border transition-colors shrink-0 flex items-center ${
+                noiseHidden
+                  ? 'bg-[#1e2330] border-[#2a3142] text-[#4b5563]'
+                  : 'bg-[#6366f1]/20 border-[#6366f1] text-[#a5b4fc]'
+              }`}
+            >
+              {noiseHidden ? 'chat only' : '+ tools'}
+            </button>
+            <button
+              onClick={() => { void handleAutoRename() }}
+              title="AI rename - generates a curated topic title"
+              disabled={autoNaming}
+              className={`h-6 w-6 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-sm ${autoNaming ? 'text-[#6366f1] animate-pulse cursor-wait' : 'text-[#6b7280] hover:text-indigo-400'}`}
+            >
+              {autoNaming ? '...' : '✏️'}
+            </button>
+            <button
+              onClick={handleBriefMe}
+              title="Brief me - 3-sentence status"
+              className="h-6 w-6 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-sm text-[#6b7280] hover:text-indigo-400"
+            >
+              💬
+            </button>
+            <button
+              onClick={handleSteppingAway}
+              title="Stepping away - ask agent for plan + blockers"
+              className="h-6 w-6 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-sm text-[#6b7280] hover:text-blue-400"
+            >
+              🚪
+            </button>
+            <button
+              onClick={handleSave}
+              title="Save checkpoint to memory"
+              className="h-6 w-6 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-sm text-[#6b7280] hover:text-green-400"
+            >
+              💾
+            </button>
+            <button
+              onClick={handleArchive}
+              title="Save & archive session"
+              className="h-6 w-6 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-sm text-[#6b7280] hover:text-yellow-400"
+            >
+              📦
+            </button>
+            <button
+              onClick={() => setCardOpen((s) => !s)}
+              title="Session brief"
+              className={`h-6 w-6 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-sm ${sessionCard ? 'text-[#a5b4fc] hover:text-white' : 'text-[#3a4152]'}`}
+            >
+              📋
+            </button>
+          </div>
         </div>
 
+        {/* Session card strip */}
+        {cardOpen && (() => {
+          const firstUser = messages.find((m) => m.role === 'user')
+          const lastAssistant = [...messages].reverse().find(
+            (m) => m.role === 'assistant' && extractText(m.content).trim() && !isHeartbeatMsg(m)
+          )
+          return (
+            <div className="px-4 py-3 border-b border-[#2a3142] bg-[#0a0d14] shrink-0 space-y-2">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-semibold text-[#6366f1] uppercase tracking-wider">Session</span>
+                <span className="text-xs text-white font-medium truncate">{displayName}</span>
+                <span className="text-[10px] text-[#4b5563] font-mono ml-auto truncate max-w-[120px]" title={sessionKey}>{sessionKey.slice(0, 20)}...</span>
+              </div>
+              {firstUser && (
+                <div>
+                  <div className="text-[10px] text-[#6b7280] uppercase tracking-wider mb-0.5">Started with</div>
+                  <div className="text-xs text-[#e8eaf0] leading-relaxed line-clamp-2">
+                    {extractText(firstUser.content).slice(0, 200)}
+                  </div>
+                </div>
+              )}
+              {lastAssistant && (
+                <div>
+                  <div className="text-[10px] text-[#6b7280] uppercase tracking-wider mb-0.5">Last reply</div>
+                  <div className="text-xs text-[#a5b4fc] leading-relaxed line-clamp-2">
+                    {extractText(lastAssistant.content).slice(0, 200)}
+                  </div>
+                </div>
+              )}
+              {!firstUser && (
+                <div className="text-xs text-[#4b5563]">No messages yet.</div>
+              )}
+            </div>
+          )
+        })()}
+
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+        <div
+          ref={scrollContainerRef}
+          className="flex-1 overflow-y-auto px-4 py-3 space-y-3"
+          onScroll={() => {
+            const el = scrollContainerRef.current
+            if (!el) return
+            // Consider "at bottom" if within 80px of bottom
+            const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+            userScrolledUpRef.current = !atBottom
+          }}
+        >
           {messages
             .filter(
               (msg) => !isHeartbeatMsg(msg) && !(noiseHidden && isNoiseMsg(msg))
             )
+            // Render-level dedup — two rules:
+            // 1. Numeric-id user messages (optimistics) only render if they ARE the currently
+            //    tracked pending optimistic. Any other numeric-id user message is an orphan
+            //    that was never cleaned up from state — hide it.
+            // 2. Duplicate string IDs: only the first occurrence renders.
+            // Render-level dedup — two rules:
+            // 1. Numeric-id user messages (optimistics) only render if they ARE the currently
+            //    tracked pending optimistic. Any other numeric-id user message is an orphan
+            //    that was never cleaned up from state — hide it.
+            // 2. Duplicate string/undefined IDs: only the first occurrence renders. If ID is undefined,
+            //    we use a content fingerprint to detect duplicates.
+            .filter((msg, idx, arr) => {
+              if (msg.role === 'user' && typeof msg.id === 'number') {
+                // Only show if this is the live optimistic
+                return msg.id === pendingOptimisticIdRef.current
+              }
+
+              // For messages with defined IDs, filter traditional duplicates
+              if (msg.id !== undefined && msg.id !== null) {
+                return arr.findIndex((m) => m.id === msg.id) === idx
+              }
+
+              // For messages with UNDEFINED IDs, use a content fingerprint for deduplication
+              const fingerprint = `${msg.role}-${extractText(msg.content).substring(0, 100)}`
+              return arr.findIndex((m) => m.id === undefined && `${m.role}-${extractText(m.content).substring(0, 100)}` === fingerprint) === idx
+            })
             .map((msg, i) => (
               <div
                 key={msg.id !== undefined ? String(msg.id) : i}
@@ -715,30 +1359,112 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
                 <div
                   className={`max-w-[85%] px-3 py-2 rounded-xl ${
                     msg.role === 'user'
-                      ? 'bg-[#6366f1] text-white rounded-br-sm text-sm whitespace-pre-wrap'
+                      ? 'bg-[#6366f1] text-white rounded-br-sm text-sm'
                       : 'bg-[#1e2330] text-[#e8eaf0] rounded-bl-sm'
                   }`}
                 >
-                  {renderContent(msg.content)}
+                  {/* user text-only content gets whitespace-pre-wrap; array (image+text) does not */}
+                  {msg.role === 'user' && typeof msg.content === 'string'
+                    ? <span className="whitespace-pre-wrap">{renderContent(msg.content)}</span>
+                    : renderContent(msg.content)
+                  }
                 </div>
               </div>
             ))}
+          {showWorking && (
+            <div className="flex gap-2 justify-start">
+              <div className="bg-[#1e2330] text-[#6b7280] px-3 py-2 rounded-xl rounded-bl-sm text-xs flex items-center gap-2">
+                <span className="inline-flex gap-0.5">
+                  <span className="w-1.5 h-1.5 bg-[#6366f1] rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <span className="w-1.5 h-1.5 bg-[#6366f1] rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                  <span className="w-1.5 h-1.5 bg-[#6366f1] rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                </span>
+                <span>{workingTool ? `${workingTool}...` : 'thinking...'}</span>
+              </div>
+            </div>
+          )}
           <div ref={bottomRef} />
         </div>
 
+        {/* Sent queue strip */}
+        {sentQueue.length > 0 && (
+          <div className="px-3 pt-1.5 pb-0.5 bg-[#181c24] border-t border-[#2a3142] flex flex-col gap-0.5">
+            {sentQueue.map(e => (
+              <div key={e.id} className="flex items-center gap-1.5 text-[10px]">
+                {e.status === 'sending'
+                  ? <span className="w-1.5 h-1.5 rounded-full bg-[#6366f1] animate-pulse shrink-0" />
+                  : <span className="text-[#22c55e] shrink-0">✓</span>
+                }
+                <span className={e.status === 'sending' ? 'text-[#6b7280]' : 'text-[#4b5563] line-through'}>
+                  {e.text}
+                </span>
+                <span className="text-[#4b5563] shrink-0">{e.status === 'sending' ? 'sending…' : 'delivered'}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Input */}
         <div className="px-3 py-3 border-t border-[#2a3142] bg-[#181c24] shrink-0">
-          <div className="flex gap-2">
+          {/* File preview */}
+          {pendingFile && (
+            <div className="mb-2 relative inline-block">
+              {pendingFile.kind === 'image'
+                ? <img src={pendingFile.dataUrl} alt="pending" className="max-h-24 max-w-[200px] rounded-lg border border-[#6366f1] object-cover" />
+                : (
+                  <div className="flex items-center gap-2 bg-[#2a3142] border border-[#6366f1] rounded-lg px-3 py-2">
+                    <span className="text-2xl">📄</span>
+                    <span className="text-xs text-white max-w-[150px] truncate">{pendingFile.name}</span>
+                  </div>
+                )
+              }
+              <button
+                onClick={() => setPendingFile(null)}
+                className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-red-500 text-white rounded-full text-[9px] flex items-center justify-center hover:bg-red-400"
+              >✕</button>
+            </div>
+          )}
+          <div className="flex gap-2 items-end">
             <input
-              className="flex-1 bg-[#0f1117] border border-[#2a3142] rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-[#6366f1] placeholder-[#4b5563]"
-              placeholder="Message..."
+              ref={fileInputRef}
+              type="file"
+              accept="image/*,application/pdf"
+              className="hidden"
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) handleAttachFile(f); e.target.value = '' }}
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              title="Attach image or PDF"
+              className="text-[#6b7280] hover:text-[#a5b4fc] text-lg px-1 py-1 transition-colors shrink-0"
+            >
+              📎
+            </button>
+            <textarea
+              ref={textareaRef}
+              className="flex-1 bg-[#0f1117] border border-[#2a3142] rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-[#6366f1] placeholder-[#4b5563] resize-none overflow-y-auto leading-relaxed"
+              style={{ minHeight: '38px', maxHeight: '150px' }}
+              placeholder="Message… (Shift+Enter to send, paste image or attach PDF)"
               value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSend()}
+              rows={1}
+              onChange={(e) => {
+                setInput(e.target.value)
+                if (sessionKey) setDraft(sessionKey, e.target.value)
+                const ta = e.target
+                ta.style.height = 'auto'
+                ta.style.height = Math.min(ta.scrollHeight, 150) + 'px'
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && e.shiftKey) {
+                  e.preventDefault()
+                  handleSend()
+                }
+              }}
+              onPaste={handlePaste}
             />
             <button
               onClick={handleSend}
-              className="bg-[#6366f1] hover:bg-[#818cf8] text-white rounded-lg px-4 text-sm font-medium transition-colors"
+              className="bg-[#6366f1] hover:bg-[#818cf8] text-white rounded-lg px-4 text-sm font-medium transition-colors self-end"
+              style={{ height: '38px' }}
             >
               ↑
             </button>
@@ -746,27 +1472,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
         </div>
       </div>
 
-      {/* Session sidebar */}
-      {sidebarOpen && (
-        <div className="w-52 shrink-0 bg-[#181c24] border-l border-[#2a3142] flex flex-col overflow-y-auto">
-          <div className="px-3 py-3 border-b border-[#2a3142]">
-            <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-2">
-              Session Brief
-            </div>
-            {sessionCard ? (
-              <pre className="text-xs text-[#e8eaf0] whitespace-pre-wrap leading-relaxed">
-                {sessionCard}
-              </pre>
-            ) : (
-              <div className="text-xs text-[#4b5563]">No messages yet.</div>
-            )}
-          </div>
-          <div className="px-3 py-3">
-            <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-1">Key</div>
-            <div className="text-xs text-[#4b5563] font-mono break-all">{sessionKey}</div>
-          </div>
-        </div>
-      )}
+
     </div>
   )
 }

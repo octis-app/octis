@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useLabelStore } from '../store/gatewayStore'
 
 const API = (import.meta.env.VITE_API_URL as string) || ''
 
@@ -34,7 +35,37 @@ function Bar({ value, max }: { value: number; max: number }) {
   )
 }
 
+// Format raw session key into something readable
+function formatSessionKey(key: string): string {
+  // Strip agent prefix
+  let k = key.replace(/^agent:[^:]+:/, '')
+  // Slack DM: slack:direct:USERID:thread:TS → Slack DM
+  if (k.startsWith('slack:direct:')) {
+    const parts = k.split(':')
+    const ts = parts[parts.length - 1]
+    const date = ts ? new Date(parseFloat(ts) * 1000).toLocaleDateString('en-CA') : ''
+    return `Slack DM${date ? ' · ' + date : ''}`
+  }
+  // Slack channel: slack:channel:CHID:thread:TS
+  if (k.startsWith('slack:channel:')) {
+    const parts = k.split(':')
+    const ts = parts[parts.length - 1]
+    const date = ts ? new Date(parseFloat(ts) * 1000).toLocaleDateString('en-CA') : ''
+    return `Slack Channel${date ? ' · ' + date : ''}`
+  }
+  // Webchat session with timestamp: session-1234567890
+  const sessionMatch = k.match(/^session-(\d{10,})$/)
+  if (sessionMatch) {
+    const date = new Date(parseInt(sessionMatch[1])).toLocaleDateString('en-CA')
+    return `Web · ${date}`
+  }
+  // heartbeat / cron
+  if (k === 'main' || k.includes('heartbeat') || k.includes('cron')) return 'Heartbeat/Cron'
+  return k
+}
+
 export default function CostsPanel() {
+  const { labels } = useLabelStore()
   const [data, setData] = useState<CostsData | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -147,11 +178,13 @@ export default function CostsPanel() {
             Top Sessions — Today
           </div>
           <div className="space-y-3">
-            {data.todaySessions.map((s) => (
+            {data.todaySessions.map((s) => {
+              const label = labels[s.session_key] || s.session_label || formatSessionKey(s.session_key)
+              return (
               <div key={s.session_key}>
                 <div className="flex items-center gap-2 mb-1">
-                  <div className="text-sm text-white truncate flex-1">
-                    {s.session_label || s.session_key}
+                  <div className="text-sm text-white truncate flex-1" title={s.session_key}>
+                    {label}
                   </div>
                   <div className="text-xs text-[#6b7280]">{s.sender_name}</div>
                   <div className="text-xs text-white font-medium w-14 text-right">
@@ -160,7 +193,8 @@ export default function CostsPanel() {
                 </div>
                 <Bar value={s.cost} max={maxTodaySessionCost} />
               </div>
-            ))}
+            )
+          })}
           </div>
         </div>
       )}
@@ -171,11 +205,13 @@ export default function CostsPanel() {
           Top Sessions — 7 Days
         </div>
         <div className="space-y-3">
-          {data.sessions?.slice(0, 20).map((s) => (
+          {data.sessions?.slice(0, 20).map((s) => {
+            const label = labels[s.session_key] || s.session_label || formatSessionKey(s.session_key)
+            return (
             <div key={s.session_key}>
               <div className="flex items-center gap-2 mb-1">
-                <div className="text-sm text-white truncate flex-1">
-                  {s.session_label || s.session_key}
+                <div className="text-sm text-white truncate flex-1" title={s.session_key}>
+                  {label}
                 </div>
                 <div className="text-xs text-[#6b7280]">{s.sender_name}</div>
                 <div className="text-xs text-white font-medium w-14 text-right">
@@ -184,7 +220,8 @@ export default function CostsPanel() {
               </div>
               <Bar value={s.cost} max={maxSessionCost} />
             </div>
-          ))}
+          )
+          })}
         </div>
       </div>
     </div>

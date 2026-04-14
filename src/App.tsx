@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useAuth, SignedIn, SignedOut, UserButton } from '@clerk/clerk-react'
-import { useGatewayStore, useSessionStore, useLabelStore, Session } from './store/gatewayStore'
+import { useGatewayStore, useSessionStore, useLabelStore, useProjectStore, useHiddenStore, Session } from './store/gatewayStore'
 import Sidebar from './components/Sidebar'
 import ChatPane from './components/ChatPane'
 import ConnectModal from './components/ConnectModal'
@@ -9,6 +9,9 @@ import MemoryPanel from './components/MemoryPanel'
 import SettingsPanel from './components/SettingsPanel'
 import MobileApp from './components/MobileApp'
 import AuthGate from './components/AuthGate'
+import SetupScreen from './components/SetupScreen'
+import ProjectsGrid, { type Project } from './components/ProjectsGrid'
+import ProjectView from './components/ProjectView'
 
 // Detect mobile: screen width <768px or touch device
 function useIsMobile(): boolean {
@@ -21,10 +24,11 @@ function useIsMobile(): boolean {
   return mobile
 }
 
-const NAV = [
+const NAV_ALL = [
+  { id: 'projects', label: '🐙 Projects' },
   { id: 'sessions', label: '💬 Sessions' },
-  { id: 'costs', label: '💰 Costs' },
-  { id: 'memory', label: '🧠 Memory' },
+  { id: 'costs', label: '💰 Costs', ownerOnly: true },
+  { id: 'memory', label: '🧠 Memory', ownerOnly: true },
 ]
 
 const API = (import.meta.env.VITE_API_URL as string) || ''
@@ -48,10 +52,17 @@ function AuthenticatedApp({ getToken }: { getToken: () => Promise<string | null>
   const { connected, gatewayUrl, connect, setCredentials } = useGatewayStore()
   const { activePanes, paneCount, setPaneCount, pinToPane, sessions } = useSessionStore()
   const { labels, setLabel } = useLabelStore()
+  const { hydrateFromServer: hydrateProjects } = useProjectStore()
+  const { hydrateFromServer: hydrateHidden } = useHiddenStore()
   const [showConnect, setShowConnect] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
-  const [activeNav, setActiveNav] = useState('sessions')
+  const [activeNav, setActiveNav] = useState('projects')
+  const [activeProject, setActiveProject] = useState<Project | null>(null)
+  const [userRole, setUserRole] = useState<string | null>(null)
+  const [needsSetup, setNeedsSetup] = useState(false)
   const isMobile = useIsMobile()
+
+  const NAV = NAV_ALL.filter(n => !n.ownerOnly || userRole === 'owner')
 
   // Fetch fresh gateway config from server on every sign-in
   useEffect(() => {
@@ -62,9 +73,17 @@ function AuthenticatedApp({ getToken }: { getToken: () => Promise<string | null>
           headers: { Authorization: `Bearer ${token}` },
         })
         if (!res.ok) throw new Error(`Config fetch failed: ${res.status}`)
-        const data = (await res.json()) as { url: string; token: string; agentId?: string }
-        setCredentials(data.url, data.token, data.agentId)
+        const data = (await res.json()) as { url?: string; token?: string; agentId?: string; role?: string; needsSetup?: boolean }
+        setUserRole(data.role || null)
+        if (data.needsSetup) {
+          setNeedsSetup(true)
+          return
+        }
+        setCredentials(data.url!, data.token!, data.agentId)
         connect()
+        const t = token || undefined
+        void hydrateProjects(t)
+        void hydrateHidden(t)
       } catch (e) {
         console.error('[octis] Failed to fetch gateway config:', e)
         setShowConnect(true)
@@ -80,13 +99,19 @@ function AuthenticatedApp({ getToken }: { getToken: () => Promise<string | null>
       .then((r) => r.json())
       .then((data: Record<string, string>) => {
         if (typeof data === 'object' && !('error' in data)) {
-          Object.entries(data).forEach(([uuid, label]) => {
-            if (!labels[uuid]) setLabel(uuid, label)
+          // Set all keys from response (includes UUIDs, thread IDs, renamed keys)
+          Object.entries(data).forEach(([key, label]) => {
+            if (!labels[key]) setLabel(key, label)
           })
           sessions.forEach((s: Session) => {
-            const uuid = s.id || s.sessionId
             const gKey = s.key
+            if (!gKey) return
+            // Try UUID match
+            const uuid = s.id || s.sessionId
             if (uuid && data[uuid] && !labels[gKey]) setLabel(gKey, data[uuid])
+            // Try thread ID match (last segment of gateway key)
+            const threadId = gKey.split(':').pop() || ''
+            if (threadId && data[threadId] && !labels[gKey]) setLabel(gKey, data[threadId])
           })
         }
       })
@@ -102,15 +127,28 @@ function AuthenticatedApp({ getToken }: { getToken: () => Promise<string | null>
       .then((data: Record<string, string>) => {
         if (typeof data === 'object' && !('error' in data)) {
           sessions.forEach((s: Session) => {
-            const uuid = s.id || s.sessionId
             const gKey = s.key
+            if (!gKey) return
+            const uuid = s.id || s.sessionId
             if (uuid && data[uuid] && !labels[gKey]) setLabel(gKey, data[uuid])
+            const threadId = gKey.split(':').pop() || ''
+            if (threadId && data[threadId] && !labels[gKey]) setLabel(gKey, data[threadId])
           })
         }
       })
       .catch(() => {})
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions.length])
+
+  if (needsSetup) return (
+    <SetupScreen
+      getToken={getToken}
+      onComplete={(role) => {
+        setUserRole(role)
+        setNeedsSetup(false)
+      }}
+    />
+  )
 
   if (isMobile) return <MobileApp />
 
@@ -165,9 +203,21 @@ function AuthenticatedApp({ getToken }: { getToken: () => Promise<string | null>
       </div>
 
       {/* Main content */}
+      {activeNav === 'projects' && !activeProject && (
+        <ProjectsGrid onOpenProject={(p) => { setActiveProject(p); setActiveNav('projects') }} />
+      )}
+
+      {activeNav === 'projects' && activeProject && (
+        <ProjectView
+          project={activeProject}
+          onBack={() => setActiveProject(null)}
+          paneCount={paneCount}
+        />
+      )}
+
       {activeNav === 'sessions' && (
         <>
-          <Sidebar onSettingsClick={() => setShowConnect(true)} />
+          <SidebarWrapper onSettingsClick={() => setShowConnect(true)} paneCount={paneCount} setPaneCount={setPaneCount} />
           <div className="flex flex-1 overflow-hidden">
             {visiblePanes.map((sessionKey, i) => (
               <ChatPane
@@ -176,21 +226,6 @@ function AuthenticatedApp({ getToken }: { getToken: () => Promise<string | null>
                 paneIndex={i}
                 onClose={() => pinToPane(i, null)}
               />
-            ))}
-          </div>
-          <div className="fixed bottom-4 right-4 flex gap-1 bg-[#181c24] border border-[#2a3142] rounded-lg p-1 shadow-lg z-40">
-            {[1, 2, 3, 4, 5].map((n) => (
-              <button
-                key={n}
-                onClick={() => setPaneCount(n)}
-                className={`w-7 h-7 text-xs rounded transition-colors ${
-                  paneCount === n
-                    ? 'bg-[#6366f1] text-white'
-                    : 'text-[#6b7280] hover:text-white hover:bg-[#2a3142]'
-                }`}
-              >
-                {n}
-              </button>
             ))}
           </div>
         </>
@@ -216,6 +251,56 @@ function AuthenticatedApp({ getToken }: { getToken: () => Promise<string | null>
 
       {showConnect && <ConnectModal onClose={() => setShowConnect(false)} />}
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
+    </div>
+  )
+}
+
+function SidebarWrapper({ onSettingsClick, paneCount, setPaneCount }: { onSettingsClick: () => void; paneCount: number; setPaneCount: (n: number) => void }) {
+  const [collapsed, setCollapsed] = useState(false)
+  return (
+    <div className="flex shrink-0 overflow-hidden">
+      {collapsed ? (
+        <div className="w-10 bg-[#181c24] border-r border-[#2a3142] flex flex-col items-center py-3 gap-3">
+          <button
+            onClick={() => setCollapsed(false)}
+            title="Expand sidebar"
+            className="w-7 h-7 rounded-lg text-[#6b7280] hover:text-white hover:bg-[#2a3142] flex items-center justify-center text-sm transition-colors"
+          >
+            ›
+          </button>
+        </div>
+      ) : (
+        <div className="relative flex flex-col h-screen">
+          <div className="flex-1 min-h-0 overflow-hidden">
+            <Sidebar onSettingsClick={onSettingsClick} />
+          </div>
+          {/* Pane count control */}
+          <div className="flex items-center justify-center gap-0.5 px-2 py-1.5 border-t border-[#2a3142] bg-[#181c24]">
+            <span className="text-[10px] text-[#4b5563] mr-1">panes</span>
+            {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
+              <button
+                key={n}
+                onClick={() => setPaneCount(n)}
+                title={`${n} pane${n > 1 ? 's' : ''}`}
+                className={`w-5 h-5 text-[10px] rounded transition-colors ${
+                  paneCount === n
+                    ? 'bg-[#6366f1] text-white'
+                    : 'text-[#6b7280] hover:text-white hover:bg-[#2a3142]'
+                }`}
+              >
+                {n}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={() => setCollapsed(true)}
+            title="Collapse sidebar"
+            className="absolute -right-3 top-1/2 -translate-y-1/2 z-10 w-6 h-6 rounded-full bg-[#2a3142] border border-[#3a4152] text-[#6b7280] hover:text-white flex items-center justify-center text-xs transition-colors shadow-lg"
+          >
+            ‹
+          </button>
+        </div>
+      )}
     </div>
   )
 }

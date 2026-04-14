@@ -1,12 +1,16 @@
-import { useState } from 'react'
-import { useGatewayStore, useSessionStore, Session } from '../store/gatewayStore'
+import { useState, useEffect, useCallback } from 'react'
+import { useAuth } from '@clerk/clerk-react'
+import { useGatewayStore, useSessionStore, useHiddenStore, useProjectStore, useLabelStore, Session } from '../store/gatewayStore'
 import MobileSessionCard from './MobileSessionCard'
 import MobileFullChat from './MobileFullChat'
 import CostsPanel from './CostsPanel'
 import MemoryPanel from './MemoryPanel'
 import ConnectModal from './ConnectModal'
+import ProjectsGrid, { type Project } from './ProjectsGrid'
+import MobileProjectView from './MobileProjectView'
 
 const TABS = [
+  { id: 'projects', icon: '🐙', label: 'Projects' },
   { id: 'sessions', icon: '💬', label: 'Sessions' },
   { id: 'costs', icon: '💰', label: 'Costs' },
   { id: 'memory', icon: '🧠', label: 'Memory' },
@@ -15,14 +19,66 @@ const TABS = [
 type FilterType = 'all' | 'active' | 'idle'
 
 export default function MobileApp() {
+  const { getToken } = useAuth()
   const { connected, gatewayUrl } = useGatewayStore()
   const { sessions, getStatus } = useSessionStore()
-  const [tab, setTab] = useState('sessions')
+  const { isHidden, hide: hideSession, hydrateFromServer: hydrateHidden } = useHiddenStore()
+  const { setSessions } = useSessionStore()
+  const { hydrateFromServer: hydrateProjects } = useProjectStore()
+  const { labels, setLabel } = useLabelStore()
+
+  const hydrateAll = useCallback(async () => {
+    const token = await getToken() || undefined
+    await Promise.all([
+      hydrateHidden(token),
+      hydrateProjects(token),
+    ])
+    // Fetch server-side session labels
+    const authHeader = token ? { Authorization: `Bearer ${token}` } : {}
+    fetch('/api/session-labels', { headers: authHeader })
+      .then(r => r.json())
+      .then((data: Record<string, string>) => {
+        if (typeof data === 'object' && !('error' in data)) {
+          Object.entries(data).forEach(([key, lbl]) => {
+            if (!labels[key]) setLabel(key, lbl)
+          })
+          // Also match by thread ID from gateway key
+          sessions.forEach((s: Session) => {
+            const gKey = s.key
+            if (!gKey || labels[gKey]) return
+            const threadId = gKey.split(':').pop() || ''
+            if (threadId && data[threadId]) setLabel(gKey, data[threadId])
+          })
+        }
+      })
+      .catch(() => {})
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [getToken])
+
+  useEffect(() => { void hydrateAll() }, [hydrateAll])
+  const [tab, setTab] = useState('projects')
+  const [activeProject, setActiveProject] = useState<Project | null>(null)
   const [fullChatSession, setFullChatSession] = useState<Session | null>(null)
   const [showConnect, setShowConnect] = useState(!gatewayUrl)
   const [filter, setFilter] = useState<FilterType>('all')
 
-  const filtered = sessions.filter((s: Session) => {
+  const handleArchive = (session: Session) => {
+    if (!confirm(`Archive "${session.label || session.key}"?`)) return
+    hideSession(session.key)
+    if (session.id) hideSession(session.id)
+    if (session.sessionId) hideSession(session.sessionId)
+  }
+
+  const handleNewSession = () => {
+    const key = `session-${Date.now()}`
+    setSessions([{ key, label: 'New session', sessionKey: key } as Session, ...sessions])
+  }
+
+  const visibleSessions = sessions.filter((s: Session) =>
+    !isHidden(s.key) && !isHidden(s.id || '') && !isHidden(s.sessionId || '')
+  )
+
+  const filtered = visibleSessions.filter((s: Session) => {
     const st = getStatus(s)
     if (filter === 'active') return st === 'active'
     if (filter === 'idle') return st === 'quiet'
@@ -30,12 +86,16 @@ export default function MobileApp() {
   })
 
   const counts = {
-    active: sessions.filter((s: Session) => getStatus(s) === 'active').length,
-    idle: sessions.filter((s: Session) => getStatus(s) === 'quiet').length,
+    active: visibleSessions.filter((s: Session) => getStatus(s) === 'active').length,
+    idle: visibleSessions.filter((s: Session) => getStatus(s) === 'quiet').length,
   }
 
   if (fullChatSession) {
     return <MobileFullChat session={fullChatSession} onBack={() => setFullChatSession(null)} />
+  }
+
+  if (activeProject) {
+    return <MobileProjectView project={activeProject} onBack={() => setActiveProject(null)} />
   }
 
   return (
@@ -65,13 +125,17 @@ export default function MobileApp() {
 
       {/* Content */}
       <div className="flex-1 overflow-hidden flex flex-col">
+        {tab === 'projects' && (
+          <ProjectsGrid onOpenProject={(p) => setActiveProject(p)} />
+        )}
+
         {tab === 'sessions' && (
           <>
-            {/* Filter pills */}
-            <div className="flex gap-2 px-4 pt-3 pb-2 shrink-0">
+            {/* Filter pills + New Session */}
+            <div className="flex gap-2 px-4 pt-3 pb-2 shrink-0 items-center">
               {(
                 [
-                  { id: 'all', label: `All ${sessions.length}` },
+                  { id: 'all', label: `All ${visibleSessions.length}` },
                   { id: 'active', label: `🟢 ${counts.active}` },
                   { id: 'idle', label: `🟡 ${counts.idle}` },
                 ] as { id: FilterType; label: string }[]
@@ -88,6 +152,12 @@ export default function MobileApp() {
                   {f.label}
                 </button>
               ))}
+              <button
+                onClick={handleNewSession}
+                className="ml-auto px-3 py-1 rounded-full text-xs font-medium bg-[#6366f1] text-white active:bg-[#818cf8] shrink-0"
+              >
+                + New
+              </button>
             </div>
 
             {/* Swipeable card carousel */}
@@ -98,7 +168,7 @@ export default function MobileApp() {
                   <div className="text-[#6b7280] text-sm">
                     {sessions.length === 0
                       ? 'No sessions yet. Connect to your gateway to get started.'
-                      : 'No sessions match this filter.'}
+                      : 'No sessions match this filter. Sessions may be archived on desktop.'}
                   </div>
                   {!connected && (
                     <button
@@ -128,6 +198,7 @@ export default function MobileApp() {
                       key={session.key}
                       session={session}
                       onOpenFull={setFullChatSession}
+                      onArchive={handleArchive}
                     />
                   ))}
                 </div>
