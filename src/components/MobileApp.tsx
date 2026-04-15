@@ -77,7 +77,11 @@ export default function MobileApp() {
   const hideAgentSessions = localStorage.getItem('octis-show-agent-sessions') !== 'true'
   const isAgentSession = (s: Session) => {
     const key = (s.key || '').toLowerCase()
-    return key.includes(':subagent:') || key.includes(':acp:')
+    if (key.includes(':subagent:') || key.includes(':acp:')) return true
+    // Also filter model-fallback sessions (OpenClaw auto-retry on timeout)
+    const lbl = (s.label || '').toLowerCase()
+    if (lbl.startsWith('continue where you left off')) return true
+    return false
   }
   const hideHeartbeat = localStorage.getItem('octis-show-heartbeat-sessions') !== 'true'
   const hideCron = localStorage.getItem('octis-show-cron-sessions') !== 'true'

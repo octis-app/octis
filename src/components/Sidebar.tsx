@@ -638,10 +638,14 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     const key = (s.key || '').toLowerCase()
     return key.includes(':cron:')
   }
-  // Inter-agent sessions: spawned subagents (runtime=subagent) and ACP harness sessions (runtime=acp)
+  // Inter-agent sessions: spawned subagents (runtime=subagent), ACP harness sessions (runtime=acp),
+  // and model-fallback sessions (OpenClaw auto-retry with a different model on timeout)
   const isAgentSession = (s: Session) => {
     const key = (s.key || '').toLowerCase()
-    return key.includes(':subagent:') || key.includes(':acp:')
+    if (key.includes(':subagent:') || key.includes(':acp:')) return true
+    const lbl = getLabel(s.key, s.label || '')
+    if (lbl.startsWith('Continue where you left off')) return true
+    return false
   }
 
   const sorted = getSortedSessions()
