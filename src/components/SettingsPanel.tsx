@@ -44,6 +44,9 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [showCronSessions, setShowCronSessions] = useState(() =>
     localStorage.getItem('octis-show-cron-sessions') === 'true'
   )
+  const [showAgentSessions, setShowAgentSessions] = useState(() =>
+    localStorage.getItem('octis-show-agent-sessions') === 'true'
+  )
 
   const [renaming, setRenaming] = useState(false)
   const [renameStatus, setRenameStatus] = useState('')
@@ -121,6 +124,12 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
             onChange={v => { setShowCronSessions(!v); save('octis-show-cron-sessions', !v) }}
             label="Hide cron/scheduled sessions in sidebar"
             description="Filter out automated scheduled tasks"
+          />
+          <Toggle
+            value={!showAgentSessions}
+            onChange={v => { setShowAgentSessions(!v); save('octis-show-agent-sessions', !v) }}
+            label="Hide agent-spawned sessions in sidebar"
+            description="Filter out sub-agent and ACP harness sessions (spawned by Byte)"
           />
 
           {/* Sessions */}

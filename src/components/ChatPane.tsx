@@ -90,6 +90,16 @@ interface ChatPaneProps {
 
 // ─── Markdown renderer ────────────────────────────────────────────────────────
 
+
+function renderBase64Image(base64String: string, key: number): React.ReactNode {
+  // Basic check for common image types. More robust parsing could be added if needed.
+  const mimeMatch = base64String.match(/^data:(image\/(png|jpeg|gif|webp));base64,/)
+  if (mimeMatch) {
+    return <img key={key} src={base64String} alt="image" className="max-w-full rounded-lg my-1 max-h-64 object-contain" />
+  }
+  return null
+}
+
 function CollapsibleCode({ lang, code }: { lang: string; code: string }) {
   const [open, setOpen] = useState(false)
   const lines = code.split('\n')
@@ -151,6 +161,16 @@ function ChatMarkdown({ text }: { text: string }) {
 
   while (i < lines.length) {
     const line = lines[i]
+
+    // Check for base64 image on its own line
+    const base64Image = renderBase64Image(line, i)
+    if (base64Image) {
+      elements.push(base64Image)
+      i++
+      continue
+    }
+
+    
 
     if (line.startsWith('```')) {
       const lang = line.slice(3).trim()
@@ -264,7 +284,11 @@ function extractText(content: MessageContent): string {
 
 function isHeartbeatTrigger(content: MessageContent): boolean {
   const text = extractText(content)
-  return text.includes('Read HEARTBEAT.md') || text.trim().toLowerCase() === 'heartbeat'
+  if (text.includes('Read HEARTBEAT.md') || text.trim().toLowerCase() === 'heartbeat') return true
+  // Async exec completion notifications injected by OpenClaw — always hide
+  if (text.trimStart().startsWith('System (untrusted):') || text.trimStart().startsWith('System:') ||
+      text.includes('An async command you ran earlier has completed')) return true
+  return false
 }
 
 function isHeartbeatResponse(content: MessageContent): boolean {
@@ -869,6 +893,11 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
     }
     const text = extractText(content)
     if (!text) return null
+
+    // If the text is a standalone base64 image string, render it
+    const tryRenderBase64 = renderBase64Image(text.trim(), 0)
+    if (tryRenderBase64) return tryRenderBase64
+
     // Never render raw JSON content-block arrays or metadata envelopes
     const trimmed = text.trim()
     // Detect document/image blocks regardless of envelope wrapping

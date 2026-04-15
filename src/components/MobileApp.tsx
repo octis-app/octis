@@ -74,9 +74,24 @@ export default function MobileApp() {
     setSessions([{ key, label: 'New session', sessionKey: key } as Session, ...sessions])
   }
 
-  const visibleSessions = sessions.filter((s: Session) =>
-    !isHidden(s.key) && !isHidden(s.id || '') && !isHidden(s.sessionId || '')
-  )
+  const hideAgentSessions = localStorage.getItem('octis-show-agent-sessions') !== 'true'
+  const isAgentSession = (s: Session) => {
+    const key = (s.key || '').toLowerCase()
+    return key.includes(':subagent:') || key.includes(':acp:')
+  }
+  const hideHeartbeat = localStorage.getItem('octis-show-heartbeat-sessions') !== 'true'
+  const hideCron = localStorage.getItem('octis-show-cron-sessions') !== 'true'
+  const isHeartbeatOrCron = (s: Session) => {
+    const key = (s.key || '').toLowerCase()
+    return key.includes(':cron:')
+  }
+
+  const visibleSessions = sessions.filter((s: Session) => {
+    if (!s.key || isHidden(s.key) || isHidden(s.id || '') || isHidden(s.sessionId || '')) return false
+    if (hideAgentSessions && isAgentSession(s)) return false
+    if ((hideHeartbeat || hideCron) && isHeartbeatOrCron(s)) return false
+    return true
+  })
 
   const filtered = visibleSessions.filter((s: Session) => {
     const st = getStatus(s)
@@ -91,11 +106,21 @@ export default function MobileApp() {
   }
 
   if (fullChatSession) {
-    return <MobileFullChat session={fullChatSession} onBack={() => setFullChatSession(null)} />
+    return <MobileFullChat
+      session={fullChatSession}
+      onBack={() => setFullChatSession(null)}
+      recentSessions={visibleSessions.slice(0, 10)}
+      onSwitch={(s) => setFullChatSession(s)}
+      onArchive={() => {
+        hideSession(fullChatSession.key)
+        if (fullChatSession.id) hideSession(fullChatSession.id)
+        setFullChatSession(null)
+      }}
+    />
   }
 
   if (activeProject) {
-    return <MobileProjectView project={activeProject} onBack={() => setActiveProject(null)} />
+    return <MobileProjectView project={activeProject} onBack={() => setActiveProject(null)} onSwitchProject={(p) => setActiveProject(p)} />
   }
 
   return (

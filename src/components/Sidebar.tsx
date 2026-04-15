@@ -323,7 +323,25 @@ function SessionItem({ session, isPinned, onPin, onRename, onArchive, onContinue
 }
 
 // ─── Project group ────────────────────────────────────────────────────────────
-function ProjectGroup({ name, sessions, activePanes, paneCount, onPin, onRename, onArchive, onContinue, selected, onSelect }: {
+interface TodoItem { id: number; project: string; text: string; owner: string | null; status: string }
+
+function OwnerBadge({ owner }: { owner: string | null }) {
+  if (!owner) return null
+  const styles: Record<string, string> = {
+    ME: 'bg-blue-900/50 text-blue-300',
+    YOU: 'bg-amber-900/50 text-amber-300',
+    BOTH: 'bg-green-900/50 text-green-300',
+    WAIT: 'bg-gray-800 text-gray-400',
+    UNLOCK: 'bg-purple-900/50 text-purple-300',
+  }
+  return (
+    <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono shrink-0 ${styles[owner] || 'bg-gray-800 text-gray-400'}`}>
+      {owner}
+    </span>
+  )
+}
+
+function ProjectGroup({ name, sessions, activePanes, paneCount, onPin, onRename, onArchive, onContinue, selected, onSelect, todoCount, todos, onTodoComplete, onTodoNewSession }: {
   name: string; sessions: Session[]; activePanes: (string | null)[]; paneCount: number
   onPin: (key: string) => void
   onRename: (key: string, label: string) => void
@@ -331,9 +349,14 @@ function ProjectGroup({ name, sessions, activePanes, paneCount, onPin, onRename,
   onContinue: (session: Session) => void
   selected: Set<string>
   onSelect: (key: string, e: React.MouseEvent) => void
+  todoCount?: number
+  todos?: TodoItem[]
+  onTodoComplete?: (id: number) => void
+  onTodoNewSession?: (text: string, project: string) => void
 }) {
   const { getStatus } = useSessionStore()
   const [open, setOpen] = useState(true)
+  const [todosOpen, setTodosOpen] = useState(false)
 
   // Bubble up highest-urgency status
   const order: SessionStatus[] = ['working', 'stuck', 'active', 'quiet']
@@ -353,6 +376,9 @@ function ProjectGroup({ name, sessions, activePanes, paneCount, onPin, onRename,
       >
         <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: st.color }} />
         <span className="text-xs font-semibold text-[#a5b4fc] flex-1">{name}</span>
+        {todoCount ? (
+          <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-yellow-900/40 text-yellow-300 font-mono">{todoCount}</span>
+        ) : null}
         <span className="text-[10px] text-[#4b5563]">{sessions.length}</span>
         <span className="text-[#4b5563] text-[10px]">{open ? '▲' : '▼'}</span>
       </button>
@@ -371,6 +397,41 @@ function ProjectGroup({ name, sessions, activePanes, paneCount, onPin, onRename,
               onSelect={(k, e) => onSelect(k, e)}
             />
           ))}
+          {/* Todos section */}
+          {todos && todos.length > 0 && (
+            <div className="mt-1 mx-1">
+              <button
+                onClick={() => setTodosOpen(o => !o)}
+                className="w-full flex items-center gap-1.5 px-2 py-1 rounded hover:bg-[#1e2330] transition-colors text-left"
+              >
+                <span className="text-[10px] text-[#6b7280] flex-1">Todos ({todos.length})</span>
+                <span className="text-[9px] text-[#4b5563]">{todosOpen ? '▲' : '▼'}</span>
+              </button>
+              {todosOpen && (
+                <div className="mt-0.5 space-y-0.5">
+                  {todos.map(todo => {
+                    let pressTimer: ReturnType<typeof setTimeout> | null = null
+                    return (
+                      <div
+                        key={todo.id}
+                        className="flex items-start gap-2 px-2 py-1.5 rounded-lg hover:bg-[#1e2330] cursor-pointer group"
+                        onClick={() => onTodoNewSession?.(todo.text, name)}
+                        onMouseDown={() => { pressTimer = setTimeout(() => {
+                          if (confirm(`Mark as done?\n\n"${todo.text}"`))
+                            onTodoComplete?.(todo.id)
+                        }, 600) }}
+                        onMouseUp={() => { if (pressTimer) clearTimeout(pressTimer) }}
+                        onMouseLeave={() => { if (pressTimer) clearTimeout(pressTimer) }}
+                      >
+                        <OwnerBadge owner={todo.owner} />
+                        <span className="text-[11px] text-[#9ca3af] leading-snug flex-1">{todo.text}</span>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -396,6 +457,23 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const lastSelectedRef = useRef<string | null>(null)
   const [dragKey, setDragKey] = useState<string | null>(null)
+  const [todoCounts, setTodoCounts] = useState<Record<string, number>>({})
+  const [todoItems, setTodoItems] = useState<Record<string, TodoItem[]>>({})
+
+  // Fetch todo counts + items for project badges
+  const refreshTodos = () => {
+    fetch(`${API}/api/todos/count`).then(r => r.json()).then(setTodoCounts).catch(() => {})
+    fetch(`${API}/api/todos`).then(r => r.json()).then((data: Record<string, { count: number; items: TodoItem[] }>) => {
+      const items: Record<string, TodoItem[]> = {}
+      for (const [proj, val] of Object.entries(data)) items[proj] = val.items
+      setTodoItems(items)
+    }).catch(() => {})
+  }
+  useEffect(() => {
+    refreshTodos()
+    const t = setInterval(refreshTodos, 60_000)
+    return () => clearInterval(t)
+  }, [])
   const [dragOverKey, setDragOverKey] = useState<string | null>(null)
   const [archiveRows, setArchiveRows] = useState<ArchiveRow[]>([])
   const [archiveLoading, setArchiveLoading] = useState(false)
@@ -531,8 +609,25 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     pinToPane(emptyPane >= 0 ? emptyPane : paneCount - 1, newKey)
   }
 
+  const handleTodoComplete = async (id: number) => {
+    await fetch(`${API}/api/todos/${id}/complete`, { method: 'PATCH' }).catch(() => {})
+    refreshTodos()
+  }
+
+  const handleTodoNewSession = (text: string, project: string) => {
+    const newKey = `session-${Date.now()}`
+    setSessions([{ key: newKey, label: text.slice(0, 40), sessionKey: newKey }, ...sessions])
+    useProjectStore.getState().setTag(newKey, project)
+    setTimeout(() => {
+      send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey: newKey, message: text } })
+    }, 300)
+    const emptyPane = activePanes.findIndex((p, i) => i < paneCount && !p)
+    pinToPane(emptyPane >= 0 ? emptyPane : paneCount - 1, newKey)
+  }
+
   const hideHeartbeat = localStorage.getItem('octis-show-heartbeat-sessions') !== 'true'
   const hideCron = localStorage.getItem('octis-show-cron-sessions') !== 'true'
+  const hideAgentSessions = localStorage.getItem('octis-show-agent-sessions') !== 'true'
 
   const isHeartbeatSession = (s: Session) => {
     const lbl = (getLabel(s.key, s.label || s.key) || '').toLowerCase()
@@ -541,13 +636,19 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
   }
   const isCronSession = (s: Session) => {
     const key = (s.key || '').toLowerCase()
-    return key.includes(':cron:') || key.includes('subagent')
+    return key.includes(':cron:')
+  }
+  // Inter-agent sessions: spawned subagents (runtime=subagent) and ACP harness sessions (runtime=acp)
+  const isAgentSession = (s: Session) => {
+    const key = (s.key || '').toLowerCase()
+    return key.includes(':subagent:') || key.includes(':acp:')
   }
 
   const sorted = getSortedSessions()
   const filtered = sorted.filter((s: Session) => {
     if (hideHeartbeat && isHeartbeatSession(s)) return false
     if (hideCron && isCronSession(s)) return false
+    if (hideAgentSessions && isAgentSession(s)) return false
     const status = getStatus(s)
     if (filter !== 'all' && status !== filter) return false
     if (search) {
@@ -559,10 +660,11 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     return true
   })
 
-  // Only count sessions that pass the heartbeat/cron filter (i.e. are actually visible)
+  // Only count sessions that pass the heartbeat/cron/agent filter (i.e. are actually visible)
   const visibleSessions = sorted.filter((s: Session) => {
     if (hideHeartbeat && isHeartbeatSession(s)) return false
     if (hideCron && isCronSession(s)) return false
+    if (hideAgentSessions && isAgentSession(s)) return false
     return true
   })
 
@@ -653,6 +755,23 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
         </div>
       )}
 
+      {/* Heartbeat/cron indicator */}
+      {sidebarView === 'sessions' && ((hideHeartbeat || hideCron) && (() => {
+        const hb = hideHeartbeat ? sorted.filter((s: Session) => isHeartbeatSession(s)).length : 0
+        const cr = hideCron ? sorted.filter((s: Session) => isCronSession(s) && !isHeartbeatSession(s)).length : 0
+        return hb + cr
+      })() > 0) && (
+        <div className="px-4 py-1.5 border-b border-[#2a3142]">
+          <span className="text-xs text-[#4b5563]">
+            ❤️ {(() => {
+              const hb = hideHeartbeat ? sorted.filter((s: Session) => isHeartbeatSession(s)).length : 0
+              const cr = hideCron ? sorted.filter((s: Session) => isCronSession(s) && !isHeartbeatSession(s)).length : 0
+              return hb + cr
+            })()} running
+          </span>
+        </div>
+      )}
+
       {/* Bulk action bar */}
       {selected.size > 0 && (
         <div className="mx-2 mb-1 px-3 py-2 bg-[#2a1f5e] border border-[#6366f1] rounded-lg flex items-center gap-2">
@@ -725,6 +844,10 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
                   onContinue={handleContinue}
                   selected={selected}
                   onSelect={(k, e) => handleSelect(k, e, projectSessions)}
+                  todoCount={todoCounts[name]}
+                  todos={todoItems[name]}
+                  onTodoComplete={handleTodoComplete}
+                  onTodoNewSession={handleTodoNewSession}
                 />
               )
             })}

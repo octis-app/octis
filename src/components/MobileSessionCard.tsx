@@ -1,5 +1,17 @@
-import { useState, useEffect, useRef } from 'react'
-import { useGatewayStore, useSessionStore, Session } from '../store/gatewayStore'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { useGatewayStore, useSessionStore, useLabelStore, Session } from '../store/gatewayStore'
+
+function formatAgo(ms: number | null): string {
+  if (!ms) return ''
+  const mins = Math.floor((Date.now() - ms) / 60000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  const days = Math.floor(hrs / 24)
+  if (days < 7) return `${days}d ago`
+  return `${Math.floor(days / 7)}w ago`
+}
 
 interface MobileSessionCardProps {
   session: Session
@@ -44,13 +56,20 @@ const statusLabels: Record<string, string> = {
   quiet: 'Quiet',
 }
 
+const API = (import.meta.env.VITE_API_URL as string) || ''
+
 export default function MobileSessionCard({ session, onOpenFull, onArchive }: MobileSessionCardProps) {
   const { send, ws } = useGatewayStore()
-  const { getStatus } = useSessionStore()
+  const { getStatus, getLastActivityMs } = useSessionStore()
+  const { getLabel, setLabel } = useLabelStore()
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [renameValue, setRenameValue] = useState('')
+  const [autoRenamed, setAutoRenamed] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const renameInputRef = useRef<HTMLInputElement>(null)
   const status = getStatus(session)
 
   useEffect(() => {
@@ -136,7 +155,71 @@ export default function MobileSessionCard({ session, onOpenFull, onArchive }: Mo
     setSending(true)
   }
 
-  const label = session.label || session.key
+  // Auto-rename: fires once after first user+assistant exchange
+  const autoRename = useCallback(() => {
+    if (autoRenamed) return
+    const hasUser = messages.some(m => m.role === 'user')
+    const hasAssistant = messages.some(m => m.role === 'assistant')
+    if (!hasUser || !hasAssistant) return
+    const persisted = getLabel(session.key)
+    if (persisted) return
+    const currentLabel = session.label || ''
+    if (currentLabel && !currentLabel.startsWith('session-') && currentLabel !== session.key) return
+    setAutoRenamed(true)
+    const slim = messages
+      .filter(m => m.role === 'user' || m.role === 'assistant')
+      .slice(0, 6)
+      .map(m => ({ role: m.role, content: normalizeContent(m.content).slice(0, 300) }))
+    void fetch(`${API}/api/session-autoname`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: slim }),
+    }).then(r => r.json()).then((data: { label?: string }) => {
+      const lbl = data.label
+      if (!lbl) return
+      send({
+        type: 'req',
+        id: `sessions-patch-${Date.now()}`,
+        method: 'sessions.patch',
+        params: { sessionKey: session.key, patch: { label: lbl } },
+      })
+      setLabel(session.key, lbl)
+      void fetch(`${API}/api/session-rename`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionKey: session.key, label: lbl }),
+      })
+    }).catch(() => {})
+  }, [autoRenamed, messages, session, getLabel, setLabel, send])
+
+  useEffect(() => { autoRename() }, [autoRename])
+
+  const handleRename = () => {
+    const trimmed = renameValue.trim()
+    if (!trimmed) { setEditing(false); return }
+    setLabel(session.key, trimmed)
+    send({
+      type: 'req',
+      id: `sessions-patch-${Date.now()}`,
+      method: 'sessions.patch',
+      params: { sessionKey: session.key, patch: { label: trimmed } },
+    })
+    void fetch(`${API}/api/session-rename`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionKey: session.key, label: trimmed }),
+    })
+    setEditing(false)
+  }
+
+  const startEditing = () => {
+    setRenameValue(getLabel(session.key) || session.label || session.key)
+    setEditing(true)
+    setTimeout(() => renameInputRef.current?.select(), 50)
+  }
+
+  const displayLabel = getLabel(session.key) || session.label || session.key
+  const lastMs = getLastActivityMs(session)
   const recentMsgs = messages.slice(-6)
 
   return (
@@ -150,16 +233,43 @@ export default function MobileSessionCard({ session, onOpenFull, onArchive }: Mo
           className="w-2 h-2 rounded-full shrink-0"
           style={{ background: statusColors[status] || statusColors.quiet }}
         />
-        <span className="text-sm font-semibold text-white truncate flex-1">{label}</span>
-        <span
-          className="text-xs px-2 py-0.5 rounded-full"
-          style={{
-            color: statusColors[status] || statusColors.quiet,
-            background: (statusColors[status] || statusColors.quiet) + '22',
-          }}
+        {editing ? (
+          <input
+            ref={renameInputRef}
+            className="flex-1 bg-[#0f1117] border border-[#6366f1] rounded-lg px-2 py-0.5 text-sm text-white outline-none"
+            value={renameValue}
+            onChange={e => setRenameValue(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter') handleRename()
+              if (e.key === 'Escape') setEditing(false)
+            }}
+            onBlur={handleRename}
+            autoFocus
+          />
+        ) : (
+          <span className="text-sm font-semibold text-white truncate flex-1">{displayLabel}</span>
+        )}
+        <div className="flex flex-col items-end gap-0.5 shrink-0">
+          <span
+            className="text-xs px-2 py-0.5 rounded-full"
+            style={{
+              color: statusColors[status] || statusColors.quiet,
+              background: (statusColors[status] || statusColors.quiet) + '22',
+            }}
+          >
+            {statusLabels[status] || 'Quiet'}
+          </span>
+          {lastMs && (
+            <span className="text-[10px] text-[#4b5563] px-1">{formatAgo(lastMs)}</span>
+          )}
+        </div>
+        <button
+          onClick={startEditing}
+          className="text-xs text-[#4b5563] hover:text-[#a5b4fc] transition-colors shrink-0 px-1"
+          title="Rename"
         >
-          {statusLabels[status] || 'Quiet'}
-        </span>
+          ✏️
+        </button>
         {onOpenFull && (
           <button
             onClick={() => onOpenFull(session)}

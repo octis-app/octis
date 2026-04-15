@@ -64,6 +64,15 @@ function AuthenticatedApp({ getToken }: { getToken: () => Promise<string | null>
 
   const NAV = NAV_ALL.filter(n => !n.ownerOnly || userRole === 'owner')
 
+  // Force WS reconnect when app returns from background (mobile half-open connection fix)
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') connect()
+    }
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => document.removeEventListener('visibilitychange', handleVisibility)
+  }, [connect])
+
   // Fetch fresh gateway config from server on every sign-in
   useEffect(() => {
     const fetchConfig = async () => {

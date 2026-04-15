@@ -350,6 +350,31 @@ app.get('/api/memory', async (req, res) => {
 })
 
 // Projects — Postgres-backed
+// Return memory file content for a project (used for session context injection)
+app.get('/api/project-memory/:slug', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT memory_file, description, name FROM raw_nexus.octis_projects WHERE slug=$1',
+      [req.params.slug]
+    )
+    const project = rows[0]
+    if (!project) return res.json({ content: '' })
+    // Try memory_file field first, then fall back to memory/<slug>.md
+    const candidates = [
+      project.memory_file ? path.join(WORKSPACE, project.memory_file) : null,
+      path.join(MEMORY_DIR, `${req.params.slug}.md`),
+    ].filter(Boolean)
+    let content = ''
+    for (const p of candidates) {
+      try { content = await fs.readFile(p, 'utf8'); break } catch {}
+    }
+    // Return first 800 chars (minimal context)
+    res.json({ content: content.slice(0, 800), description: project.description || '' })
+  } catch (err) {
+    res.json({ content: '' })
+  }
+})
+
 app.get('/api/projects', async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -574,10 +599,147 @@ app.get('/api/sessions/history', async (req, res) => {
   }
 })
 
-app.get('/api/todos', async (req, res) => {
+// ─── Todo system ──────────────────────────────────────────────────────────────
+
+const SECTION_TO_PROJECT = {
+  'Octis': 'Octis',
+  'Quantum Engine': 'Quantum',
+  'Beatimo Portal': 'Beatimo',
+  'Ops Firm': 'Ops',
+  'Prospection Pipeline': 'Centurion',
+  'CRM Decision': 'Beatimo',
+  'Sage': 'Infra',
+  'Building Stack': 'Infra',
+  'Monday.com': 'Beatimo',
+  'Billing Generator': 'Beatimo',
+  'Casin Personal': 'Personal',
+  'This Week': 'Personal',
+  'Backlog': 'Personal',
+}
+
+function parseTodosFile(content) {
+  const lines = content.split('\n')
+  const items = []
+  let currentSection = ''
+  for (const line of lines) {
+    const sectionMatch = line.match(/^##\s+(.+)/)
+    if (sectionMatch) { currentSection = sectionMatch[1].trim(); continue }
+    const todoMatch = line.match(/^-\s+\[ \]\s+(.+)/)
+    if (!todoMatch) continue
+    let text = todoMatch[1].trim()
+    // Parse owner token
+    const ownerMatch = text.match(/^\[(ME|YOU|BOTH|WAIT(?:→[^\]]+)?|UNLOCK(?:→[^\]]+)?)\]\s*/)
+    let owner = null
+    if (ownerMatch) { owner = ownerMatch[1].replace(/→.*/, ''); text = text.slice(ownerMatch[0].length).trim() }
+    // Map section → project
+    let project = 'Personal'
+    for (const [key, val] of Object.entries(SECTION_TO_PROJECT)) {
+      if (currentSection.startsWith(key)) { project = val; break }
+    }
+    items.push({ project, text, owner, source_section: currentSection })
+  }
+  return items
+}
+
+async function ensureTodosTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS octis_todos (
+      id SERIAL PRIMARY KEY,
+      project TEXT NOT NULL,
+      text TEXT NOT NULL,
+      owner TEXT,
+      status TEXT NOT NULL DEFAULT 'open',
+      source_section TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      completed_at TIMESTAMPTZ,
+      session_key TEXT,
+      UNIQUE(project, text)
+    )
+  `)
+}
+
+async function syncTodosFromFile() {
+  await ensureTodosTable()
+  const content = await fs.readFile(TODOS_FILE, 'utf8').catch(() => '')
+  const items = parseTodosFile(content)
+  let upserted = 0
+  for (const item of items) {
+    const res = await pool.query(
+      `INSERT INTO octis_todos (project, text, owner, source_section)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT ON CONSTRAINT octis_todos_project_text_uniq DO UPDATE SET
+         owner = EXCLUDED.owner,
+         source_section = EXCLUDED.source_section
+       WHERE octis_todos.status != 'done'
+       RETURNING id`,
+      [item.project, item.text, item.owner, item.source_section]
+    )
+    if (res.rowCount > 0) upserted++
+  }
+  return upserted
+}
+
+// Auto-sync on startup (non-blocking)
+setImmediate(() => syncTodosFromFile().catch(e => console.error('[todos] sync error:', e)))
+
+// GET /api/todos — open todos grouped by project (auth required)
+app.get('/api/todos', requireAuth, async (req, res) => {
   try {
-    const todos = await fs.readFile(TODOS_FILE, 'utf8').catch(() => '')
-    res.json({ todos })
+    await ensureTodosTable()
+    const result = await pool.query(`SELECT * FROM octis_todos WHERE status='open' ORDER BY project, id`)
+    const grouped = {}
+    for (const row of result.rows) {
+      if (!grouped[row.project]) grouped[row.project] = { count: 0, items: [] }
+      grouped[row.project].count++
+      grouped[row.project].items.push(row)
+    }
+    res.json(grouped)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// GET /api/todos/count — open counts by project (no auth — used for badges)
+app.get('/api/todos/count', async (req, res) => {
+  try {
+    await ensureTodosTable()
+    const result = await pool.query(`SELECT project, COUNT(*) as count FROM octis_todos WHERE status='open' GROUP BY project`)
+    const counts = {}
+    for (const row of result.rows) counts[row.project] = parseInt(row.count)
+    res.json(counts)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// POST /api/todos/sync — re-parse TODOS.md and upsert (auth required)
+app.post('/api/todos/sync', requireAuth, async (req, res) => {
+  try {
+    const count = await syncTodosFromFile()
+    res.json({ ok: true, upserted: count })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// PATCH /api/todos/:id/complete — mark done + remove from TODOS.md
+app.patch('/api/todos/:id/complete', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params
+    const row = await pool.query(`UPDATE octis_todos SET status='done', completed_at=NOW() WHERE id=$1 AND status='open' RETURNING text`, [id])
+    if (row.rowCount === 0) return res.status(404).json({ error: 'Not found or already done' })
+    const text = row.rows[0].text
+    // Remove matching line from TODOS.md
+    const content = await fs.readFile(TODOS_FILE, 'utf8').catch(() => '')
+    const lines = content.split('\n')
+    const filtered = lines.filter(line => {
+      if (!line.match(/^-\s+\[ \]/)) return true
+      // Strip prefix tokens and compare
+      const stripped = line.replace(/^-\s+\[ \]\s+/, '').replace(/^\[[A-Z→a-z]+\]\s*/, '').trim()
+      return stripped !== text
+    })
+    await fs.writeFile(TODOS_FILE, filtered.join('\n'), 'utf8')
+    res.json({ ok: true })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
