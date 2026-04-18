@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react'
-import { useGatewayStore, useSessionStore, useLabelStore, Session } from '../store/gatewayStore'
+import { useState, useEffect, useLayoutEffect, useRef } from 'react'
+import { useGatewayStore, useSessionStore, useLabelStore, useDraftStore, Session } from '../store/gatewayStore'
 
 interface MobileFullChatProps {
   session: Session
@@ -323,7 +323,7 @@ function setMsgCache(sessionKey: string, msgs: ChatMessage[]): void {
 
 export default function MobileFullChat({ session, onBack, recentSessions, onSwitch, onArchive }: MobileFullChatProps) {
   const { send, ws, connect, connected } = useGatewayStore()
-  const { consumePendingProjectInit } = useSessionStore()
+  const { consumePendingProjectInit, getStatus } = useSessionStore()
   const { getLabel, setLabel } = useLabelStore()
   // Initialize from cache if available
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
@@ -331,8 +331,9 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     return (cached && cached.length > 0) ? cached : []
   })
   const [loadedKey, setLoadedKey] = useState<string | null>(session?.key && getMsgCache(session.key) ? session.key : null)
-  const [input, setInput] = useState('')
-  const [pendingFile, setPendingFile] = useState<{ dataUrl: string; mimeType: string; name: string; kind: 'image' | 'document'; saveToWorkspace: boolean; extractedText?: string; extracting?: boolean; pages?: number } | null>(null)
+  const { getDraft, setDraft, clearDraft } = useDraftStore()
+  const [input, setInput] = useState(() => getDraft(session?.key || ''))
+  const [pendingFile, setPendingFile] = useState<{ dataUrl: string; mimeType: string; name: string; kind: 'image' | 'document' | 'video'; saveToWorkspace: boolean; extractedText?: string; extracting?: boolean; pages?: number; videoObjectUrl?: string } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [sending, _setSending] = useState(false)
   const sendingRef = useRef(false)
@@ -370,12 +371,18 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
   const userScrolledUpRef = useRef(false)
   const lastMsgCountRef = useRef(0)
   const programmaticScrollRef = useRef(false)
+  // Preserve strip scroll position across re-renders (iOS Safari resets scrollLeft on re-render)
+  const stripScrollLeft = useRef(0)
+  const prevSessionKeyRef = useRef<string | undefined>(undefined)
+  // Preserve chat scroll position across re-renders (iOS resets scrollTop on re-render)
+
+  // Track the latest history reqId so we can match responses from re-sent requests
+  const currentHistoryReqIdRef = useRef<string>('')
 
   // Scroll to bottom without triggering userScrolledUp detection
-  const scrollToBottom = (smooth = false) => {
-    programmaticScrollRef.current = true
-    bottomRef.current?.scrollIntoView({ behavior: smooth ? 'smooth' : 'instant' })
-    setTimeout(() => { programmaticScrollRef.current = false }, smooth ? 450 : 60)
+  const scrollToBottom = () => {
+    const el = scrollRef.current
+    if (el) el.scrollTop = 0 // flex-col-reverse: 0 = bottom
   }
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const outerRef = useRef<HTMLDivElement>(null)
@@ -438,19 +445,29 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
   useEffect(() => {
     if (!session?.key || !ws) return
 
+    // Load draft for new session (no longer remounting on switch)
+    setInput(getDraft(session.key))
     // Reset sending state on reconnect / session switch so polls aren't permanently blocked
     setSending(false)
-    // Try to populate from cache first to avoid blank screen
+    // Reset scroll state on session switch
+    userScrolledUpRef.current = false
+
+    // Populate from cache — never wipe to empty (causes blank flash on reconnect)
     const cached = getMsgCache(session.key)
     if (cached && cached.length > 0) {
       setMessages(cached)
-    } else {
-      setMessages([])
+      // Mark as loaded from cache immediately so messages render without waiting for WS
+      setLoadedKey(session.key)
     }
-    setLoadedKey(null)
+    // Only clear loadedKey if we have no cache — triggers loading state
+    if (!cached || cached.length === 0) {
+      setMessages([])
+      setLoadedKey(null)
+    }
 
     // Use proper req/method format (not old type-based format)
     const reqId = `chat-history-${session.key}-${Date.now()}`
+    currentHistoryReqIdRef.current = reqId
     send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey: session.key, limit: 100 } })
 
     const handleMsg = (event: MessageEvent) => {
@@ -500,8 +517,8 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
           return
         }
 
-        // History response
-        if (msg.type === 'res' && msg.id === reqId && msg.ok) {
+        // History response (match current reqId — handles re-sent requests after reconnect)
+        if (msg.type === 'res' && msg.id === currentHistoryReqIdRef.current && msg.ok) {
           const msgs = msg.payload?.messages || []
           // Refresh resilience: restore optimistic message if server hasn't committed it yet
           const pendingKey = `octis-pending-${session.key}`
@@ -582,6 +599,18 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     return () => ws.removeEventListener('message', handleMsg)
   }, [session?.key, ws, send])
 
+  // Re-fetch history when connection is established (handles the common case where
+  // the initial chat.history send was dropped because WS was still CONNECTING).
+  // Without this, user sees stale cached messages for up to 3s after reconnect.
+  useEffect(() => {
+    if (!connected || !session?.key || !ws) return
+    // Only re-fetch if we don't have fresh data for this session yet
+    if (loadedKey === session.key) return
+    const reqId = `chat-history-reconnect-${session.key}-${Date.now()}`
+    currentHistoryReqIdRef.current = reqId
+    send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey: session.key, limit: 100 } })
+  }, [connected, session?.key]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // Periodic poll so messages arrive even when streaming events are missed
   useEffect(() => {
     if (!session?.key || !ws || !connected) return
@@ -591,13 +620,15 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     return () => clearInterval(interval)
   }, [session?.key, ws, connected, send])
 
+  // Track message count for "new message arrived" detection (used for auto-scroll with col-reverse)
   useEffect(() => {
     const newCount = messages.length
     const hadNewMessage = newCount > lastMsgCountRef.current
     lastMsgCountRef.current = newCount
-    // Only scroll if: user is near the bottom OR a genuinely new message arrived
-    if (!userScrolledUpRef.current || hadNewMessage) {
-      scrollToBottom(false)
+    // With flex-col-reverse, scroll to top = scroll to newest
+    if (hadNewMessage && !userScrolledUpRef.current) {
+      const el = scrollRef.current
+      if (el) el.scrollTop = 0
     }
   }, [messages])
 
@@ -614,13 +645,39 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     }
   }, [messages])
 
+  const extractVideoFrame = (objectUrl: string): Promise<string> =>
+    new Promise((resolve) => {
+      const video = document.createElement('video')
+      video.src = objectUrl
+      video.muted = true
+      video.playsInline = true
+      video.addEventListener('loadedmetadata', () => { video.currentTime = Math.min(1.5, video.duration * 0.1) })
+      video.addEventListener('seeked', () => {
+        const canvas = document.createElement('canvas')
+        const scale = Math.min(1, 1280 / (video.videoWidth || 1280))
+        canvas.width = Math.round((video.videoWidth || 1280) * scale)
+        canvas.height = Math.round((video.videoHeight || 720) * scale)
+        canvas.getContext('2d')!.drawImage(video, 0, 0, canvas.width, canvas.height)
+        resolve(canvas.toDataURL('image/jpeg', 0.85))
+      }, { once: true })
+      video.addEventListener('error', () => resolve(''))
+      video.load()
+    })
+
   const handleAttachFile = (file: File) => {
     const isImage = file.type.startsWith('image/')
     const isPdf = file.type === 'application/pdf'
-    if (!isImage && !isPdf) return
+    const isVideo = file.type.startsWith('video/') || /\.(mp4|mov|webm|m4v|avi|mkv)$/i.test(file.name)
+    if (!isImage && !isPdf && !isVideo) return
     const reader = new FileReader()
     reader.onload = async (e) => {
       const rawDataUrl = e.target?.result as string
+      if (isVideo) {
+        const objectUrl = URL.createObjectURL(file)
+        const frameDataUrl = await extractVideoFrame(objectUrl)
+        setPendingFile({ dataUrl: frameDataUrl, mimeType: 'image/jpeg', name: file.name, kind: 'video', saveToWorkspace: false, videoObjectUrl: objectUrl })
+        return
+      }
       if (isImage) {
         // Compress before storing — iPhone photos are 5-8MB raw, need to be <200KB
         const { dataUrl, mimeType } = await compressImage(rawDataUrl, file.type)
@@ -693,12 +750,17 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     }
 
     const idempotencyKey = `octis-mobile-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    // Images go via attachments; PDFs are inlined above
-    const attachments = pendingFile?.kind === 'image'
-      ? [{ type: 'image', mimeType: pendingFile.mimeType, content: pendingFile.dataUrl.split(',')[1] }]
+    // Images + videos (frame) go via attachments; PDFs are inlined above
+    const isImageOrVideo = pendingFile?.kind === 'image' || pendingFile?.kind === 'video'
+    const attachments = isImageOrVideo
+      ? [{ type: 'image', mimeType: pendingFile!.mimeType, content: pendingFile!.dataUrl.split(',')[1] }]
       : undefined
+    // Prepend video note to message
+    if (pendingFile?.kind === 'video') {
+      msg = msg ? `🎬 Video: ${pendingFile.name}\n\n${msg}` : `🎬 Video: ${pendingFile.name}`
+    }
     const optimisticContent = pendingFile
-      ? [pendingFile.kind === 'image'
+      ? [isImageOrVideo
           ? { type: 'image', source: { type: 'base64', media_type: pendingFile.mimeType, data: pendingFile.dataUrl.split(',')[1] } }
           : { type: 'text', text: `📄 ${pendingFile.name}${pendingFile.extractedText !== undefined ? ` (✓ extracted)` : ''}` },
          ...(msg ? [{ type: 'text', text: msg }] : [])]
@@ -714,6 +776,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     const optimisticId = Date.now()
     setMessages((prev) => [...prev, { role: 'user', content: optimisticContent as string, id: optimisticId }])
     setInput('')
+    clearDraft(session.key)
     preSendCountRef.current = messages.length  // capture count before optimistic is added
     setSending(true)
     // Persist to localStorage so message survives a page refresh while model is working
@@ -739,12 +802,35 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sending])
 
+  // Preserve strip scroll position across re-renders
+  // iOS Safari resets scrollLeft when a container's children change (polling updates)
+  useLayoutEffect(() => {
+    if (!stripRef.current) return
+    if (session?.key !== prevSessionKeyRef.current) {
+      // Session changed — scrollIntoView effect below will position it; update the ref
+      prevSessionKeyRef.current = session?.key
+      return
+    }
+    // Same session, just a re-render from polling — restore saved scroll position
+    if (stripScrollLeft.current > 0) {
+      stripRef.current.scrollLeft = stripScrollLeft.current
+    }
+  })
+
   // Auto-scroll the sessions pill strip to keep active pill in view when session changes
   useEffect(() => {
-    if (!session?.key) return
+    if (!session?.key || !stripRef.current) return
     const pill = pillRefs.current[session.key]
-    if (pill) {
-      pill.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' })
+    const strip = stripRef.current
+    if (!pill) return
+    const pillLeft = pill.offsetLeft
+    const pillRight = pillLeft + pill.offsetWidth
+    const visible = pillLeft >= strip.scrollLeft && pillRight <= strip.scrollLeft + strip.clientWidth
+    if (!visible) {
+      // Only scroll if the active pill is actually out of view
+      const target = pillLeft - strip.clientWidth / 2 + pill.offsetWidth / 2
+      strip.scrollLeft = Math.max(0, target)
+      stripScrollLeft.current = strip.scrollLeft
     }
   }, [session?.key])
 
@@ -942,22 +1028,37 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
         <div
           ref={stripRef}
           className="overflow-x-auto flex gap-1.5 px-4 py-1.5 bg-[#0f1117] border-b border-[#1e2330] shrink-0"
-          style={{ scrollbarWidth: 'none' }}
+          style={{ scrollbarWidth: 'none', touchAction: 'pan-x', WebkitOverflowScrolling: 'touch', overscrollBehaviorX: 'contain' } as React.CSSProperties}
+          onScroll={(e) => { stripScrollLeft.current = (e.target as HTMLDivElement).scrollLeft }}
+          onTouchStart={e => e.stopPropagation()}
+          onTouchMove={e => e.stopPropagation()}
+          onTouchEnd={e => e.stopPropagation()}
         >
           {recentSessions.map((s) => {
             const lbl = (getLabel(s.key) || s.label || s.key).slice(0, 14)
             const isCurrent = s.key === session.key
+            const st = getStatus(s)
+            const dotColor =
+              st === 'working' ? '#a855f7'
+              : st === 'needs-you' ? '#3b82f6'
+              : st === 'stuck' ? '#f59e0b'
+              : st === 'active' ? '#22c55e'
+              : '#6b7280'
             return (
               <button
                 key={s.key}
                 ref={el => { pillRefs.current[s.key] = el }}
                 onClick={() => !isCurrent && onSwitch?.(s)}
-                className={`text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap transition-colors shrink-0 ${
+                className={`flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap transition-colors shrink-0 ${
                   isCurrent
                     ? 'bg-[#6366f1] text-white'
                     : 'bg-[#1e2330] text-[#9ca3af] active:bg-[#2a3142]'
                 }`}
               >
+                <span
+                  className="w-1.5 h-1.5 rounded-full shrink-0"
+                  style={{ backgroundColor: isCurrent ? 'rgba(255,255,255,0.7)' : dotColor }}
+                />
                 {lbl}
               </button>
             )
@@ -973,7 +1074,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
       )}
       <div
         ref={scrollRef}
-        className="h-full overflow-y-auto px-4 py-3 space-y-3"
+        className="h-full overflow-y-auto px-4 py-3 space-y-3 flex flex-col-reverse"
         onTouchStart={(e) => {
           touchStartX.current = e.touches[0].clientX
           touchStartY.current = e.touches[0].clientY
@@ -1037,16 +1138,25 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
           if (programmaticScrollRef.current) return
           const el = scrollRef.current
           if (!el) return
-          const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-          userScrolledUpRef.current = distFromBottom > 80
+          // With flex-col-reverse, scrollTop=0 is the bottom. User scrolled up = scrollTop > 80
+          userScrolledUpRef.current = el.scrollTop > 80
         }}
       >
+        {/* Loading indicator when no messages and history not yet loaded */}
+        {loadedKey !== session?.key && messages.length === 0 && (
+          <div className="flex flex-col items-center justify-center gap-3 py-16 text-[#4b5563]">
+            <div className="w-6 h-6 border-2 border-[#4b5563] border-t-[#6366f1] rounded-full animate-spin" />
+            {!connected && <span className="text-xs">Reconnecting…</span>}
+          </div>
+        )}
         {/* Show messages from cache while loading (when loadedKey doesn't match yet) */}
         {(() => {
           const showMessages = (loadedKey === session?.key || (loadedKey === null && messages.length > 0))
             ? messages
             : []
-          return showMessages.filter((msg) => !isHeartbeatMsg(msg) && !(noiseHidden && isNoiseMsg(msg)) && !(msg.role === 'assistant' && extractText(msg.content).trimStart().startsWith('📁 **'))).map((msg, i) => (
+          // Reverse so newest is first in DOM — flex-col-reverse makes it appear at visual bottom
+          const filtered = showMessages.filter((msg) => !isHeartbeatMsg(msg) && !(noiseHidden && isNoiseMsg(msg)) && !(msg.role === 'assistant' && extractText(msg.content).trimStart().startsWith('📁 **')))
+          return [...filtered].reverse().map((msg, i) => (
             <div
               key={msg.id !== undefined ? String(msg.id) : i}
               className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
@@ -1119,7 +1229,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
             </div>
           </div>
         )}
-        <div ref={bottomRef} />
+
       </div>
       </div>
       <div
@@ -1140,6 +1250,13 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
             <div className="flex items-center gap-2">
               {pendingFile.kind === 'image'
                 ? <img src={pendingFile.dataUrl} alt="preview" className="h-14 w-14 rounded-xl object-cover border border-[#6366f1]" />
+                : pendingFile.kind === 'video'
+                ? (
+                  <div className="flex flex-col gap-1 flex-1 min-w-0">
+                    <video src={pendingFile.videoObjectUrl} controls muted playsInline className="rounded-xl max-h-36 max-w-full border border-[#6366f1]" />
+                    <span className="text-[10px] text-[#9ca3af] truncate">🎬 {pendingFile.name} · frame extracted for analysis</span>
+                  </div>
+                )
                 : (
                   <div className="flex flex-col gap-0.5 bg-[#1e2330] rounded-xl px-3 py-2 flex-1 min-w-0">
                     <div className="flex items-center gap-2">
@@ -1155,7 +1272,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
                   </div>
                 )
               }
-              <button onClick={() => setPendingFile(null)} className="text-[#6b7280] hover:text-red-400 text-lg ml-auto shrink-0">✕</button>
+              <button onClick={() => { if (pendingFile.videoObjectUrl) URL.revokeObjectURL(pendingFile.videoObjectUrl); setPendingFile(null) }} className="text-[#6b7280] hover:text-red-400 text-lg ml-auto shrink-0">✕</button>
             </div>
           </div>
         )}
@@ -1164,7 +1281,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/*,application/pdf"
+            accept="image/*,application/pdf,video/mp4,video/quicktime,video/webm,video/*"
             className="hidden"
             onChange={(e) => { const f = e.target.files?.[0]; if (f) handleAttachFile(f); e.target.value = '' }}
           />
@@ -1184,6 +1301,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
             style={{ maxHeight: '120px', overflowY: 'auto', fontSize: '16px' }}
             onChange={(e) => {
               setInput(e.target.value)
+              setDraft(session.key, e.target.value)
               e.target.style.height = 'auto'
               e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px'
             }}
@@ -1215,11 +1333,25 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
             <button
               onClick={() => {
                 setShowArchiveSheet(false)
-                onArchive?.()  // parent handles navigation (next session or back)
+                // Send final save instruction (fire-and-forget, NO_REPLY expected)
+                const idempotencyKey = `octis-archive-${Date.now()}-${Math.random().toString(36).slice(2)}`
+                send({
+                  type: 'req',
+                  id: `chat-send-${Date.now()}`,
+                  method: 'chat.send',
+                  params: {
+                    sessionKey: session.key,
+                    message: '💾 Final save - write any remaining decisions, tasks, or context to MEMORY.md and TODOS.md. Reply with NO_REPLY only.',
+                    deliver: false,
+                    idempotencyKey,
+                  },
+                })
+                // Hide only (no gateway delete — sessions needed for productivity audits)
+                onArchive?.()
               }}
               className="w-full text-left px-4 py-3.5 rounded-xl text-red-400 font-medium text-sm hover:bg-[#2a3142] transition-colors"
             >
-              Archive session
+              Save &amp; Archive
             </button>
             <button
               onClick={() => setShowArchiveSheet(false)}

@@ -654,7 +654,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
 
   const hideHeartbeat = localStorage.getItem('octis-show-heartbeat-sessions') !== 'true'
   const hideCron = localStorage.getItem('octis-show-cron-sessions') !== 'true'
-  const hideAgentSessions = true // Always hide subagent/ACP sessions — never show in sidebar
+  const hideAgentSessions = true // Hide background subagent workers — NOT user-spawned ACP sessions
 
   const isHeartbeatSession = (s: Session) => {
     const lbl = (getLabel(s.key, s.label || s.key) || '').toLowerCase()
@@ -665,11 +665,11 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     const key = (s.key || '').toLowerCase()
     return key.includes(':cron:')
   }
-  // Inter-agent sessions: spawned subagents (runtime=subagent), ACP harness sessions (runtime=acp),
-  // and model-fallback sessions (OpenClaw auto-retry with a different model on timeout)
+  // Background subagents: spawned by Byte as workers (runtime=subagent).
+  // ACP sessions (:acp:) are user-spawned harnesses (Codex, Claude Code, etc.) — keep visible.
   const isAgentSession = (s: Session) => {
     const key = (s.key || '').toLowerCase()
-    if (key.includes(':subagent:') || key.includes(':acp:')) return true
+    if (key.includes(':subagent:')) return true
     const lbl = getLabel(s.key, s.label || '')
     if (lbl.startsWith('Continue where you left off')) return true
     return false

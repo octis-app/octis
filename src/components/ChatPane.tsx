@@ -1151,10 +1151,15 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
       msg = msg ? `${pdfBlock}\n\n${msg}` : pdfBlock
     }
 
+    // Video: prepend note and send extracted frame as image
+    if (pendingFile?.kind === 'video') {
+      msg = msg ? `🎬 Video: ${pendingFile.name}\n\n${msg}` : `🎬 Video: ${pendingFile.name}`
+    }
     const idempotencyKey = `octis-send-${Date.now()}-${Math.random().toString(36).slice(2)}`
     const reqId = `chat-send-${Date.now()}`
-    // Images go via gateway attachments; PDFs are already inlined above
-    const attachments = (pendingFile?.kind === 'image')
+    // Images + video frames go via gateway attachments; PDFs are already inlined above
+    const isImageOrVideo = pendingFile?.kind === 'image' || pendingFile?.kind === 'video'
+    const attachments = isImageOrVideo
       ? [{ type: 'image', mimeType: pendingFile!.mimeType, content: pendingFile!.dataUrl.split(',')[1] }]
       : undefined
     const ok = send({
@@ -1177,7 +1182,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     // Use structured content for optimistic message so files render immediately
     const optimisticContent: MessageContent = pendingFile
       ? [
-          pendingFile.kind === 'image'
+          isImageOrVideo
             ? { type: 'image', source: { type: 'base64', media_type: pendingFile.mimeType, data: pendingFile.dataUrl.split(',')[1] } }
             : { type: 'document', source: { type: 'base64', media_type: pendingFile.mimeType, data: pendingFile.dataUrl.split(',')[1] }, name: pendingFile.name } as ContentBlock,
           ...(msg ? [{ type: 'text', text: msg }] : []),
@@ -1256,13 +1261,40 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     if (!renameRequested) return
     void handleAutoRename()
   }, [renameRequested])
-  const [pendingFile, setPendingFile] = useState<{ dataUrl: string; mimeType: string; name: string; kind: 'image' | 'document'; saveToWorkspace: boolean; extractedText?: string; extracting?: boolean; pages?: number } | null>(null)
+  const [pendingFile, setPendingFile] = useState<{ dataUrl: string; mimeType: string; name: string; kind: 'image' | 'document' | 'video'; saveToWorkspace: boolean; extractedText?: string; extracting?: boolean; pages?: number; videoObjectUrl?: string } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const extractVideoFrame = (objectUrl: string): Promise<string> =>
+    new Promise((resolve) => {
+      const video = document.createElement('video')
+      video.src = objectUrl
+      video.muted = true
+      video.playsInline = true
+      video.addEventListener('loadedmetadata', () => { video.currentTime = Math.min(1.5, video.duration * 0.1) })
+      video.addEventListener('seeked', () => {
+        const canvas = document.createElement('canvas')
+        const scale = Math.min(1, 1280 / (video.videoWidth || 1280))
+        canvas.width = Math.round((video.videoWidth || 1280) * scale)
+        canvas.height = Math.round((video.videoHeight || 720) * scale)
+        canvas.getContext('2d')!.drawImage(video, 0, 0, canvas.width, canvas.height)
+        resolve(canvas.toDataURL('image/jpeg', 0.85))
+      }, { once: true })
+      video.addEventListener('error', () => resolve(''))
+      video.load()
+    })
 
   const handleAttachFile = (file: File) => {
     const isImage = file.type.startsWith('image/')
     const isPdf = file.type === 'application/pdf'
-    if (!isImage && !isPdf) return
+    const isVideo = file.type.startsWith('video/') || /\.(mp4|mov|webm|m4v|avi|mkv)$/i.test(file.name)
+    if (!isImage && !isPdf && !isVideo) return
+    if (isVideo) {
+      const objectUrl = URL.createObjectURL(file)
+      extractVideoFrame(objectUrl).then(frameDataUrl => {
+        setPendingFile({ dataUrl: frameDataUrl, mimeType: 'image/jpeg', name: file.name, kind: 'video', saveToWorkspace: false, videoObjectUrl: objectUrl })
+      })
+      return
+    }
     const reader = new FileReader()
     reader.onload = async (e) => {
       const dataUrl = e.target?.result as string
@@ -1411,13 +1443,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
         method: 'chat.send',
         params: { sessionKey, message: msg, deliver: false, idempotencyKey },
       })
-      // Delete session immediately so any agent reply lands in a dead session
-      send({
-        type: 'req',
-        id: `sessions-delete-${Date.now()}`,
-        method: 'sessions.delete',
-        params: { sessionKey },
-      })
+      // Hide only — no gateway delete (sessions needed for productivity audits)
       // Permanently hide from sidebar so gateway sessions.list can't re-surface it
       useHiddenStore.getState().hide(sessionKey)
       setSessions(sessions.filter((s: Session) => s.key !== sessionKey))
@@ -1807,6 +1833,13 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               <div className="relative inline-block">
                 {pendingFile.kind === 'image'
                   ? <img src={pendingFile.dataUrl} alt="pending" className="max-h-24 max-w-[200px] rounded-lg border border-[#6366f1] object-cover" />
+                  : pendingFile.kind === 'video'
+                  ? (
+                    <div className="flex flex-col gap-1 max-w-[280px]">
+                      <video src={pendingFile.videoObjectUrl} controls muted playsInline className="rounded-lg border border-[#6366f1] max-h-40 max-w-full" />
+                      <span className="text-[10px] text-[#9ca3af] truncate">🎬 {pendingFile.name} · frame extracted</span>
+                    </div>
+                  )
                   : (
                     <div className="flex flex-col gap-1 bg-[#2a3142] border border-[#6366f1] rounded-lg px-3 py-2 max-w-[240px]">
                       <div className="flex items-center gap-2">
@@ -1828,7 +1861,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                   )
                 }
                 <button
-                  onClick={() => setPendingFile(null)}
+                  onClick={() => { if (pendingFile.videoObjectUrl) URL.revokeObjectURL(pendingFile.videoObjectUrl); setPendingFile(null) }}
                   className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-red-500 text-white rounded-full text-[9px] flex items-center justify-center hover:bg-red-400"
                 >✕</button>
               </div>
@@ -1838,7 +1871,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             <input
               ref={fileInputRef}
               type="file"
-              accept="image/*,application/pdf"
+              accept="image/*,application/pdf,video/mp4,video/quicktime,video/webm,video/*"
               className="hidden"
               onChange={(e) => { const f = e.target.files?.[0]; if (f) handleAttachFile(f); e.target.value = '' }}
             />

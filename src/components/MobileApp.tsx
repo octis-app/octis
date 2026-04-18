@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useAuth } from '@clerk/clerk-react'
 import { useGatewayStore, useSessionStore, useHiddenStore, useProjectStore, useLabelStore, Session } from '../store/gatewayStore'
 
@@ -116,10 +116,11 @@ export default function MobileApp() {
     setFullChatSession(matched)
   }, [sessions])
 
-  const hideAgentSessions = true // Always hide subagent/ACP sessions
+  const hideAgentSessions = true // Hide background subagent workers (not user-spawned ACP sessions)
   const isAgentSession = (s: Session) => {
     const key = (s.key || '').toLowerCase()
-    if (key.includes(':subagent:') || key.includes(':acp:')) return true
+    // Only hide true background subagents — NOT :acp: sessions (those are user-spawned harnesses like Codex/Claude Code)
+    if (key.includes(':subagent:')) return true
     // Also filter model-fallback sessions (OpenClaw auto-retry on timeout)
     const lbl = (s.label || '').toLowerCase()
     if (lbl.startsWith('continue where you left off')) return true
@@ -132,38 +133,50 @@ export default function MobileApp() {
     return key.includes(':cron:')
   }
 
-  const visibleSessions = sessions.filter((s: Session) => {
+  // Stable session fingerprint — only recompute visibleSessions when keys/statuses actually change
+  const sessionFingerprint = sessions.map(s => `${s.key}:${getStatus(s)}`).join('|')
+  const visibleSessions = useMemo(() => sessions.filter((s: Session) => {
     if (!s.key || isHidden(s.key) || isHidden(s.id || '') || isHidden(s.sessionId || '')) return false
-    if (/^session-\d+$/.test(s.key)) return false // never show temp placeholder sessions
+    if (/^session-\d+$/.test(s.key)) return false
     if (hideAgentSessions && isAgentSession(s)) return false
     if ((hideHeartbeat || hideCron) && isHeartbeatOrCron(s)) return false
     return true
-  })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [sessionFingerprint, hideAgentSessions, hideHeartbeat, hideCron])
 
-  const filtered = visibleSessions.filter((s: Session) => {
+  const filtered = useMemo(() => visibleSessions.filter((s: Session) => {
     const st = getStatus(s)
     if (filter === 'active') return st === 'active'
     if (filter === 'idle') return st === 'quiet'
     return true
-  })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [visibleSessions, filter])
 
-  const counts = {
+  const counts = useMemo(() => ({
     active: visibleSessions.filter((s: Session) => getStatus(s) === 'active').length,
     idle: visibleSessions.filter((s: Session) => getStatus(s) === 'quiet').length,
-  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [visibleSessions])
+
+  // Stable slice — new array ref only when visibleSessions actually changes
+  const recentSessions = useMemo(() => visibleSessions.slice(0, 10), [visibleSessions])
+
+  // Ref so archive callback always sees the current session (closure would be stale after session switch)
+  const fullChatSessionRef = useRef(fullChatSession)
+  fullChatSessionRef.current = fullChatSession
 
   if (fullChatSession) {
     return <MobileFullChat
-      key={fullChatSession.key}
       session={fullChatSession}
       onBack={() => setFullChatSession(null)}
-      recentSessions={visibleSessions.slice(0, 10)}
+      recentSessions={recentSessions}
       onSwitch={(s) => setFullChatSession(s)}
       onArchive={() => {
-        const archivedKey = fullChatSession.key
+        const current = fullChatSessionRef.current
+        if (!current) return
+        const archivedKey = current.key
         hideSession(archivedKey)
-        if (fullChatSession.id) hideSession(fullChatSession.id)
-        // Jump to the next available session instead of returning to the list
+        if (current.id) hideSession(current.id)
         const next = visibleSessions.find(s => s.key !== archivedKey)
         setFullChatSession(next || null)
       }}
@@ -257,7 +270,7 @@ export default function MobileApp() {
                 </div>
               </div>
             ) : (
-              <div className="flex-1 overflow-y-auto" style={{ WebkitOverflowScrolling: 'touch' }}>
+              <div className="flex-1 overflow-y-auto overflow-x-hidden" style={{ WebkitOverflowScrolling: 'touch', touchAction: 'pan-y' }}>
                 {filtered.map((s: Session) => {
                   const st = getStatus(s)
                   const lbl = labels[s.key] || s.label || s.key
@@ -270,12 +283,18 @@ export default function MobileApp() {
                     if (hrs < 24) return `${hrs}h`
                     return `${Math.floor(hrs / 24)}d`
                   })() : ''
-                  const dotColor =
+                  const statusColor =
                     st === 'working' ? '#a855f7'
                     : st === 'needs-you' ? '#3b82f6'
                     : st === 'stuck' ? '#f59e0b'
                     : st === 'active' ? '#22c55e'
-                    : '#374151'
+                    : '#6b7280'
+                  const statusLabel =
+                    st === 'working' ? 'Working'
+                    : st === 'needs-you' ? 'Needs you'
+                    : st === 'stuck' ? 'Stuck?'
+                    : st === 'active' ? 'Active'
+                    : 'Quiet'
                   return (
                     <div
                       key={s.key}
@@ -285,9 +304,10 @@ export default function MobileApp() {
                         onClick={() => setFullChatSession(s)}
                         className="flex-1 flex items-center gap-3 px-4 py-3.5 active:bg-[#1e2330] text-left min-w-0"
                       >
-                        <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: dotColor }} />
+                        <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: statusColor }} />
                         <span className="flex-1 text-sm text-white truncate min-w-0">{lbl}</span>
-                        {ago && <span className="text-xs text-[#4b5563] shrink-0">{ago}</span>}
+                        <span className="text-xs shrink-0 font-medium" style={{ color: statusColor }}>{statusLabel}</span>
+                        {ago && <span className="text-xs text-[#4b5563] shrink-0 ml-1.5">{ago}</span>}
                         <span className="text-[#4b5563] shrink-0 ml-1">›</span>
                       </button>
                       <button

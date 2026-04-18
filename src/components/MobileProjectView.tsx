@@ -131,7 +131,8 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
 
   const isAgentSession = (s: Session) => {
     const key = (s.key || '').toLowerCase()
-    if (key.includes(':subagent:') || key.includes(':acp:')) return true
+    // Only hide background subagents — ACP sessions are user-spawned, keep them visible
+    if (key.includes(':subagent:')) return true
     const lbl = (s.label || '').toLowerCase()
     return lbl.startsWith('continue where you left off')
   }

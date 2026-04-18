@@ -7,7 +7,7 @@ import ErrorBoundary from './components/ErrorBoundary'
 
 function UpdateBanner() {
   const { needRefresh: [needRefresh], updateServiceWorker } = useRegisterSW({
-    onRegistered(r) { r && setInterval(() => r.update(), 60 * 60 * 1000) },
+    onRegistered(r) { r && setInterval(() => r.update(), 5 * 60 * 1000) },
   })
   if (!needRefresh) return null
   return (
