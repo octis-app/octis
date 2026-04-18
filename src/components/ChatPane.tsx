@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { useGatewayStore, useSessionStore, useProjectStore, useLabelStore, useDraftStore, useHiddenStore, Session } from '../store/gatewayStore'
 
 // ─── Session cost/health badge (for panel header) ─────────────────────────────
 function SessionCostBadge({ sessionKey }: { sessionKey: string }) {
-  const { sessions, getCostDelta } = useSessionStore()
+  const { sessions, sessionMeta } = useSessionStore()
   const { send } = useGatewayStore()
   const [expanded, setExpanded] = useState(false)
 
@@ -11,15 +11,17 @@ function SessionCostBadge({ sessionKey }: { sessionKey: string }) {
   const cost = session?.estimatedCostUsd
   if (cost == null || cost < 0.01) return null
 
-  const delta = getCostDelta(sessionKey)
+  const exchangeCost = sessionMeta[sessionKey]?.lastExchangeCost ?? null
+  if (exchangeCost == null) return null
 
+  // Per-exchange cost: signals context overhead for the most recent completed message
   let icon = '🟢'
-  let level = 'Healthy'
+  let level = 'Light'
   let pillClass = 'bg-emerald-900/40 text-emerald-400 border-emerald-700/40'
-  if (cost > 60 || (delta != null && delta > 0.20)) {
-    icon = '🔥'; level = 'Hot'; pillClass = 'bg-red-900/40 text-red-400 border-red-700/40'
-  } else if (cost > 15 || (delta != null && delta > 0.05)) {
-    icon = '⚠️'; level = 'Warm'; pillClass = 'bg-amber-900/40 text-amber-400 border-amber-700/40'
+  if (exchangeCost > 0.15) {
+    icon = '🔴'; level = 'Heavy'; pillClass = 'bg-red-900/40 text-red-400 border-red-700/40'
+  } else if (exchangeCost > 0.05) {
+    icon = '🟡'; level = 'Growing'; pillClass = 'bg-amber-900/40 text-amber-400 border-amber-700/40'
   }
 
   const sendCompact = (e: React.MouseEvent) => {
@@ -39,17 +41,12 @@ function SessionCostBadge({ sessionKey }: { sessionKey: string }) {
       </div>
       {expanded && (
         <div className="absolute right-0 top-7 z-50 bg-[#1a1f2e] border border-[#2a3142] rounded-xl shadow-2xl p-3 min-w-[180px] text-xs">
-          <div className="text-white font-semibold mb-1">Context cost</div>
+          <div className="text-white font-semibold mb-1">Context overhead</div>
           <div className="text-[#e8eaf0] mb-0.5">
-            Total: <span className="font-mono text-amber-400">${cost.toFixed(3)}</span>
+            Per message: <span className="font-mono" style={{ color: level === 'Heavy' ? '#ef4444' : level === 'Growing' ? '#f59e0b' : '#22c55e' }}>${exchangeCost.toFixed(3)}</span>
           </div>
-          {delta != null && (
-            <div className="text-[#e8eaf0] mb-2">
-              +<span className="font-mono text-[10px]" style={{ color: level === 'Hot' ? '#ef4444' : level === 'Warm' ? '#f59e0b' : '#22c55e' }}>${delta.toFixed(3)}</span>/30s
-            </div>
-          )}
-          <div className="text-[10px] text-[#6b7280] mb-2">{level === 'Hot' ? 'Context is large — compact now' : level === 'Warm' ? 'Consider compacting soon' : 'Context healthy'}</div>
-          {level !== 'Healthy' && (
+          <div className="text-[10px] text-[#6b7280] mb-2">{level === 'Heavy' ? '🔴 Heavy - compact or start a new session' : level === 'Growing' ? '🟡 Growing - consider compacting soon' : '🟢 Light - context is healthy'}</div>
+          {level !== 'Light' && (
             <button
               onClick={sendCompact}
               className="w-full bg-[#6366f1] hover:bg-[#818cf8] text-white rounded px-2 py-1 text-[10px] font-medium transition-colors"
@@ -71,6 +68,12 @@ interface ChatMessage {
   content: MessageContent
   ts?: string
   created_at?: string
+  timestamp?: string | number
+  // Gateway stores images as separate fields when sent via chat.send with attachments
+  MediaPath?: string
+  MediaPaths?: string[]
+  MediaType?: string
+  MediaTypes?: string[]
 }
 
 type ContentBlock =
@@ -86,6 +89,14 @@ interface ChatPaneProps {
   sessionKey: string | null
   paneIndex: number
   onClose: () => void
+  onFocus?: () => void
+  renameRequested?: number
+  isFocused?: boolean
+  onDragStart?: (e: React.PointerEvent, label: string) => void
+  onDragOver?: (e: React.DragEvent) => void
+  onDrop?: () => void
+  onDragEnd?: () => void
+  isDragOver?: boolean
 }
 
 // ─── Markdown renderer ────────────────────────────────────────────────────────
@@ -170,7 +181,7 @@ function ChatMarkdown({ text }: { text: string }) {
       continue
     }
 
-    
+
 
     if (line.startsWith('```')) {
       const lang = line.slice(3).trim()
@@ -285,7 +296,7 @@ function extractText(content: MessageContent): string {
 function isHeartbeatTrigger(content: MessageContent): boolean {
   const text = extractText(content)
   if (text.includes('Read HEARTBEAT.md') || text.trim().toLowerCase() === 'heartbeat') return true
-  // Async exec completion notifications injected by OpenClaw — always hide
+  // Async exec completion notifications injected by OpenClaw - always hide
   if (text.trimStart().startsWith('System (untrusted):') || text.trimStart().startsWith('System:') ||
       text.includes('An async command you ran earlier has completed')) return true
   return false
@@ -301,6 +312,26 @@ function isHeartbeatMsg(msg: ChatMessage): boolean {
     (msg.role === 'user' && isHeartbeatTrigger(msg.content)) ||
     (msg.role === 'assistant' && isHeartbeatResponse(msg.content))
   )
+}
+
+function getMsgTs(msg: ChatMessage): number {
+  const raw = msg.ts || msg.created_at || msg.timestamp
+  if (!raw) return 0
+  const ms = typeof raw === 'number' ? raw : new Date(raw).getTime()
+  return isNaN(ms) ? 0 : ms
+}
+
+function fmtMsgTs(ms: number): string {
+  const d = new Date(ms)
+  const now = new Date()
+  const sameDay = d.toDateString() === now.toDateString()
+  const yesterday = new Date(now)
+  yesterday.setDate(yesterday.getDate() - 1)
+  const isYesterday = d.toDateString() === yesterday.toDateString()
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  if (sameDay) return time
+  if (isYesterday) return `Yesterday ${time}`
+  return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`
 }
 
 function isNoiseMsg(msg: ChatMessage): boolean {
@@ -334,13 +365,23 @@ function isNoiseMsg(msg: ChatMessage): boolean {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }: ChatPaneProps) {
-  const { send, ws, connected } = useGatewayStore()
-  const { setSessions, sessions, setLastRole, markStreaming: markSessionStreaming, incrementUnread, clearUnread, sessionMeta } = useSessionStore()
+export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, onFocus, isFocused, onDragStart, onDragOver, onDrop, onDragEnd, isDragOver, renameRequested }: ChatPaneProps) {
+  const { send, ws, connected, agentId } = useGatewayStore()
+  const { setSessions, sessions, setLastRole, markStreaming: markSessionStreaming, incrementUnread, clearUnread, sessionMeta, consumePendingProjectPrefix, consumePendingProjectInit, setLastExchangeCost } = useSessionStore()
   const { setCard } = useProjectStore()
   const { setLabel: saveLabelLocal, getLabel } = useLabelStore()
   const { setDraft, getDraft, clearDraft } = useDraftStore()
+  // Per-session message cache - show instantly on switch, refresh silently behind the scenes
+  const messageCacheRef = useRef<Map<string, ChatMessage[]>>(new Map())
   const [messages, setMessages] = useState<ChatMessage[]>([])
+  const setMessagesAndCache = (updater: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[]), key?: string) => {
+    setMessages(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater
+      if (key && next.length > 0) messageCacheRef.current.set(key, next)
+      return next
+    })
+  }
+  const [loadedKey, setLoadedKey] = useState<string | null>(null)
   const [input, setInput] = useState(() => (sessionKey ? getDraft(sessionKey) : ''))
   const [sessionCard, setSessionCard] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -350,16 +391,27 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
   const [isWorking, setIsWorking] = useState(false)
   const [workingTool, setWorkingTool] = useState<string | null>(null)
   // Sent queue: tracks recent sends with status for user feedback
-  type SentEntry = { id: number; text: string; status: 'sending' | 'delivered' }
+  type SentEntry = { id: number; text: string; status: 'sending' | 'queued' }
   const [sentQueue, setSentQueue] = useState<SentEntry[]>([])
   const confirmedOptimisticRef = useRef<number | null>(null) // tracks just-confirmed optimistic ID
   const lastSentRef = useRef<number>(0) // timestamp of last sent message
   const preSendCountRef = useRef<number>(0) // server message count at time of send
+  const preSendCostRef = useRef<number>(0) // session cost at time of last send
   const pendingOptimisticIdRef = useRef<number | null>(null) // id of current optimistic message
+  const loadedSessionRef = useRef<string | null>(null) // session key for which history is currently loaded
+  const workingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null) // fallback: clear working after 90s
   // Show thinking indicator if: local state says working, OR the global session store says this
   // session is streaming (e.g. driven from another pane or another surface like Slack)
   const globalStreaming = sessionKey ? (sessionMeta[sessionKey]?.isStreaming ?? false) : false
-  const showWorking = isWorking || globalStreaming
+  // Defensive fallback: if isWorking/globalStreaming both cleared but messages still show user as last
+  // message (reply hasn't rendered yet), keep indicator active. Closes the Zustand/React batching race
+  // where setLastRole() zeroes isStreaming before setMessages() fires with the assistant reply.
+  const lastVisibleMsg = messages.length > 0 ? messages[messages.length - 1] : null
+  const awaitingRender = !isWorking && !globalStreaming &&
+    lastVisibleMsg?.role === 'user' &&
+    lastSentRef.current > 0 &&
+    (Date.now() - lastSentRef.current) < 120000
+  const showWorking = isWorking || globalStreaming || awaitingRender
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const [noiseHidden, setNoiseHidden] = useState(() => {
     try {
@@ -388,10 +440,10 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
   }, [sessionKey, clearUnread])
 
   // Trigger a sessions.list refresh on mount so the cost badge populates immediately
-  // (Sidebar polls every 30s — without this, a newly-opened pane can wait up to 30s)
+  // (Sidebar polls every 30s - without this, a newly-opened pane can wait up to 30s)
   useEffect(() => {
     if (!sessionKey || !connected) return
-    send({ type: 'req', id: `sessions-list-pane-${Date.now()}`, method: 'sessions.list', params: {} })
+    send({ type: 'req', id: `sessions-list-pane-${Date.now()}`, method: 'sessions.list', params: agentId ? { agentId } : {} })
   }, [sessionKey, connected, send])
 
   // Handle sent queue delivery confirmation outside of setMessages callbacks
@@ -399,16 +451,44 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
     const confirmed = confirmedOptimisticRef.current
     if (confirmed === null) return
     confirmedOptimisticRef.current = null
-    setSentQueue(prev => prev.map(e => e.id === confirmed ? { ...e, status: 'delivered' as const } : e))
-    const timer = setTimeout(() => setSentQueue(prev => prev.filter(e => e.id !== confirmed)), 4000)
+    setSentQueue(prev => prev.map(e => e.id === confirmed ? { ...e, status: 'queued' as const } : e))
+    // Fallback: remove after 8s if streaming never clears it
+    const timer = setTimeout(() => setSentQueue(prev => prev.filter(e => e.id !== confirmed)), 8000)
     return () => clearTimeout(timer)
   }, [messages]) // runs after messages state settles
 
+  // Keep message cache fresh as messages update (so future visits to this session are instant)
+  useEffect(() => {
+    if (sessionKey && messages.length > 0 && loadedKey === sessionKey) {
+      messageCacheRef.current.set(sessionKey, messages)
+    }
+  }, [messages, sessionKey, loadedKey])
+
+  // Clear sent queue as soon as agent starts streaming (message is being processed)
+  useEffect(() => {
+    if (globalStreaming) {
+      setSentQueue(prev => prev.filter(e => e.status === 'sending'))
+    }
+  }, [globalStreaming])
+
   useEffect(() => {
     if (!sessionKey || !ws) return
-    setMessages([])
+    const isSameSession = loadedSessionRef.current === sessionKey
+    loadedSessionRef.current = sessionKey
+    // Only wipe messages when switching to a different session.
+    // On ws reconnect (same session), keep old messages visible while history reloads silently.
+    if (!isSameSession) {
+      // Show cached messages instantly while fresh history loads in background
+      const cached = messageCacheRef.current.get(sessionKey)
+      if (cached && cached.length > 0) {
+        setMessages(cached)
+      } else {
+        setMessages([])
+      }
+    }
+    setLoadedKey(null)
     setSessionCard(null)
-    setAutoRenamed(false)
+    if (!isSameSession) setAutoRenamed(false)
     const reqId = `chat-history-${sessionKey}-${Date.now()}`
     send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey, limit: 100 } })
 
@@ -433,24 +513,34 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
           msg.id?.startsWith(`chat-poll-${sessionKey}`)
         if (isPoll) {
           const msgs = msg.payload?.messages || []
-          // Clear working state based on last message role
+          // Poll is NO LONGER the primary clear signal — lifecycle:end handles that.
+          // Poll only handles: cost tracking + fallback clear when no lifecycle events arrive.
           const lastPollMsg = msgs[msgs.length - 1]
           if (lastPollMsg?.role === 'assistant' && extractText(lastPollMsg.content).trim()) {
-            // Assistant replied — clear working indicator
-            // Use timestamp check only as a secondary guard (allow 2s slack for clock skew)
-            const rawTs = (lastPollMsg as {ts?: string | number; created_at?: string | number}).ts ||
-                          (lastPollMsg as {ts?: string | number; created_at?: string | number}).created_at
+            const rawTs = (lastPollMsg as {ts?: string | number; created_at?: string | number; timestamp?: string | number}).ts ||
+                          (lastPollMsg as {ts?: string | number; created_at?: string | number; timestamp?: string | number}).created_at ||
+                          (lastPollMsg as {ts?: string | number; created_at?: string | number; timestamp?: string | number}).timestamp
             const msgTs = rawTs ? new Date(rawTs as string | number).getTime() : 0
-            // Clear if: no lastSent recorded yet, OR timestamp is valid and within 2s slack of send time
-            if (lastSentRef.current === 0 || msgTs === 0 || msgTs >= lastSentRef.current - 2000) {
-              setIsWorking(false)
-              setWorkingTool(null)
-              if (sessionKey) {
-                setLastRole(sessionKey, 'assistant')
+            // Only update cost tracking here — isWorking cleared by lifecycle:end
+            if (sessionKey) {
+              setLastRole(sessionKey, 'assistant')
+              const currentCost = useSessionStore.getState().sessions.find((s: Session) => s.key === sessionKey)?.estimatedCostUsd
+              if (currentCost != null && preSendCostRef.current > 0) {
+                const exchangeCost = currentCost - preSendCostRef.current
+                if (exchangeCost > 0) setLastExchangeCost(sessionKey, exchangeCost)
               }
             }
-          } else if (lastPollMsg?.role === 'user' && isWorking) {
-            // Still waiting — keep working state, nothing to do
+            // Fallback: if we've been waiting >90s with no lifecycle:end, clear it
+            const waitedTooLong = lastSentRef.current > 0 && (Date.now() - lastSentRef.current) > 90 * 1000
+            if (waitedTooLong) {
+              setIsWorking(false)
+              setWorkingTool(null)
+            }
+            // Also clear if this is a session opened without a recent send (history load)
+            if (lastSentRef.current === 0 && msgTs > 0) {
+              setIsWorking(false)
+              setWorkingTool(null)
+            }
           }
           setMessages((prev) => {
             if (msgs.length === 0) return prev
@@ -459,8 +549,17 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
             const optimisticIdx = oid !== null ? prev.findIndex((m) => m.id === oid) : -1
             const isOptimistic = optimisticIdx >= 0
             if (isOptimistic) {
-              // Keep optimistic until server has our message (count > preSendCount)
-              if (msgs.length <= preSendCountRef.current) {
+              // Check if server already has our message via content match.
+              // This handles sessions at the history limit (100 msgs): msgs.length stays
+              // constant even after the server stores our message, breaking the count check.
+              const optimistic = prev[optimisticIdx]
+              const optimisticText = extractText(optimistic.content).substring(0, 80).trim()
+              const serverAlreadyHasMsg = !!optimisticText && msgs.some(
+                m => m.role === 'user' && typeof m.id !== 'number' &&
+                     extractText(m.content).substring(0, 80).trim() === optimisticText
+              )
+              // Keep optimistic until server has our message (count increased OR content found)
+              if (!serverAlreadyHasMsg && msgs.length <= preSendCountRef.current) {
                 return [...msgs, prev[optimisticIdx]] // server hasn't received our msg yet
               }
               // Server has our message - drop optimistic, signal delivery
@@ -468,7 +567,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
               pendingOptimisticIdRef.current = null
               return msgs
             }
-            // Always apply server list — this is the authoritative source.
+            // Always apply server list - this is the authoritative source.
             // Skip only if count AND last ID both match (prevents skipping when duplicates
             // inflated prev.length beyond what the server returned).
             const lastNew = msgs[msgs.length - 1]
@@ -490,14 +589,14 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
             .find((m) => m.role === 'assistant' && isHeartbeatResponse(m.content))
           if (lastHB)
             setLastHeartbeat({
-              ts: new Date((lastHB.ts || lastHB.created_at || Date.now()) as string | number),
+              ts: new Date((lastHB.ts || lastHB.created_at || (lastHB as {timestamp?: string | number}).timestamp || Date.now()) as string | number),
               ok: true,
             })
           // Set/clear working based on last message after history load
           const lastMsg = msgs[msgs.length - 1]
           const lastMsgText = lastMsg ? extractText(lastMsg.content).trim() : ''
           if (lastMsg?.role === 'assistant' && lastMsgText && !isHeartbeatResponse(lastMsg.content)) {
-            // Last message is a real assistant reply — done
+            // Last message is a real assistant reply - done
             setIsWorking(false)
             setWorkingTool(null)
           } else if (lastMsg && (
@@ -506,14 +605,22 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
             lastMsg.role === 'tool' ||
             (lastMsg.role === 'assistant' && !lastMsgText) // assistant with no text = tool-only turn
           )) {
-            // Mid-task: user sent, or we’re in a tool loop with no final reply yet
-            setIsWorking(true)
-            setWorkingTool(null)
-            // Anchor lastSentRef so the poll doesn’t immediately clear working
-            // (poll clears when lastSentRef===0, which would wipe our just-set state)
-            lastSentRef.current = Date.now()
+            // Only show thinking if the last message is recent (< 5 min)
+            // Prevents stale sessions (ended with user msg hours ago) from showing thinking forever
+            const rawTs = (lastMsg as {ts?: string | number; created_at?: string | number; timestamp?: string | number}).ts ||
+                          (lastMsg as {ts?: string | number; created_at?: string | number; timestamp?: string | number}).created_at ||
+                          (lastMsg as {ts?: string | number; created_at?: string | number; timestamp?: string | number}).timestamp
+            const msgAge = rawTs ? Date.now() - new Date(rawTs as string | number).getTime() : Infinity
+            if (msgAge < 5 * 60 * 1000) {
+              setIsWorking(true)
+              setWorkingTool(null)
+              lastSentRef.current = Date.now()
+            }
           }
+          // Cache so next visit to this session is instant
+          if (msgs.length > 0) messageCacheRef.current.set(sessionKey, msgs)
           setMessages(msgs)
+          setLoadedKey(sessionKey)
           const card = msgs.find((m) => m.role === 'assistant')
           if (card) setSessionCard(extractText(card.content).slice(0, 300))
           const cardMsg = [...msgs]
@@ -528,12 +635,51 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
           msg.event === 'chat' &&
           (msg.payload as { sessionKey?: string })?.sessionKey === sessionKey
         ) {
-          const chatMsg = msg.payload as unknown as ChatMessage & { sessionKey: string }
+          const payload = msg.payload as Record<string, unknown>
+          const stream = payload.stream as string | undefined
+          const evtState = payload.state as string | undefined
+
+          // -- Lifecycle events: authoritative run start/end --
+          if (stream === 'lifecycle') {
+            const phase = (payload.data as Record<string, unknown>)?.phase as string | undefined
+            if (phase === 'start') {
+              setIsWorking(true)
+              if (workingTimeoutRef.current) clearTimeout(workingTimeoutRef.current)
+              workingTimeoutRef.current = setTimeout(() => { setIsWorking(false); setWorkingTool(null) }, 90_000)
+            } else if (phase === 'end' || phase === 'error') {
+              setIsWorking(false)
+              setWorkingTool(null)
+              if (workingTimeoutRef.current) { clearTimeout(workingTimeoutRef.current); workingTimeoutRef.current = null }
+            }
+            return
+          }
+
+          // -- Tool events: keep indicator alive + show tool name --
+          if (stream === 'tool') {
+            const phase = (payload.data as Record<string, unknown>)?.phase as string | undefined
+            const toolName = (payload.data as Record<string, unknown>)?.name as string | undefined
+            if (phase === 'start') {
+              setIsWorking(true)
+              if (toolName) setWorkingTool(toolName)
+              if (workingTimeoutRef.current) clearTimeout(workingTimeoutRef.current)
+              workingTimeoutRef.current = setTimeout(() => { setIsWorking(false); setWorkingTool(null) }, 90_000)
+            }
+            return
+          }
+
+          // -- Delta: streaming tokens --
+          if (evtState === 'delta') {
+            setIsWorking(true)
+            return
+          }
+
+          const chatMsg = payload as unknown as ChatMessage & { sessionKey: string }
           if (chatMsg.role === 'assistant' && isHeartbeatResponse(chatMsg.content)) {
             setLastHeartbeat({ ts: new Date(), ok: true })
           }
           // Track working state from tool calls / assistant replies
           if (chatMsg.role === 'toolCall' || chatMsg.role === 'tool') {
+            setIsWorking(true)
             if (Array.isArray(chatMsg.content)) {
               const tb = (chatMsg.content as ContentBlock[]).find(
                 (b) => b.type === 'tool_use' || b.type === 'toolCall'
@@ -543,20 +689,17 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
               setWorkingTool('tool')
             }
           } else if (chatMsg.role === 'assistant') {
-            // Update the tool name shown in the indicator, but do NOT clear isWorking here.
-            // Only the poll handler clears it (it has the authoritative final state).
-            // Clearing from streaming events causes the bubble to disappear mid-task when
-            // the agent sends a partial reply before continuing with more tool calls.
             if (Array.isArray(chatMsg.content)) {
               const blocks = chatMsg.content as ContentBlock[]
               const hasToolCall = blocks.some((b) => b.type === 'tool_use' || b.type === 'toolCall')
               if (hasToolCall) {
+                setIsWorking(true)
                 const tb = blocks.find((b) => b.type === 'tool_use' || b.type === 'toolCall')
                 setWorkingTool((tb as { name?: string })?.name || 'tool')
               }
             }
           }
-          // Increment unread for new assistant replies — but only when this pane is NOT
+          // Increment unread for new assistant replies - but only when this pane is NOT
           // the one the user is currently focused on (i.e., it's a background pane).
           // We detect this by checking if another pane is pinned to a LOWER index.
           if (chatMsg.role === 'assistant' && !isHeartbeatResponse(chatMsg.content)) {
@@ -603,7 +746,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
         }
 
         // Flat chat event (older gateway versions)
-        // Only process if both id and role are explicitly present — avoids appending
+        // Only process if both id and role are explicitly present - avoids appending
         // user messages as 'assistant' when role is undefined
         if (msg.type === 'chat' && msg.sessionKey === sessionKey && msg.id_msg && msg.role) {
           const flatMsg: ChatMessage = {
@@ -630,7 +773,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
                   return next
                 }
               }
-              return prev // no pending optimistic — poll handles it
+              return prev // no pending optimistic - poll handles it
             }
             // Non-user messages: poll is authoritative, don't append from flat events
             return prev
@@ -678,8 +821,9 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
     setAutoRenamed(true)
     const slim = messages
       .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .slice(0, 6)
       .map((m) => ({ role: m.role, content: extractText(m.content).slice(0, 300) }))
+      .filter((m) => m.content.trim().length > 0)
+      .slice(0, 6)
     void fetch(`${API}/api/session-autoname`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -718,12 +862,19 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
   }, [messages])
 
   // Extract actual message content from OpenClaw webchat metadata envelope
+  function stripBootstrapNoise(text: string): string {
+    // Strip OpenClaw bootstrap truncation warnings injected into user messages
+    const idx = text.indexOf('[Bootstrap truncation warning]')
+    if (idx !== -1) return text.slice(0, idx).trimEnd()
+    return text
+  }
+
   function extractEnvelopeContent(text: string): MessageContent | null {
     if (!text.includes('Sender (untrusted metadata):')) return null
     // Match content after the [Day YYYY-MM-DD HH:MM UTC] timestamp
     const match = text.match(/\[\w+\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+UTC\]\s*([\s\S]*)$/)
     if (!match) return null
-    const raw = match[1].trim()
+    const raw = stripBootstrapNoise(match[1].trim())
     if (!raw) return null
     // Try to parse as JSON array (image+text blocks)
     if (raw.startsWith('[')) {
@@ -760,7 +911,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
     return null
   }
 
-  // Render an image block — handles both Anthropic format and OpenClaw native format
+  // Render an image block - handles both Anthropic format and OpenClaw native format
   function renderImageBlock(b: ContentBlock | Record<string, unknown>, key: number): React.ReactNode {
     const block = b as Record<string, unknown>
     // Anthropic format: {type:'image', source:{type:'base64', media_type:..., data:...}}
@@ -784,8 +935,40 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
   const API = (window as {VITE_API_URL?: string}).VITE_API_URL ||
     (import.meta as {env?: {VITE_API_URL?: string}}).env?.VITE_API_URL || ''
 
-  // Render text block — detects [media attached: /path...] and swaps in image or PDF indicator
+  // Render text block - detects [media attached: /path...] or [Saved to workspace: /path] and renders inline
   function renderTextWithMedia(text: string, key: number): React.ReactNode {
+    // Match [Saved to workspace: /path] - files uploaded via the 💾 toggle
+    const savedMatch = text.match(/\[Saved to workspace:\s*([^\]]+)\]/)
+    if (savedMatch) {
+      const filePath = savedMatch[1].trim()
+      const filename = filePath.split('/').pop() || ''
+      const ext = filename.split('.').pop()?.toLowerCase() || ''
+      const isPdf = ext === 'pdf'
+      const isImage = ['png','jpg','jpeg','gif','webp'].includes(ext)
+      const mediaSrc = `${API}/api/uploads/${encodeURIComponent(filename)}`
+      const afterMeta = text.replace(/\[Saved to workspace:[^\]]+\]/g, '').trim()
+      return (
+        <span key={key}>
+          {isPdf
+            ? <a href={mediaSrc} target="_blank" rel="noopener noreferrer"
+                className="flex items-center gap-2 bg-[#2a3142] rounded-lg px-3 py-2 my-1 max-w-xs hover:bg-[#3a4152] transition-colors no-underline">
+                <span className="text-2xl">📄</span>
+                <span className="text-xs text-white truncate">{filename}</span>
+                <span className="text-[10px] text-[#6b7280] ml-auto shrink-0">↗️</span>
+              </a>
+            : isImage
+            ? <img src={mediaSrc} alt={filename} className="max-w-full rounded-lg my-1 max-h-64 object-contain"
+                onError={(e) => { (e.target as HTMLImageElement).style.display='none' }} />
+            : <a href={mediaSrc} target="_blank" rel="noopener noreferrer"
+                className="flex items-center gap-2 bg-[#2a3142] rounded-lg px-3 py-2 my-1 max-w-xs hover:bg-[#3a4152] transition-colors no-underline">
+                <span className="text-2xl">📎</span>
+                <span className="text-xs text-white truncate">{filename}</span>
+              </a>
+          }
+          {afterMeta && <ChatMarkdown text={afterMeta} />}
+        </span>
+      )
+    }
     // Match: [media attached: /root/.openclaw/media/inbound/FILENAME.EXT (mime/type) | ...]
     const mediaMatch = text.match(/\[media attached:\s*([^\s)]+)\s+\(([^)]+)\)/)
     if (mediaMatch) {
@@ -899,7 +1082,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
     if (tryRenderBase64) return tryRenderBase64
 
     // Never render raw JSON content-block arrays or metadata envelopes
-    const trimmed = text.trim()
+    const trimmed = stripBootstrapNoise(text.trim())
     // Detect document/image blocks regardless of envelope wrapping
     const hasDocumentBlock = trimmed.includes('"type":"document"') || trimmed.includes('"type": "document"')
     const hasImageBlock = trimmed.includes('"type":"image"') || trimmed.includes('"type": "image"')
@@ -922,28 +1105,63 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
       }
       return <span className="text-[#6b7280] text-xs italic">[Attachment]</span>
     }
-    return <ChatMarkdown text={text} />
+    return renderTextWithMedia(text, 0)
   }
 
-  const handleSend = () => {
+  const handleSend = async () => {
     if ((!input.trim() && !pendingFile) || !sessionKey) return
-    const msg = input || (pendingFile ? `(${pendingFile.kind})` : '')
+    if (pendingFile?.extracting) return // wait for PDF extraction to finish
+    // Fire project-context injection on first send (lazy - skips sessions that get archived without messaging)
+    const pendingInit = consumePendingProjectInit(sessionKey)
+    if (pendingInit) {
+      window.Clerk?.session?.getToken().then((token: string | null) => {
+        fetch(`${API}/api/session-init`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+          body: JSON.stringify({ sessionKey, projectSlug: pendingInit }),
+        }).catch(() => {})
+      })
+    }
+    const pendingPrefix = consumePendingProjectPrefix(sessionKey)
+    let msg = pendingPrefix && input.trim()
+      ? `${pendingPrefix}\n\n${input.trim()}`
+      : pendingPrefix || input.trim()
+
+    // If saveToWorkspace is enabled, upload first and append path to message
+    if (pendingFile?.saveToWorkspace) {
+      try {
+        const token = await window.Clerk?.session?.getToken()
+        const res = await fetch(`${API}/api/upload`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+          body: JSON.stringify({ filename: pendingFile.name, data: pendingFile.dataUrl.split(',')[1] }),
+        })
+        const json = await res.json()
+        if (json.ok) {
+          msg = (msg ? msg + '\n\n' : '') + `[Saved to workspace: ${json.path}]`
+        }
+      } catch (e) {
+        console.error('[octis] upload failed:', e)
+      }
+    }
+
+    // PDFs: inject extracted text inline (gateway strips non-image attachments)
+    if (pendingFile?.kind === 'document' && pendingFile.extractedText !== undefined) {
+      const pdfBlock = `📄 **PDF: ${pendingFile.name}**${pendingFile.pages ? ` (${pendingFile.pages} page${pendingFile.pages > 1 ? 's' : ''})` : ''}\n\n${pendingFile.extractedText}`
+      msg = msg ? `${pdfBlock}\n\n${msg}` : pdfBlock
+    }
+
     const idempotencyKey = `octis-send-${Date.now()}-${Math.random().toString(36).slice(2)}`
     const reqId = `chat-send-${Date.now()}`
-    // Build content — include file if present (image or document)
-    const messageContent = pendingFile
-      ? JSON.stringify([
-          pendingFile.kind === 'image'
-            ? { type: 'image', source: { type: 'base64', media_type: pendingFile.mimeType, data: pendingFile.dataUrl.split(',')[1] } }
-            : { type: 'document', source: { type: 'base64', media_type: pendingFile.mimeType, data: pendingFile.dataUrl.split(',')[1] } },
-          ...(input.trim() ? [{ type: 'text', text: input }] : []),
-        ])
-      : msg
+    // Images go via gateway attachments; PDFs are already inlined above
+    const attachments = (pendingFile?.kind === 'image')
+      ? [{ type: 'image', mimeType: pendingFile!.mimeType, content: pendingFile!.dataUrl.split(',')[1] }]
+      : undefined
     const ok = send({
       type: 'req',
       id: reqId,
       method: 'chat.send',
-      params: { sessionKey, message: messageContent, deliver: false, idempotencyKey },
+      params: { sessionKey, message: msg, attachments, deliver: false, idempotencyKey },
     })
     if (!ok) {
       setMessages((prev) => [
@@ -962,7 +1180,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
           pendingFile.kind === 'image'
             ? { type: 'image', source: { type: 'base64', media_type: pendingFile.mimeType, data: pendingFile.dataUrl.split(',')[1] } }
             : { type: 'document', source: { type: 'base64', media_type: pendingFile.mimeType, data: pendingFile.dataUrl.split(',')[1] }, name: pendingFile.name } as ContentBlock,
-          ...(input.trim() ? [{ type: 'text', text: input }] : []),
+          ...(msg ? [{ type: 'text', text: msg }] : []),
         ]
       : msg
     const optimisticId = Date.now()
@@ -973,8 +1191,12 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
     setWorkingTool(null)
     lastSentRef.current = Date.now()
     preSendCountRef.current = messages.filter(m => typeof m.id !== 'number').length
+    preSendCostRef.current = sessions.find((s: Session) => s.key === sessionKey)?.estimatedCostUsd || 0
+    // Fallback: clear working indicator after 90s in case timestamps are missing
+    if (workingTimeoutRef.current) clearTimeout(workingTimeoutRef.current)
+    workingTimeoutRef.current = setTimeout(() => { setIsWorking(false); setWorkingTool(null) }, 90000)
     // Add to sent queue for user feedback
-    const queueEntry: SentEntry = { id: optimisticId, text: msg.slice(0, 60) + (msg.length > 60 ? '…' : ''), status: 'sending' }
+    const queueEntry: SentEntry = { id: optimisticId, text: msg.slice(0, 60) + (msg.length > 60 ? '...' : ''), status: 'sending' }
     setSentQueue(prev => [...prev.slice(-4), queueEntry]) // keep last 5
     // Tell sidebar this session is now working
     if (sessionKey) markSessionStreaming(sessionKey)
@@ -1017,7 +1239,24 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
   }
 
   const [autoNaming, setAutoNaming] = useState(false)
-  const [pendingFile, setPendingFile] = useState<{ dataUrl: string; mimeType: string; name: string; kind: 'image' | 'document' } | null>(null)
+  const [labelEditing, setLabelEditing] = useState(false)
+  const [labelValue, setLabelValue] = useState('')
+
+  // Compute display name early (needed before early returns so hooks can reference it)
+  const displayName = (() => {
+    if (!sessionKey) return ''
+    const stored = getLabel(sessionKey)
+    const s = sessions.find((s: Session) => s.key === sessionKey)
+    const label = stored || s?.label || sessionKey
+    return label.length > 40 ? label.slice(0, 40) + '...' : label
+  })()
+
+  // Handle external rename request via R hotkey → triggers AI auto-rename
+  useEffect(() => {
+    if (!renameRequested) return
+    void handleAutoRename()
+  }, [renameRequested])
+  const [pendingFile, setPendingFile] = useState<{ dataUrl: string; mimeType: string; name: string; kind: 'image' | 'document'; saveToWorkspace: boolean; extractedText?: string; extracting?: boolean; pages?: number } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const handleAttachFile = (file: File) => {
@@ -1025,11 +1264,37 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
     const isPdf = file.type === 'application/pdf'
     if (!isImage && !isPdf) return
     const reader = new FileReader()
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       const dataUrl = e.target?.result as string
-      setPendingFile({ dataUrl, mimeType: file.type, name: file.name, kind: isImage ? 'image' : 'document' })
+      if (isPdf) {
+        // Show preview immediately, extract in background
+        setPendingFile({ dataUrl, mimeType: file.type, name: file.name, kind: 'document', saveToWorkspace: false, extracting: true })
+        try {
+          const b64 = dataUrl.split(',')[1]
+          const r = await fetch(`${API}/api/extract-pdf`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...(await getAuthHeader()) },
+            body: JSON.stringify({ data: b64 }),
+          })
+          const json = await r.json()
+          setPendingFile(prev => prev ? { ...prev, extractedText: json.text || '', pages: json.pages, extracting: false } : null)
+        } catch {
+          setPendingFile(prev => prev ? { ...prev, extractedText: '', extracting: false } : null)
+        }
+      } else {
+        setPendingFile({ dataUrl, mimeType: file.type, name: file.name, kind: 'image', saveToWorkspace: false })
+      }
     }
     reader.readAsDataURL(file)
+  }
+
+  // Helper to get auth header for API calls
+  const getAuthHeader = async (): Promise<Record<string, string>> => {
+    try {
+      // @ts-ignore
+      const token = await window.Clerk?.session?.getToken()
+      return token ? { Authorization: `Bearer ${token}` } : {}
+    } catch { return {} }
   }
 
   const handlePaste = (e: React.ClipboardEvent) => {
@@ -1041,6 +1306,24 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
     }
   }
 
+  const handleLabelRename = (value: string) => {
+    const trimmed = value.trim()
+    setLabelEditing(false)
+    if (!trimmed || !sessionKey) return
+    saveLabelLocal(sessionKey, trimmed)
+    send({
+      type: 'req',
+      id: `sessions-patch-${Date.now()}`,
+      method: 'sessions.patch',
+      params: { sessionKey, patch: { label: trimmed } },
+    })
+    void fetch(`${API}/api/session-rename`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionKey, label: trimmed }),
+    })
+  }
+
   const handleAutoRename = async () => {
     if (!sessionKey || messages.length === 0 || autoNaming) return
     setAutoNaming(true)
@@ -1048,8 +1331,9 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
       // Send only first 8 messages, text-only, trimmed - avoid payload limit
       const slim = messages
         .filter((m) => m.role === 'user' || m.role === 'assistant')
-        .slice(0, 8)
         .map((m) => ({ role: m.role, content: extractText(m.content).slice(0, 400) }))
+        .filter((m) => m.content.trim().length > 0)
+        .slice(0, 8)
       const res = await fetch(`${API}/api/session-autoname`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1094,7 +1378,10 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
       setLastRole(sessionKey, 'user')
       lastSentRef.current = Date.now()
       preSendCountRef.current = messages.filter(m => typeof m.id !== 'number').length
+      preSendCostRef.current = sessions.find((s: Session) => s.key === sessionKey)?.estimatedCostUsd || 0
       if (sessionKey) markSessionStreaming(sessionKey)
+      if (workingTimeoutRef.current) clearTimeout(workingTimeoutRef.current)
+      workingTimeoutRef.current = setTimeout(() => { setIsWorking(false); setWorkingTool(null) }, 90000)
     }
   }
 
@@ -1114,7 +1401,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
   const handleArchive = () => {
     if (!sessionKey) return
     if (confirm('Save and archive this session?')) {
-      // Send save instruction to agent (fire-and-forget — NO_REPLY expected)
+      // Send save instruction to agent (fire-and-forget - NO_REPLY expected)
       const msg =
         '💾 Final save - write any remaining decisions, tasks, or context to MEMORY.md and TODOS.md. Reply with NO_REPLY only.'
       const idempotencyKey = `octis-archive-${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -1161,13 +1448,6 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
     )
   }
 
-  const displayName = (() => {
-    const stored = getLabel(sessionKey)
-    const s = sessions.find((s: Session) => s.key === sessionKey)
-    const label = stored || s?.label || sessionKey
-    return label.length > 40 ? label.slice(0, 40) + '...' : label
-  })()
-
   const lastMsgTime = (() => {
     const visible = messages.filter(m => m.role === 'user' || m.role === 'assistant')
     const last = visible[visible.length - 1]
@@ -1188,7 +1468,22 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
   })()
 
   return (
-    <div className="flex flex-1 min-w-0 border-r border-[#2a3142]">
+    <div
+      data-pane-index={_paneIndex}
+      className={`flex flex-1 min-w-0 border-r border-[#2a3142] transition-all relative ${isFocused ? 'shadow-[inset_3px_0_0_#818cf8,inset_20px_0_32px_rgba(129,140,248,0.08)]' : ''}`}
+      onMouseDown={(e) => {
+        onFocus?.()
+        // If clicking a non-input area, blur any active input so bare-key hotkeys (E, R, N) fire
+        const tag = (e.target as HTMLElement).tagName.toLowerCase()
+        if (tag !== 'input' && tag !== 'textarea' && !(e.target as HTMLElement).isContentEditable) {
+          ;(document.activeElement as HTMLElement | null)?.blur?.()
+        }
+      }}
+    >
+      {/* Drop target overlay - glowing left-border + translucent wash */}
+      {isDragOver && (
+        <div className="pointer-events-none absolute inset-0 z-40 border-l-2 border-[#6366f1] bg-[#6366f1]/[0.07] shadow-[inset_4px_0_20px_rgba(99,102,241,0.15)]" />
+      )}
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
         {/* Status bar at top: animated purple when running, solid green when idle */}
         <div className="h-0.5 w-full shrink-0 overflow-hidden">
@@ -1203,19 +1498,55 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
         </div>
         <style>{`@keyframes slide { 0% { transform: translateX(-100%) } 100% { transform: translateX(280%) } }`}</style>
         {/* Header */}
-        <div className="flex flex-col border-b border-[#2a3142] bg-[#181c24] shrink-0">
+        <div
+          className={`flex flex-col border-b border-[#2a3142] shrink-0 ${isFocused ? 'bg-[#1a1d2e]' : 'bg-[#181c24]'}`}
+        >
           {/* Title row */}
           <div className="flex items-center gap-1 px-3 pt-2 pb-1">
-            <div className="flex items-center gap-1.5 flex-1 min-w-0">
+            {/* Drag handle - pointer-event based for custom ghost */}
+            <div
+              onPointerDown={(e) => {
+                e.stopPropagation()
+                const label = getLabel(sessionKey) || session?.label || ''
+                onDragStart?.(e, label)
+              }}
+              className="text-[#3a4152] hover:text-[#6366f1] cursor-grab active:cursor-grabbing shrink-0 pr-1 select-none text-[13px] leading-none transition-colors"
+              title="Drag to reorder pane"
+            >⠿</div>
+            <div className="group flex items-center gap-1.5 flex-1 min-w-0">
               {showWorking && (
                 <span className="w-2 h-2 rounded-full bg-[#a855f7] animate-pulse shrink-0" title={workingTool ? `Running: ${workingTool}` : 'Working...'} />
               )}
-              <span
-                className="text-sm font-medium text-white truncate leading-none"
-                title={sessionKey}
-              >
-                {displayName}
-              </span>
+              {labelEditing ? (
+                <input
+                  autoFocus
+                  className="flex-1 min-w-0 bg-[#0f1117] border border-[#6366f1] rounded px-1.5 py-0.5 text-sm text-white outline-none leading-none"
+                  value={labelValue}
+                  onChange={e => setLabelValue(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') handleLabelRename(labelValue)
+                    if (e.key === 'Escape') setLabelEditing(false)
+                  }}
+                  onBlur={() => handleLabelRename(labelValue)}
+                />
+              ) : (
+                <>
+                  <span
+                    className="text-sm font-medium text-white truncate leading-none"
+                    title={sessionKey}
+                  >
+                    {displayName}
+                  </span>
+                  <button
+                    className="opacity-40 hover:opacity-100 transition-opacity text-[11px] text-[#6b7280] hover:text-indigo-400 shrink-0 px-0.5"
+                    title="AI auto-rename"
+                    disabled={autoNaming}
+                    onClick={() => { void handleAutoRename() }}
+                  >
+                    {autoNaming ? '...' : '✨'}
+                  </button>
+                </>
+              )}
               {showWorking && workingTool && (
                 <span className="text-[10px] text-[#a855f7] shrink-0 truncate max-w-[120px]">{workingTool}...</span>
               )}
@@ -1255,14 +1586,6 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
               }`}
             >
               {noiseHidden ? 'chat only' : '+ tools'}
-            </button>
-            <button
-              onClick={() => { void handleAutoRename() }}
-              title="AI rename - generates a curated topic title"
-              disabled={autoNaming}
-              className={`h-6 w-6 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-sm ${autoNaming ? 'text-[#6366f1] animate-pulse cursor-wait' : 'text-[#6b7280] hover:text-indigo-400'}`}
-            >
-              {autoNaming ? '...' : '✏️'}
             </button>
             <button
               onClick={handleBriefMe}
@@ -1350,22 +1673,24 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
             userScrolledUpRef.current = !atBottom
           }}
         >
-          {messages
+          {(loadedKey === sessionKey || messages.length > 0 ? messages : [])
             .filter(
               (msg) => !isHeartbeatMsg(msg) && !(noiseHidden && isNoiseMsg(msg))
             )
-            // Render-level dedup — two rules:
+            // Render-level dedup - two rules:
             // 1. Numeric-id user messages (optimistics) only render if they ARE the currently
             //    tracked pending optimistic. Any other numeric-id user message is an orphan
-            //    that was never cleaned up from state — hide it.
+            //    that was never cleaned up from state - hide it.
             // 2. Duplicate string IDs: only the first occurrence renders.
-            // Render-level dedup — two rules:
+            // Render-level dedup - two rules:
             // 1. Numeric-id user messages (optimistics) only render if they ARE the currently
             //    tracked pending optimistic. Any other numeric-id user message is an orphan
-            //    that was never cleaned up from state — hide it.
+            //    that was never cleaned up from state - hide it.
             // 2. Duplicate string/undefined IDs: only the first occurrence renders. If ID is undefined,
             //    we use a content fingerprint to detect duplicates.
             .filter((msg, idx, arr) => {
+              // Hide project context injection notes (visible to agent in transcript, not needed in UI)
+              if (msg.role === 'assistant' && extractText(msg.content).trimStart().startsWith('📁 **')) return false
               if (msg.role === 'user' && typeof msg.id === 'number') {
                 // Only show if this is the live optimistic
                 return msg.id === pendingOptimisticIdRef.current
@@ -1380,7 +1705,11 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
               const fingerprint = `${msg.role}-${extractText(msg.content).substring(0, 100)}`
               return arr.findIndex((m) => m.id === undefined && `${m.role}-${extractText(m.content).substring(0, 100)}` === fingerprint) === idx
             })
-            .map((msg, i) => (
+            .map((msg, i, arr) => {
+              const msgTs = getMsgTs(msg)
+              const showTs = msgTs > 0
+              return (
+              <>
               <div
                 key={msg.id !== undefined ? String(msg.id) : i}
                 className={`flex gap-2 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
@@ -1392,14 +1721,51 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
                       : 'bg-[#1e2330] text-[#e8eaf0] rounded-bl-sm'
                   }`}
                 >
+                  {/* Render gateway-stored media attachments (MediaPath/MediaPaths from chat.send) */}
+                  {msg.MediaPaths && msg.MediaPaths.length > 0
+                    ? msg.MediaPaths.map((p, i) => {
+                        const filename = p.split('/').pop() || ''
+                        const mime = (msg.MediaTypes?.[i] || msg.MediaType || '')
+                        const src = `${API}/api/media/${encodeURIComponent(filename)}`
+                        return mime.includes('pdf')
+                          ? <a key={i} href={src} target="_blank" rel="noopener noreferrer"
+                              className="flex items-center gap-2 bg-[#4f51c0] rounded-lg px-3 py-2 my-1 max-w-xs no-underline">
+                              <span className="text-2xl">📄</span>
+                              <span className="text-xs text-white truncate">{filename}</span>
+                            </a>
+                          : <img key={i} src={src} alt="attachment" className="max-w-full rounded-lg my-1 max-h-64 object-contain"
+                              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
+                      })
+                    : msg.MediaPath
+                      ? (() => {
+                          const filename = msg.MediaPath.split('/').pop() || ''
+                          const src = `${API}/api/media/${encodeURIComponent(filename)}`
+                          return (msg.MediaType || '').includes('pdf')
+                            ? <a href={src} target="_blank" rel="noopener noreferrer"
+                                className="flex items-center gap-2 bg-[#4f51c0] rounded-lg px-3 py-2 my-1 max-w-xs no-underline">
+                                <span className="text-2xl">📄</span>
+                                <span className="text-xs text-white truncate">{filename}</span>
+                              </a>
+                            : <img src={src} alt="attachment" className="max-w-full rounded-lg my-1 max-h-64 object-contain"
+                                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
+                        })()
+                      : null
+                  }
                   {/* user text-only content gets whitespace-pre-wrap; array (image+text) does not */}
                   {msg.role === 'user' && typeof msg.content === 'string'
                     ? <span className="whitespace-pre-wrap">{renderContent(msg.content)}</span>
                     : renderContent(msg.content)
                   }
+                  {showTs && (
+                    <div className={`text-[10px] mt-1 ${msg.role === 'user' ? 'text-[#a5b4fc] text-right' : 'text-[#4b5563]'}`}>
+                      {fmtMsgTs(msgTs)}
+                    </div>
+                  )}
                 </div>
               </div>
-            ))}
+              </>
+              )
+            })}
           {showWorking && (
             <div className="flex gap-2 justify-start">
               <div className="bg-[#1e2330] text-[#6b7280] px-3 py-2 rounded-xl rounded-bl-sm text-xs flex items-center gap-2">
@@ -1422,12 +1788,12 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
               <div key={e.id} className="flex items-center gap-1.5 text-[10px]">
                 {e.status === 'sending'
                   ? <span className="w-1.5 h-1.5 rounded-full bg-[#6366f1] animate-pulse shrink-0" />
-                  : <span className="text-[#22c55e] shrink-0">✓</span>
+                  : <span className="w-1.5 h-1.5 rounded-full bg-[#f59e0b] animate-pulse shrink-0" />
                 }
-                <span className={e.status === 'sending' ? 'text-[#6b7280]' : 'text-[#4b5563] line-through'}>
+                <span className="text-[#6b7280]">
                   {e.text}
                 </span>
-                <span className="text-[#4b5563] shrink-0">{e.status === 'sending' ? 'sending…' : 'delivered'}</span>
+                <span className="text-[#4b5563] shrink-0">{e.status === 'sending' ? 'sending...' : 'in queue'}</span>
               </div>
             ))}
           </div>
@@ -1437,20 +1803,35 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
         <div className="px-3 py-3 border-t border-[#2a3142] bg-[#181c24] shrink-0">
           {/* File preview */}
           {pendingFile && (
-            <div className="mb-2 relative inline-block">
-              {pendingFile.kind === 'image'
-                ? <img src={pendingFile.dataUrl} alt="pending" className="max-h-24 max-w-[200px] rounded-lg border border-[#6366f1] object-cover" />
-                : (
-                  <div className="flex items-center gap-2 bg-[#2a3142] border border-[#6366f1] rounded-lg px-3 py-2">
-                    <span className="text-2xl">📄</span>
-                    <span className="text-xs text-white max-w-[150px] truncate">{pendingFile.name}</span>
-                  </div>
-                )
-              }
-              <button
-                onClick={() => setPendingFile(null)}
-                className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-red-500 text-white rounded-full text-[9px] flex items-center justify-center hover:bg-red-400"
-              >✕</button>
+            <div className="mb-2 flex items-start gap-2">
+              <div className="relative inline-block">
+                {pendingFile.kind === 'image'
+                  ? <img src={pendingFile.dataUrl} alt="pending" className="max-h-24 max-w-[200px] rounded-lg border border-[#6366f1] object-cover" />
+                  : (
+                    <div className="flex flex-col gap-1 bg-[#2a3142] border border-[#6366f1] rounded-lg px-3 py-2 max-w-[240px]">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xl">📄</span>
+                        <span className="text-xs text-white truncate flex-1">{pendingFile.name}</span>
+                      </div>
+                      {pendingFile.extracting && (
+                        <span className="text-[10px] text-[#6b7280] animate-pulse">Extracting text...</span>
+                      )}
+                      {!pendingFile.extracting && pendingFile.extractedText !== undefined && (
+                        <span className="text-[10px] text-[#22c55e]">
+                          ✓ {pendingFile.pages ? `${pendingFile.pages}p · ` : ''}{Math.round((pendingFile.extractedText?.length || 0) / 4)} tokens
+                        </span>
+                      )}
+                      {!pendingFile.extracting && pendingFile.extractedText === undefined && (
+                        <span className="text-[10px] text-red-400">Extraction failed</span>
+                      )}
+                    </div>
+                  )
+                }
+                <button
+                  onClick={() => setPendingFile(null)}
+                  className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-red-500 text-white rounded-full text-[9px] flex items-center justify-center hover:bg-red-400"
+                >✕</button>
+              </div>
             </div>
           )}
           <div className="flex gap-2 items-end">
@@ -1472,7 +1853,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
               ref={textareaRef}
               className="flex-1 bg-[#0f1117] border border-[#2a3142] rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-[#6366f1] placeholder-[#4b5563] resize-none overflow-y-auto leading-relaxed"
               style={{ minHeight: '38px', maxHeight: '150px' }}
-              placeholder="Message… (Shift+Enter to send, paste image or attach PDF)"
+              placeholder="Message... (Enter to send, Shift+Enter for new line, paste image or attach PDF)"
               value={input}
               rows={1}
               onChange={(e) => {
@@ -1483,7 +1864,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose }:
                 ta.style.height = Math.min(ta.scrollHeight, 150) + 'px'
               }}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && e.shiftKey) {
+                if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault()
                   handleSend()
                 }

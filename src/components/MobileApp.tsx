@@ -1,6 +1,8 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useAuth } from '@clerk/clerk-react'
 import { useGatewayStore, useSessionStore, useHiddenStore, useProjectStore, useLabelStore, Session } from '../store/gatewayStore'
+
+const API = ''  // same-origin
 import MobileSessionCard from './MobileSessionCard'
 import MobileFullChat from './MobileFullChat'
 import CostsPanel from './CostsPanel'
@@ -8,6 +10,7 @@ import MemoryPanel from './MemoryPanel'
 import ConnectModal from './ConnectModal'
 import ProjectsGrid, { type Project } from './ProjectsGrid'
 import MobileProjectView from './MobileProjectView'
+import IssueReporter from './IssueReporter'
 
 const TABS = [
   { id: 'projects', icon: '🐙', label: 'Projects' },
@@ -21,7 +24,7 @@ type FilterType = 'all' | 'active' | 'idle'
 export default function MobileApp() {
   const { getToken } = useAuth()
   const { connected, gatewayUrl } = useGatewayStore()
-  const { sessions, getStatus } = useSessionStore()
+  const { sessions, getStatus, getLastActivityMs } = useSessionStore()
   const { isHidden, hide: hideSession, hydrateFromServer: hydrateHidden } = useHiddenStore()
   const { setSessions } = useSessionStore()
   const { hydrateFromServer: hydrateProjects } = useProjectStore()
@@ -56,25 +59,64 @@ export default function MobileApp() {
   }, [getToken])
 
   useEffect(() => { void hydrateAll() }, [hydrateAll])
+
+  // Fetch projects list for new-session picker
+  useEffect(() => {
+    fetch(`${API}/api/projects`)
+      .then(r => r.json())
+      .then((data: Array<{id: string; name: string; slug: string; emoji?: string; color?: string}>) => {
+        if (Array.isArray(data)) setAvailableProjects(data.filter(p => p.slug !== 'others'))
+      })
+      .catch(() => {})
+  }, [])
   const [tab, setTab] = useState('projects')
   const [activeProject, setActiveProject] = useState<Project | null>(null)
   const [fullChatSession, setFullChatSession] = useState<Session | null>(null)
+  // Track placeholder key so we can swap to real gateway key when it appears
+  const pendingNewSessionRef = useRef<string | null>(null)
   const [showConnect, setShowConnect] = useState(!gatewayUrl)
+  const [showIssueReporter, setShowIssueReporter] = useState(false)
   const [filter, setFilter] = useState<FilterType>('all')
+  const [showNewSessionSheet, setShowNewSessionSheet] = useState(false)
+  const [availableProjects, setAvailableProjects] = useState<Array<{id: string; name: string; slug: string; emoji?: string; color?: string}>>([])
+  const [archiveToast, setArchiveToast] = useState<string | null>(null)
 
   const handleArchive = (session: Session) => {
-    if (!confirm(`Archive "${session.label || session.key}"?`)) return
+    const lbl = labels[session.key] || session.label || 'Session'
     hideSession(session.key)
     if (session.id) hideSession(session.id)
     if (session.sessionId) hideSession(session.sessionId)
+    setArchiveToast(`🗂 Archived: ${lbl}`)
+    setTimeout(() => setArchiveToast(null), 3000)
   }
 
-  const handleNewSession = () => {
+  const handleNewSession = (projectSlug?: string) => {
     const key = `session-${Date.now()}`
-    setSessions([{ key, label: 'New session', sessionKey: key } as Session, ...sessions])
+    const newSession: Session = { key, label: 'New session', sessionKey: key } as Session
+    setSessions([newSession, ...sessions])
+    pendingNewSessionRef.current = key
+    if (projectSlug) {
+      useProjectStore.getState().setTag(key, projectSlug)
+    }
+    setShowNewSessionSheet(false)
+    setFullChatSession(newSession)
+    setTab('sessions')
   }
 
-  const hideAgentSessions = localStorage.getItem('octis-show-agent-sessions') !== 'true'
+  // When the gateway returns the real key (agent:main:session-<ts>), update fullChatSession
+  useEffect(() => {
+    if (!pendingNewSessionRef.current) return
+    const pendingKey = pendingNewSessionRef.current
+    const tsMatch = pendingKey.match(/^session-(\d+)$/)
+    if (!tsMatch) return
+    const ts = tsMatch[1]
+    const matched = sessions.find((s: Session) => s.key.endsWith(`:session-${ts}`))
+    if (!matched) return
+    pendingNewSessionRef.current = null
+    setFullChatSession(matched)
+  }, [sessions])
+
+  const hideAgentSessions = true // Always hide subagent/ACP sessions
   const isAgentSession = (s: Session) => {
     const key = (s.key || '').toLowerCase()
     if (key.includes(':subagent:') || key.includes(':acp:')) return true
@@ -92,6 +134,7 @@ export default function MobileApp() {
 
   const visibleSessions = sessions.filter((s: Session) => {
     if (!s.key || isHidden(s.key) || isHidden(s.id || '') || isHidden(s.sessionId || '')) return false
+    if (/^session-\d+$/.test(s.key)) return false // never show temp placeholder sessions
     if (hideAgentSessions && isAgentSession(s)) return false
     if ((hideHeartbeat || hideCron) && isHeartbeatOrCron(s)) return false
     return true
@@ -111,14 +154,18 @@ export default function MobileApp() {
 
   if (fullChatSession) {
     return <MobileFullChat
+      key={fullChatSession.key}
       session={fullChatSession}
       onBack={() => setFullChatSession(null)}
       recentSessions={visibleSessions.slice(0, 10)}
       onSwitch={(s) => setFullChatSession(s)}
       onArchive={() => {
-        hideSession(fullChatSession.key)
+        const archivedKey = fullChatSession.key
+        hideSession(archivedKey)
         if (fullChatSession.id) hideSession(fullChatSession.id)
-        setFullChatSession(null)
+        // Jump to the next available session instead of returning to the list
+        const next = visibleSessions.find(s => s.key !== archivedKey)
+        setFullChatSession(next || null)
       }}
     />
   }
@@ -182,14 +229,14 @@ export default function MobileApp() {
                 </button>
               ))}
               <button
-                onClick={handleNewSession}
-                className="ml-auto px-3 py-1 rounded-full text-xs font-medium bg-[#6366f1] text-white active:bg-[#818cf8] shrink-0"
+                onClick={() => setShowNewSessionSheet(true)}
+                className="ml-auto px-4 py-1.5 rounded-full text-xs font-semibold bg-[#6366f1] text-white active:bg-[#818cf8] shrink-0 flex items-center gap-1"
               >
-                + New
+                <span className="text-sm leading-none">＋</span> New Session
               </button>
             </div>
 
-            {/* Swipeable card carousel */}
+            {/* Flat inbox list — tap to open chat directly */}
             {filtered.length === 0 ? (
               <div className="flex-1 flex items-center justify-center">
                 <div className="text-center px-8">
@@ -197,7 +244,7 @@ export default function MobileApp() {
                   <div className="text-[#6b7280] text-sm">
                     {sessions.length === 0
                       ? 'No sessions yet. Connect to your gateway to get started.'
-                      : 'No sessions match this filter. Sessions may be archived on desktop.'}
+                      : 'No sessions match this filter.'}
                   </div>
                   {!connected && (
                     <button
@@ -210,38 +257,51 @@ export default function MobileApp() {
                 </div>
               </div>
             ) : (
-              <div
-                className="flex-1 overflow-x-auto overflow-y-hidden"
-                style={{
-                  scrollSnapType: 'x mandatory',
-                  WebkitOverflowScrolling: 'touch',
-                  scrollbarWidth: 'none',
-                }}
-              >
-                <div
-                  className="flex gap-4 px-4 h-full items-start pt-1 pb-3"
-                  style={{ width: `calc(${filtered.length} * (100vw - 1rem))` }}
-                >
-                  {filtered.map((session: Session) => (
-                    <MobileSessionCard
-                      key={session.key}
-                      session={session}
-                      onOpenFull={setFullChatSession}
-                      onArchive={handleArchive}
-                    />
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Swipe hint */}
-            {filtered.length > 1 && (
-              <div className="text-center py-1 shrink-0">
-                <div className="flex justify-center gap-1.5">
-                  {filtered.map((_, i) => (
-                    <div key={i} className="w-1.5 h-1.5 rounded-full bg-[#2a3142]" />
-                  ))}
-                </div>
+              <div className="flex-1 overflow-y-auto" style={{ WebkitOverflowScrolling: 'touch' }}>
+                {filtered.map((s: Session) => {
+                  const st = getStatus(s)
+                  const lbl = labels[s.key] || s.label || s.key
+                  const actMs = getLastActivityMs(s)
+                  const ago = actMs ? (() => {
+                    const mins = Math.floor((Date.now() - actMs) / 60000)
+                    if (mins < 1) return 'just now'
+                    if (mins < 60) return `${mins}m`
+                    const hrs = Math.floor(mins / 60)
+                    if (hrs < 24) return `${hrs}h`
+                    return `${Math.floor(hrs / 24)}d`
+                  })() : ''
+                  const dotColor =
+                    st === 'working' ? '#a855f7'
+                    : st === 'needs-you' ? '#3b82f6'
+                    : st === 'stuck' ? '#f59e0b'
+                    : st === 'active' ? '#22c55e'
+                    : '#374151'
+                  return (
+                    <div
+                      key={s.key}
+                      className="flex items-center border-b border-[#1e2330]"
+                    >
+                      <button
+                        onClick={() => setFullChatSession(s)}
+                        className="flex-1 flex items-center gap-3 px-4 py-3.5 active:bg-[#1e2330] text-left min-w-0"
+                      >
+                        <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: dotColor }} />
+                        <span className="flex-1 text-sm text-white truncate min-w-0">{lbl}</span>
+                        {ago && <span className="text-xs text-[#4b5563] shrink-0">{ago}</span>}
+                        <span className="text-[#4b5563] shrink-0 ml-1">›</span>
+                      </button>
+                      <button
+                        onClick={() => {
+                          handleArchive(s)
+                        }}
+                        className="px-3 py-3.5 text-[#374151] hover:text-red-400 active:text-red-400 shrink-0 transition-colors"
+                        title="Archive"
+                      >
+                        🗑
+                      </button>
+                    </div>
+                  )
+                })}
               </div>
             )}
           </>
@@ -287,7 +347,70 @@ export default function MobileApp() {
         </div>
       </div>
 
+      {/* Floating bug report button */}
+      <button
+        onClick={() => setShowIssueReporter(true)}
+        className="fixed bottom-20 right-4 z-40 w-10 h-10 rounded-full bg-[#181c24] border border-[#2a3142] text-base shadow-lg flex items-center justify-center hover:bg-[#2a3142] transition-colors"
+        style={{ bottom: 'calc(4rem + max(0.5rem, env(safe-area-inset-bottom)) + 0.5rem)' }}
+        title="Report an issue"
+      >
+        🐛
+      </button>
+
       {showConnect && <ConnectModal onClose={() => setShowConnect(false)} />}
+
+      {/* New Session + Project Picker sheet */}
+      {showNewSessionSheet && (
+        <div
+          className="fixed inset-0 z-50 flex items-end"
+          onClick={() => setShowNewSessionSheet(false)}
+        >
+          <div className="absolute inset-0 bg-black/60" />
+          <div
+            className="relative bg-[#181c24] rounded-t-2xl w-full max-h-[70vh] overflow-y-auto border-t border-[#2a3142]"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 pt-5 pb-3">
+              <span className="text-white font-semibold text-base">New Session</span>
+              <button
+                onClick={() => setShowNewSessionSheet(false)}
+                className="text-[#6b7280] hover:text-white text-lg w-8 h-8 flex items-center justify-center"
+              >✕</button>
+            </div>
+            <div className="pb-8">
+              {/* No project option */}
+              <button
+                onClick={() => handleNewSession()}
+                className="w-full flex items-center gap-3 px-5 py-4 border-b border-[#2a3142] active:bg-[#2a3142] text-left"
+              >
+                <span className="text-lg">💬</span>
+                <span className="text-sm text-white">No project</span>
+              </button>
+              {/* Project list */}
+              {availableProjects.map(p => (
+                <button
+                  key={p.slug}
+                  onClick={() => handleNewSession(p.slug)}
+                  className="w-full flex items-center gap-3 px-5 py-4 border-b border-[#2a3142] active:bg-[#2a3142] text-left"
+                >
+                  <span className="text-lg">{p.emoji || '📁'}</span>
+                  <span className="text-sm text-white">{p.name}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+      {showIssueReporter && (
+        <IssueReporter onClose={() => setShowIssueReporter(false)} context={{ view: tab }} />
+      )}
+
+      {/* Archive toast */}
+      {archiveToast && (
+        <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 bg-[#1e2330] border border-[#2a3142] text-white text-xs font-medium px-4 py-2.5 rounded-xl shadow-lg pointer-events-none whitespace-nowrap">
+          {archiveToast}
+        </div>
+      )}
     </div>
   )
 }

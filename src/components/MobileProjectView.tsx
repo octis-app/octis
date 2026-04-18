@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useAuth } from '@clerk/clerk-react'
 import { useSessionStore, useProjectStore, useLabelStore, useHiddenStore, Session } from '../store/gatewayStore'
 import { useGatewayStore, useHiddenStore } from '../store/gatewayStore'
@@ -15,12 +15,66 @@ const API = (import.meta.env.VITE_API_URL as string) || ''
 
 export default function MobileProjectView({ project, onBack, onSwitchProject }: MobileProjectViewProps) {
   const { getToken } = useAuth()
-  const { sessions, getStatus, setSessions } = useSessionStore()
+  const { sessions, getStatus, setSessions, setPendingProjectPrefix, setPendingProjectInit } = useSessionStore()
+  // Helper to read live sessions from store (avoids stale closure in async handlers)
+  const getLiveSessions = () => useSessionStore.getState().sessions
   const { getTag, setTag } = useProjectStore()
   const { getLabel } = useLabelStore()
   const { isHidden, hide: hideSession } = useHiddenStore()
-  const { send } = useGatewayStore()
+  const { send, agentId } = useGatewayStore()
+
+  // Track session keys that existed before we created a new session,
+  // so we can detect the real gateway-assigned key when sessions.list fires.
+  const pendingTagRef = useRef<{ pendingKey: string; slug: string } | null>(null)
+
+  // When a new session appears in the store (sessions.list fired), apply the pending project tag.
+  // Match by timestamp suffix only — `session-<ts>` -> `agent:<id>:session-<ts>`.
+  // This prevents accidentally tagging concurrent subagent/Slack sessions with the wrong project.
+  useEffect(() => {
+    if (!pendingTagRef.current) return
+    const { pendingKey, slug } = pendingTagRef.current
+    const tsMatch = pendingKey.match(/^session-(\d+)$/)
+    if (!tsMatch) return
+    const ts = tsMatch[1]
+    const matched = sessions.find((s: Session) => s.key.endsWith(`:session-${ts}`))
+    if (!matched) return
+    pendingTagRef.current = null
+    setTag(matched.key, slug)
+    getToken().then(token => {
+      fetch(`${API}/api/session-projects`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ sessionKey: matched.key, projectTag: slug }),
+      }).catch(() => {})
+    })
+    setOpenSession(matched)
+  }, [sessions])
   const [openSession, setOpenSession] = useState<Session | null>(null)
+  const [renamingKey, setRenamingKey] = useState<string | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+  const { setLabel: saveLabelLocal } = useLabelStore()
+  const { send: wsSend } = useGatewayStore()
+
+  const startRename = (s: Session, currentLabel: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    setRenamingKey(s.key)
+    setRenameValue(currentLabel)
+  }
+
+  const commitRename = async (s: Session) => {
+    const trimmed = renameValue.trim()
+    setRenamingKey(null)
+    if (!trimmed || trimmed === (getLabel(s.key) || s.label || s.key)) return
+    saveLabelLocal(s.key, trimmed)
+    wsSend({ type: 'req', id: `sessions-patch-${Date.now()}`, method: 'sessions.patch', params: { sessionKey: s.key, patch: { label: trimmed } } })
+    const token = await getToken()
+    fetch(`${API}/api/session-rename`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify({ sessionKey: s.key, label: trimmed }),
+    }).catch(() => {})
+  }
+
   const [showPicker, setShowPicker] = useState(false)
   const [showProjectSwitcher, setShowProjectSwitcher] = useState(false)
   const [allProjects, setAllProjects] = useState<Project[]>([])
@@ -54,26 +108,43 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
   const handleTodoNewSession = async (text: string) => {
     const key = `session-${Date.now()}`
     const newSession: Session = { key, label: text.slice(0, 40), sessionKey: key } as Session
-    setSessions([newSession, ...sessions])
-    const token = await getToken()
-    await fetch(`${API}/api/session-projects`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-      body: JSON.stringify({ sessionKey: key, projectTag: project.slug }),
-    })
+    // Snapshot keys before creation so we can detect the real gateway-assigned key
+    pendingTagRef.current = { pendingKey: key, slug: project.slug }
+    setSessions([newSession, ...getLiveSessions()])
     setTag(key, project.slug)
-    setTimeout(() => {
-      send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey: key, message: text } })
-    }, 300)
     setOpenSession(newSession)
+    // Send first message immediately (no delay) — gateway creates real session with its own key
+    send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey: key, message: text, idempotencyKey: `octis-proj-${Date.now()}-${Math.random().toString(36).slice(2)}` } })
+    // Trigger sessions.list refresh after send so the real session key is detected
+    setTimeout(() => {
+      send({ type: 'req', id: `sessions-list-${Date.now()}`, method: 'sessions.list', params: agentId ? { agentId } : {} })
+    }, 800)
+    // Also persist the tag to server async
+    getToken().then(token => {
+      fetch(`${API}/api/session-projects`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ sessionKey: key, projectTag: project.slug }),
+      }).catch(() => {})
+    })
   }
 
-  const projectSessions = sessions.filter((s: Session) =>
-    getTag(s.key).project === project.slug && !isHidden(s.key) && !isHidden(s.id || '')
-  )
+  const isAgentSession = (s: Session) => {
+    const key = (s.key || '').toLowerCase()
+    if (key.includes(':subagent:') || key.includes(':acp:')) return true
+    const lbl = (s.label || '').toLowerCase()
+    return lbl.startsWith('continue where you left off')
+  }
+
+  const isOthers = project.slug === 'others'
+
+  const projectSessions = sessions.filter((s: Session) => {
+    if (isOthers) return !getTag(s.key).project && !isHidden(s.key) && !isHidden(s.id || '') && !isAgentSession(s)
+    return getTag(s.key).project === project.slug && !isHidden(s.key) && !isHidden(s.id || '') && !isAgentSession(s)
+  })
 
   const untaggedSessions = sessions.filter((s: Session) =>
-    !getTag(s.key).project && !isHidden(s.key) && !isHidden(s.id || '')
+    !getTag(s.key).project && !isHidden(s.key) && !isHidden(s.id || '') && !isAgentSession(s)
   )
 
   const handleNewSession = async () => {
@@ -81,28 +152,22 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
     const key = `session-${Date.now()}`
     const label = `New ${project.name} session`
     const newSession: Session = { key, label, sessionKey: key } as Session
-    setSessions([newSession, ...sessions])
-    const token = await getToken()
-    await fetch(`${API}/api/session-projects`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-      body: JSON.stringify({ sessionKey: key, projectTag: project.slug }),
-    })
+    // Snapshot keys before creation so we can detect the real gateway-assigned key
+    pendingTagRef.current = { pendingKey: key, slug: project.slug }
+    setSessions([newSession, ...getLiveSessions()])
     setTag(key, project.slug)
     setShowPicker(false)
     setOpenSession(newSession)
-    // Auto-fetch project memory and inject as first message (non-blocking)
-    fetch(`${API}/api/project-memory/${project.slug}`)
-      .then(r => r.json())
-      .then((d: { content?: string }) => {
-        const memoryContext = d.content || ''
-        const parts: string[] = [`Project: ${project.name}`]
-        if (memoryContext.trim()) parts.push(`Context:\n${memoryContext.trim()}`)
-        setTimeout(() => {
-          send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey: key, message: parts.join('\n\n') } })
-        }, 300)
-      })
-      .catch(() => {})
+    // Persist the tag to server async
+    getToken().then(token => {
+      fetch(`${API}/api/session-projects`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ sessionKey: key, projectTag: project.slug }),
+      }).catch(() => {})
+    })
+    // Defer context injection until user actually sends a first message
+    setPendingProjectInit(key, project.slug)
   }
 
   const handleTag = async (sessionKey: string) => {
@@ -132,15 +197,34 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
   }
 
   if (openSession) {
+    // Build recent sessions list: always include the current open session even if it
+    // still has a temp key (session-<ts>) — that regex filter would otherwise hide it
+    // until the gateway fires sessions.list after the first message.
+    const recentSessionsForChat = (() => {
+      const filtered = sessions.filter((s: Session) =>
+        !isHidden(s.key) && !isAgentSession(s) && !/^session-\d+$/.test(s.key)
+      ).slice(0, 10)
+      if (!filtered.find(s => s.key === openSession.key)) {
+        return [openSession, ...filtered].slice(0, 10)
+      }
+      return filtered
+    })()
     return <MobileFullChat
+      key={openSession.key}
       session={openSession}
       onBack={() => setOpenSession(null)}
-      recentSessions={sessions.filter((s: Session) => !isHidden(s.key)).slice(0, 10)}
+      recentSessions={recentSessionsForChat}
       onSwitch={(s) => setOpenSession(s)}
       onArchive={() => {
         hideSession(openSession.key)
         if (openSession.id) hideSession(openSession.id)
-        setOpenSession(null)
+        // Jump to next project session instead of returning to project list
+        const remaining = projectSessions.filter((s: Session) => s.key !== openSession.key)
+        if (remaining.length > 0) {
+          setOpenSession(remaining[0])
+        } else {
+          setOpenSession(null)
+        }
       }}
     />
   }
@@ -173,20 +257,24 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
             <span className="text-white font-semibold text-sm truncate">{project.name}</span>
             {onSwitchProject && <span className="text-[#4b5563] text-xs shrink-0">⌄</span>}
           </button>
-          <button
-            onClick={handleNewSession}
-            className="text-xs text-[#6366f1] hover:text-[#818cf8] transition-colors px-2 py-1 font-medium"
-            title="New session in this project"
-          >
-            ✶ New
-          </button>
-          <button
-            onClick={() => setShowPicker(true)}
-            className="text-xs text-[#6b7280] hover:text-white transition-colors px-1 py-1"
-            title="Add existing session to this project"
-          >
-            + Add
-          </button>
+          {!isOthers && (
+            <button
+              onClick={handleNewSession}
+              className="text-xs text-[#6366f1] hover:text-[#818cf8] transition-colors px-2 py-1 font-medium"
+              title="New session in this project"
+            >
+              ✶ New
+            </button>
+          )}
+          {!isOthers && (
+            <button
+              onClick={() => setShowPicker(true)}
+              className="text-xs text-[#6b7280] hover:text-white transition-colors px-1 py-1"
+              title="Add existing session to this project"
+            >
+              + Add
+            </button>
+          )}
         </div>
       </div>
 
@@ -200,19 +288,25 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
             >
               {project.emoji}
             </div>
-            <div className="text-[#6b7280] text-sm mb-4">No sessions in {project.name} yet.</div>
-            <button
-              onClick={handleNewSession}
-              className="bg-[#6366f1] text-white px-5 py-2.5 rounded-xl text-sm font-medium"
-            >
-              ✶ New session
-            </button>
-            <button
-              onClick={() => setShowPicker(true)}
-              className="mt-2 text-[#6b7280] text-sm hover:text-white transition-colors"
-            >
-              or add existing
-            </button>
+            <div className="text-[#6b7280] text-sm mb-4">
+              {isOthers ? 'All your sessions are assigned to projects.' : `No sessions in ${project.name} yet.`}
+            </div>
+            {!isOthers && (
+              <>
+                <button
+                  onClick={handleNewSession}
+                  className="bg-[#6366f1] text-white px-5 py-2.5 rounded-xl text-sm font-medium"
+                >
+                  ✶ New session
+                </button>
+                <button
+                  onClick={() => setShowPicker(true)}
+                  className="mt-2 text-[#6b7280] text-sm hover:text-white transition-colors"
+                >
+                  or add existing
+                </button>
+              </>
+            )}
           </div>
         ) : (
           <div className="space-y-2">
@@ -224,16 +318,27 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
                 key={s.key}
                 className="flex items-center bg-[#181c24] border border-[#2a3142] rounded-2xl overflow-hidden"
               >
+                {renamingKey === s.key ? (
+                  <input
+                    autoFocus
+                    className="flex-1 min-w-0 bg-[#0f1117] border border-[#6366f1] rounded-xl px-4 py-3 text-sm text-white outline-none"
+                    value={renameValue}
+                    onChange={e => setRenameValue(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') commitRename(s); if (e.key === 'Escape') setRenamingKey(null) }}
+                    onBlur={() => commitRename(s)}
+                    onClick={e => e.stopPropagation()}
+                  />
+                ) : (
                 <button
                   onClick={() => setOpenSession(s)}
-                  className="flex-1 text-left px-4 py-3.5 hover:bg-[#1e2330] transition-colors"
+                  className="flex-1 min-w-0 text-left px-4 py-3.5 hover:bg-[#1e2330] transition-colors overflow-hidden"
                 >
                   <div className="flex items-center gap-3">
                     <div
                       className="w-2.5 h-2.5 rounded-full shrink-0"
                       style={{ background: statusColors[status] || statusColors.quiet }}
                     />
-                    <span className="text-white text-sm font-medium flex-1 truncate">{label}</span>
+                    <span className="text-white text-sm font-medium flex-1 min-w-0 truncate">{label}</span>
                     <span
                       className="text-xs shrink-0"
                       style={{ color: statusColors[status] || statusColors.quiet }}
@@ -242,6 +347,14 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
                     </span>
                   </div>
                 </button>
+                )}
+                <button
+                  onClick={(e) => startRename(s, label, e)}
+                  className="px-3 py-3.5 text-[#4b5563] hover:text-[#a5b4fc] transition-colors border-l border-[#2a3142] shrink-0"
+                  title="Rename"
+                >
+                  ✏️
+                </button>
                 <button
                   onClick={() => {
                     if (window.confirm('Archive this session?')) {
@@ -249,7 +362,7 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
                       if (s.id) hideSession(s.id)
                     }
                   }}
-                  className="px-3 py-3.5 text-[#4b5563] hover:text-red-400 transition-colors border-l border-[#2a3142]"
+                  className="px-3 py-3.5 text-[#4b5563] hover:text-red-400 transition-colors border-l border-[#2a3142] shrink-0"
                   title="Archive"
                 >
                   🗑

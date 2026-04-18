@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { useGatewayStore, useLabelStore, Session } from '../store/gatewayStore'
+import { useGatewayStore, useSessionStore, useLabelStore, Session } from '../store/gatewayStore'
 
 interface MobileFullChatProps {
   session: Session
@@ -21,6 +21,34 @@ interface ChatMessage {
   id?: string | number;
   role: string;
   content: MessageContent;
+  ts?: string | number;
+  created_at?: string | number;
+  timestamp?: string | number;
+  // Gateway stores images as separate fields when sent via chat.send with attachments
+  MediaPath?: string;
+  MediaPaths?: string[];
+  MediaType?: string;
+  MediaTypes?: string[];
+}
+
+function getMsgTs(msg: ChatMessage): number {
+  const raw = msg.ts || msg.created_at || msg.timestamp
+  if (!raw) return 0
+  const ms = typeof raw === 'number' ? raw : new Date(raw as string).getTime()
+  return isNaN(ms) ? 0 : ms
+}
+
+function fmtMsgTs(ms: number): string {
+  const d = new Date(ms)
+  const now = new Date()
+  const sameDay = d.toDateString() === now.toDateString()
+  const yesterday = new Date(now)
+  yesterday.setDate(yesterday.getDate() - 1)
+  const isYesterday = d.toDateString() === yesterday.toDateString()
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  if (sameDay) return time
+  if (isYesterday) return `Yesterday ${time}`
+  return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`
 }
 
 // ─── Content Rendering ────────────────────────────────────────────────────────
@@ -72,6 +100,77 @@ function renderImageBlock(b: ContentBlock | Record<string, unknown>, key: number
 }
 
 // Main content rendering function
+// Render text that may contain [media attached: /path (mime)] or [Saved to workspace: /path]
+function renderTextWithMedia(text: string, key: number): React.ReactNode {
+  // Handle [Saved to workspace: /path] — files uploaded via 💾 toggle
+  const savedMatch = text.match(/\[Saved to workspace:\s*([^\]]+)\]/)
+  if (savedMatch) {
+    const filePath = savedMatch[1].trim()
+    const filename = filePath.split('/').pop() || ''
+    const ext = filename.split('.').pop()?.toLowerCase() || ''
+    const isPdf = ext === 'pdf'
+    const isImage = ['png','jpg','jpeg','gif','webp'].includes(ext)
+    const mediaSrc = `${API}/api/uploads/${encodeURIComponent(filename)}`
+    const afterMeta = text.replace(/\[Saved to workspace:[^\]]+\]/g, '').trim()
+    return (
+      <span key={key}>
+        {isPdf
+          ? <a href={mediaSrc} target="_blank" rel="noopener noreferrer"
+              className="flex items-center gap-2 bg-[#2a3142] rounded-lg px-3 py-2 my-1 max-w-xs no-underline">
+              <span className="text-2xl">📄</span>
+              <span className="text-xs text-white truncate">{filename}</span>
+            </a>
+          : isImage
+          ? <img src={mediaSrc} alt={filename} className="max-w-full rounded-lg my-1 max-h-64 object-contain"
+              style={{ maxWidth: '100%', borderRadius: '8px' }}
+              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
+          : <a href={mediaSrc} target="_blank" rel="noopener noreferrer"
+              className="flex items-center gap-2 bg-[#2a3142] rounded-lg px-3 py-2 my-1 max-w-xs no-underline">
+              <span className="text-2xl">📎</span>
+              <span className="text-xs text-white truncate">{filename}</span>
+            </a>
+        }
+        {afterMeta && <span style={{ whiteSpace: 'pre-wrap' }}>{afterMeta}</span>}
+      </span>
+    )
+  }
+  const mediaMatch = text.match(/\[media attached:\s*([^\s)]+)\s+\(([^)]+)\)/)
+  if (mediaMatch) {
+    const filePath = mediaMatch[1]
+    const mimeType = mediaMatch[2] || ''
+    const filename = filePath.split('/').pop() || ''
+    const mediaSrc = `${API}/api/media/${encodeURIComponent(filename)}`
+    const afterMeta = text
+      .replace(/\[media attached:[^\]]+\]/g, '')
+      .replace(/\nTo send an image back[^\n]*(\n|$)/g, '')
+      .replace(/\nTo send a document back[^\n]*(\n|$)/g, '')
+      .replace(/System: \[.*?\]/gs, '')
+      .replace(/\nSender \(untrusted[\s\S]*?UTC\]/g, '')
+      .trim()
+    const isPdf = mimeType.includes('pdf') || filename.endsWith('.pdf')
+    return (
+      <span key={key}>
+        {isPdf
+          ? (
+            <a href={mediaSrc} target="_blank" rel="noopener noreferrer"
+              className="flex items-center gap-2 bg-[#2a3142] rounded-lg px-3 py-2 my-1 max-w-xs no-underline">
+              <span className="text-2xl">📄</span>
+              <span className="text-xs text-white truncate">{filename}</span>
+            </a>
+          )
+          : (
+            <img src={mediaSrc} alt="image" className="max-w-full rounded-lg my-1 max-h-64 object-contain"
+              style={{ maxWidth: '100%', borderRadius: '8px' }}
+              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
+          )
+        }
+        {afterMeta && <span style={{ whiteSpace: 'pre-wrap' }}>{afterMeta}</span>}
+      </span>
+    )
+  }
+  return <span key={key} style={{ whiteSpace: 'pre-wrap' }}>{text}</span>
+}
+
 function renderMessageContent(content: MessageContent): React.ReactNode {
   // If content is already an array of blocks, process it
   if (Array.isArray(content)) {
@@ -87,21 +186,25 @@ function renderMessageContent(content: MessageContent): React.ReactNode {
             // Text block may itself contain a JSON block array (e.g. image wrapped by gateway)
             const nested = tryParseBlocks(b.text);
             if (nested) return <span key={i}>{renderMessageContent(nested)}</span>;
-            return <span key={i} style={{ whiteSpace: 'pre-wrap' }}>{String(b.text)}</span>;
+            return renderTextWithMedia(String(b.text), i);
           }
           // Handle other block types if necessary, or just render text content
-          return b.text ? <span key={i} style={{ whiteSpace: 'pre-wrap' }}>{String(b.text)}</span> : null;
+          return b.text ? renderTextWithMedia(String(b.text), i) : null;
         })}
       </>
     );
   }
 
-  // If content is a string, try to parse it as blocks first
+  // If content is a string, strip envelope then try to parse as blocks
   if (typeof content === 'string') {
-    const blocks = tryParseBlocks(content);
+    // Strip OpenClaw message envelope (user messages from chat history)
+    const inner = extractEnvelope(content)
+    const processStr = inner ?? stripBootstrapNoise(content)
+    const blocks = tryParseBlocks(processStr);
     if (blocks) {
-      return renderMessageContent(blocks); // Recurse with parsed blocks
+      return renderMessageContent(blocks);
     }
+    return renderTextWithMedia(processStr, 0);
   }
 
   return String(content ?? '');
@@ -153,12 +256,83 @@ function isNoiseMsg(msg: ChatMessage): boolean {
 
 const API = (import.meta.env.VITE_API_URL as string) || ''
 
+// Strip OpenClaw message envelope from user messages stored in chat history.
+// Format: "Sender (untrusted metadata):\n{...}\n\n[Day YYYY-MM-DD HH:MM UTC] <actual content>"
+function stripBootstrapNoise(text: string): string {
+  const idx = text.indexOf('[Bootstrap truncation warning]')
+  return idx !== -1 ? text.slice(0, idx).trimEnd() : text
+}
+
+function extractEnvelope(text: string): string | null {
+  if (!text.includes('Sender (untrusted metadata):')) return null
+  const match = text.match(/\[\w+\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+UTC\]\s*([\s\S]*)$/)
+  if (!match) return null
+  return stripBootstrapNoise(match[1].trim()) || null
+}
+
+// Compress image to ≤1280px longest side, JPEG 0.72 quality
+// Reduces iPhone photos from ~5MB to <200KB before base64 encoding
+async function compressImage(dataUrl: string, mimeType: string): Promise<{ dataUrl: string; mimeType: string }> {
+  const MAX_PX = 1280
+  const QUALITY = 0.72
+  return new Promise((resolve) => {
+    const img = new window.Image()
+    img.onload = () => {
+      const { width, height } = img
+      const scale = Math.min(1, MAX_PX / Math.max(width, height))
+      const w = Math.round(width * scale)
+      const h = Math.round(height * scale)
+      const canvas = document.createElement('canvas')
+      canvas.width = w
+      canvas.height = h
+      const ctx = canvas.getContext('2d')!
+      ctx.drawImage(img, 0, 0, w, h)
+      const outMime = 'image/jpeg'
+      const compressed = canvas.toDataURL(outMime, QUALITY)
+      resolve({ dataUrl: compressed, mimeType: outMime })
+    }
+    img.onerror = () => resolve({ dataUrl, mimeType }) // fallback: original
+    img.src = dataUrl
+  })
+}
+
+// Cache utilities
+const CACHE_PREFIX = 'octis-msg-cache-'
+const MAX_CACHED_SESSIONS = 20
+const MAX_MESSAGES_PER_SESSION = 60
+
+function getMsgCache(sessionKey: string): ChatMessage[] | null {
+  try {
+    const raw = localStorage.getItem(CACHE_PREFIX + sessionKey)
+    return raw ? (JSON.parse(raw) as ChatMessage[]) : null
+  } catch { return null }
+}
+
+function setMsgCache(sessionKey: string, msgs: ChatMessage[]): void {
+  if (msgs.length === 0) return // Never cache empty
+  try {
+    localStorage.setItem(CACHE_PREFIX + sessionKey, JSON.stringify(msgs.slice(-MAX_MESSAGES_PER_SESSION)))
+    // Evict oldest if over limit
+    const keys = Object.keys(localStorage).filter(k => k.startsWith(CACHE_PREFIX))
+    if (keys.length > MAX_CACHED_SESSIONS) {
+      const toRemove = keys.find(k => k !== CACHE_PREFIX + sessionKey)
+      if (toRemove) localStorage.removeItem(toRemove)
+    }
+  } catch {}
+}
+
 export default function MobileFullChat({ session, onBack, recentSessions, onSwitch, onArchive }: MobileFullChatProps) {
   const { send, ws, connect, connected } = useGatewayStore()
+  const { consumePendingProjectInit } = useSessionStore()
   const { getLabel, setLabel } = useLabelStore()
-  const [messages, setMessages] = useState<ChatMessage[]>([])
+  // Initialize from cache if available
+  const [messages, setMessages] = useState<ChatMessage[]>(() => {
+    const cached = session?.key ? getMsgCache(session.key) : null
+    return (cached && cached.length > 0) ? cached : []
+  })
+  const [loadedKey, setLoadedKey] = useState<string | null>(session?.key && getMsgCache(session.key) ? session.key : null)
   const [input, setInput] = useState('')
-  const [pendingFile, setPendingFile] = useState<{ dataUrl: string; mimeType: string; name: string; kind: 'image' | 'document' } | null>(null)
+  const [pendingFile, setPendingFile] = useState<{ dataUrl: string; mimeType: string; name: string; kind: 'image' | 'document'; saveToWorkspace: boolean; extractedText?: string; extracting?: boolean; pages?: number } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [sending, _setSending] = useState(false)
   const sendingRef = useRef(false)
@@ -167,6 +341,15 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     sendingRef.current = next
     _setSending(next)
   }
+  // Message queue: holds a message to auto-send when model finishes current reply
+  const [queuedMessage, setQueuedMessage] = useState<string | null>(null)
+  const queuedMessageRef = useRef<string | null>(null)
+  // Sent queue: tracks recent sends for visual feedback (mirrors desktop behavior)
+  type SentEntry = { id: number; text: string; status: 'sending' | 'queued' }
+  const [sentQueue, setSentQueue] = useState<SentEntry[]>([])
+  const confirmedSentRef = useRef<number | null>(null)
+  // Track message count before send — used to unblock polls once server confirms receipt
+  const preSendCountRef = useRef<number>(0)
   const [noiseHidden, setNoiseHidden] = useState(() => {
     try { return localStorage.getItem('octis-noise-hidden') !== 'false' } catch { return true }
   })
@@ -174,6 +357,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
   const [renameValue, setRenameValue] = useState('')
   const [autoRenaming, setAutoRenaming] = useState(false)
   const [showArchiveSheet, setShowArchiveSheet] = useState(false)
+  const [cardOpen, setCardOpen] = useState(false)
   const [swipeHint, setSwipeHint] = useState<string | null>(null)
   const touchStartX = useRef(0)
   const touchStartY = useRef(0)
@@ -194,9 +378,51 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     setTimeout(() => { programmaticScrollRef.current = false }, smooth ? 450 : 60)
   }
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const outerRef = useRef<HTMLDivElement>(null)
 
   // Reconnect + re-fetch when returning from background.
   // Always force reconnect — WS can show readyState=OPEN while actually dead (half-open).
+  // Pin body background to chat color while mounted — prevents black flash on iOS keyboard dismiss
+  useEffect(() => {
+    const prev = document.body.style.backgroundColor
+    document.body.style.backgroundColor = '#181c24'
+    return () => { document.body.style.backgroundColor = prev }
+  }, [])
+
+  // Fix iOS keyboard jump: pin container to the visual viewport via DOM ref.
+  // We set height + top directly on the DOM node so React re-renders (e.g. every
+  // keystroke changing `input` state) can never override these values — React only
+  // controls the `style` prop, not imperative style mutations made through refs.
+  // Both 'resize' (height changes) and 'scroll' (offsetTop changes) are needed:
+  // iOS scrolls the visual viewport when focusing an input, which changes offsetTop.
+  useEffect(() => {
+    const vv = window.visualViewport
+    const el = outerRef.current
+    if (!el) return
+    if (!vv) {
+      // Fallback for browsers without visualViewport support
+      el.style.height = window.innerHeight + 'px'
+      return
+    }
+    let raf = 0
+    const update = () => {
+      cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(() => {
+        if (!outerRef.current) return
+        outerRef.current.style.height = vv.height + 'px'
+        outerRef.current.style.top = vv.offsetTop + 'px'
+      })
+    }
+    vv.addEventListener('resize', update)
+    vv.addEventListener('scroll', update)
+    update() // apply immediately
+    return () => {
+      vv.removeEventListener('resize', update)
+      vv.removeEventListener('scroll', update)
+      cancelAnimationFrame(raf)
+    }
+  }, [])
+
   useEffect(() => {
     const handleVisibility = () => {
       if (document.visibilityState !== 'visible') return
@@ -211,6 +437,17 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
 
   useEffect(() => {
     if (!session?.key || !ws) return
+
+    // Reset sending state on reconnect / session switch so polls aren't permanently blocked
+    setSending(false)
+    // Try to populate from cache first to avoid blank screen
+    const cached = getMsgCache(session.key)
+    if (cached && cached.length > 0) {
+      setMessages(cached)
+    } else {
+      setMessages([])
+    }
+    setLoadedKey(null)
 
     // Use proper req/method format (not old type-based format)
     const reqId = `chat-history-${session.key}-${Date.now()}`
@@ -238,18 +475,66 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
           msg.id.startsWith(`chat-poll-mobile-${session.key}`)
         ) {
           const msgs = msg.payload?.messages || []
-          if (msgs.length > 0 && !sendingRef.current) {
-            // Skip poll updates while sending — poll can wipe the optimistic message
-            // before the gateway has committed it. Wait for streaming/res to land first.
-            setMessages(msgs)
+          if (msgs.length === 0) return
+          // Gate: keep optimistic message visible until server confirms receipt
+          // (server message count exceeds count at time of send).
+          // Once server has it, ALWAYS apply — this is how replies become visible.
+          if (sendingRef.current && msgs.length <= preSendCountRef.current) {
+            // Server hasn't received our message yet — keep optimistic, don't overwrite
+            return
+          }
+          // Server has our message (or we're not in a send). Apply update.
+          // Clear pending localStorage entry if message is now confirmed
+          localStorage.removeItem(`octis-pending-${session.key}`)
+          setMessages(msgs)
+          // Clear sending state: either assistant replied, OR user msg confirmed but no reply yet.
+          // Always clear once server has the user's message (avoids stuck queue when reply is slow).
+          const lastMsg = msgs[msgs.length - 1]
+          if (lastMsg?.role === 'assistant') {
+            const txt = typeof lastMsg.content === 'string' ? lastMsg.content.trim() : ''
+            if (txt && txt !== 'HEARTBEAT_OK') setSending(false)
+          } else {
+            // User message confirmed server-side — clear sending so new sends aren't blocked
+            setSending(false)
           }
           return
         }
 
         // History response
         if (msg.type === 'res' && msg.id === reqId && msg.ok) {
-          setSending(false)
-          setMessages(msg.payload?.messages || [])
+          const msgs = msg.payload?.messages || []
+          // Refresh resilience: restore optimistic message if server hasn't committed it yet
+          const pendingKey = `octis-pending-${session.key}`
+          const pendingRaw = localStorage.getItem(pendingKey)
+          let finalMsgs = msgs
+          if (pendingRaw) {
+            try {
+              const { text, timestamp } = JSON.parse(pendingRaw) as { text: string; timestamp: number }
+              const age = Date.now() - timestamp
+              const inHistory = msgs.some(m =>
+                m.role === 'user' &&
+                typeof m.content === 'string' &&
+                m.content.slice(0, 80) === text.slice(0, 80)
+              )
+              if (!inHistory && age < 5 * 60 * 1000) {
+                // Server hasn't committed it yet — show as optimistic
+                finalMsgs = [...msgs, { role: 'user', content: text, id: Date.now() }]
+                preSendCountRef.current = msgs.length
+                setSending(true)
+                // Safety: always schedule a timeout so sendingRef never stays stuck
+                // (unlike handleSend which sets its own timeout, this path has no auto-clear)
+                setTimeout(() => setSending(false), 15000)
+              } else {
+                // Confirmed in history or too old — clear
+                localStorage.removeItem(pendingKey)
+              }
+            } catch {}
+          }
+          if (!pendingRaw) setSending(false)
+          setMessages(finalMsgs)
+          setLoadedKey(session.key)
+          // Write to cache after receiving fresh history
+          setMsgCache(session.key, finalMsgs)
         }
 
         // Streaming event
@@ -257,6 +542,8 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
           const payload = msg.payload as { sessionKey?: string; role?: string; content?: string; id?: string | number }
           if (payload?.sessionKey === session.key) {
             setSending(false)
+            localStorage.removeItem(`octis-pending-${session.key}`)
+            setSentQueue(prev => prev.filter(e => e.status === 'sending'))
             // Only update if content is non-empty — empty payloads are flush events
             // and would blank out the message until the next poll
             if (payload.content) {
@@ -276,6 +563,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
         // Flat chat event (older gateway)
         if (msg.type === 'chat' && msg.sessionKey === session.key) {
           setSending(false)
+          setSentQueue(prev => prev.filter(e => e.status === 'sending'))
           const flatMsg: ChatMessage = { role: msg.role || 'assistant', content: msg.content || '', id: msg.id_msg }
           setMessages((prev) => {
             const idx = prev.findIndex((m) => m.id === flatMsg.id)
@@ -313,50 +601,143 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     }
   }, [messages])
 
+  // Mark sent entries as delivered when server confirms (messages count exceeds pre-send count)
+  useEffect(() => {
+    if (sentQueue.length === 0) return
+    const pendingEntries = sentQueue.filter(e => e.status === 'sending')
+    if (pendingEntries.length === 0) return
+    // Server has our message when message count exceeds what we had at send time
+    if (messages.length > preSendCountRef.current) {
+      setSentQueue(prev => prev.map(e => e.status === 'sending' ? { ...e, status: 'queued' as const } : e))
+      // Fallback: auto-remove after 8s if streaming never clears it
+      setTimeout(() => setSentQueue(prev => prev.filter(e => e.status !== 'queued')), 8000)
+    }
+  }, [messages])
+
   const handleAttachFile = (file: File) => {
     const isImage = file.type.startsWith('image/')
     const isPdf = file.type === 'application/pdf'
     if (!isImage && !isPdf) return
     const reader = new FileReader()
-    reader.onload = (e) => {
-      const dataUrl = e.target?.result as string
-      setPendingFile({ dataUrl, mimeType: file.type, name: file.name, kind: isImage ? 'image' : 'document' })
+    reader.onload = async (e) => {
+      const rawDataUrl = e.target?.result as string
+      if (isImage) {
+        // Compress before storing — iPhone photos are 5-8MB raw, need to be <200KB
+        const { dataUrl, mimeType } = await compressImage(rawDataUrl, file.type)
+        setPendingFile({ dataUrl, mimeType, name: file.name, kind: 'image', saveToWorkspace: false })
+      } else {
+        // Show immediately, extract text in background
+        setPendingFile({ dataUrl: rawDataUrl, mimeType: file.type, name: file.name, kind: 'document', saveToWorkspace: false, extracting: true })
+        try {
+          const b64 = rawDataUrl.split(',')[1]
+          const token = await window.Clerk?.session?.getToken()
+          const r = await fetch(`${API}/api/extract-pdf`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+            body: JSON.stringify({ data: b64 }),
+          })
+          const json = await r.json()
+          setPendingFile(prev => prev ? { ...prev, extractedText: json.text || '', pages: json.pages, extracting: false } : null)
+        } catch {
+          setPendingFile(prev => prev ? { ...prev, extractedText: '', extracting: false } : null)
+        }
+      }
     }
     reader.readAsDataURL(file)
   }
 
-  const handleSend = () => {
-    if (!input.trim() && !pendingFile) return
-    if (sending) return
-    const msg = input.trim()
+  const handleSend = async (overrideMsg?: string) => {
+    const effectiveInput = overrideMsg ?? input
+    if (!effectiveInput.trim() && !pendingFile) return
+    if (pendingFile?.extracting) return // wait for PDF extraction
+    // If model is busy and this is a user-initiated send, queue it
+    if (sendingRef.current && !overrideMsg) {
+      setQueuedMessage(effectiveInput.trim())
+      queuedMessageRef.current = effectiveInput.trim()
+      setInput('')
+      return
+    }
+    let msg = effectiveInput.trim()
+
+    // Save to workspace if toggled
+    if (pendingFile?.saveToWorkspace) {
+      try {
+        const token = await window.Clerk?.session?.getToken()
+        const res = await fetch(`${API}/api/upload`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+          body: JSON.stringify({ filename: pendingFile.name, data: pendingFile.dataUrl.split(',')[1] }),
+        })
+        const json = await res.json()
+        if (json.ok) msg = (msg ? msg + '\n\n' : '') + `[Saved to workspace: ${json.path}]`
+      } catch (e) {
+        console.error('[octis-mobile] upload failed:', e)
+      }
+    }
+
+    // Fire project-context injection on first send (lazy)
+    const pendingInit = consumePendingProjectInit(session.key)
+    if (pendingInit) {
+      window.Clerk?.session?.getToken().then((token: string | null) => {
+        fetch(`${API}/api/session-init`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+          body: JSON.stringify({ sessionKey: session.key, projectSlug: pendingInit }),
+        }).catch(() => {})
+      })
+    }
+    // PDFs: inject extracted text inline (gateway strips non-image attachments)
+    if (pendingFile?.kind === 'document' && pendingFile.extractedText !== undefined) {
+      const pdfBlock = `📄 **PDF: ${pendingFile.name}**${pendingFile.pages ? ` (${pendingFile.pages} page${pendingFile.pages > 1 ? 's' : ''})` : ''}\n\n${pendingFile.extractedText}`
+      msg = msg ? `${pdfBlock}\n\n${msg}` : pdfBlock
+    }
+
     const idempotencyKey = `octis-mobile-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    const messageContent = pendingFile
-      ? JSON.stringify([
-          pendingFile.kind === 'image'
-            ? { type: 'image', source: { type: 'base64', media_type: pendingFile.mimeType, data: pendingFile.dataUrl.split(',')[1] } }
-            : { type: 'document', source: { type: 'base64', media_type: pendingFile.mimeType, data: pendingFile.dataUrl.split(',')[1] } },
-          ...(msg ? [{ type: 'text', text: msg }] : []),
-        ])
-      : msg
+    // Images go via attachments; PDFs are inlined above
+    const attachments = pendingFile?.kind === 'image'
+      ? [{ type: 'image', mimeType: pendingFile.mimeType, content: pendingFile.dataUrl.split(',')[1] }]
+      : undefined
     const optimisticContent = pendingFile
       ? [pendingFile.kind === 'image'
           ? { type: 'image', source: { type: 'base64', media_type: pendingFile.mimeType, data: pendingFile.dataUrl.split(',')[1] } }
-          : { type: 'text', text: `📄 ${pendingFile.name}` },
+          : { type: 'text', text: `📄 ${pendingFile.name}${pendingFile.extractedText !== undefined ? ` (✓ extracted)` : ''}` },
          ...(msg ? [{ type: 'text', text: msg }] : [])]
       : msg
     send({
       type: 'req',
       id: `chat-send-${Date.now()}`,
       method: 'chat.send',
-      params: { sessionKey: session.key, message: messageContent, deliver: false, idempotencyKey },
+      params: { sessionKey: session.key, message: msg, attachments, deliver: false, idempotencyKey },
     })
     userScrolledUpRef.current = false
     setPendingFile(null)
-    setMessages((prev) => [...prev, { role: 'user', content: optimisticContent as string, id: Date.now() }])
+    const optimisticId = Date.now()
+    setMessages((prev) => [...prev, { role: 'user', content: optimisticContent as string, id: optimisticId }])
     setInput('')
+    preSendCountRef.current = messages.length  // capture count before optimistic is added
     setSending(true)
+    // Persist to localStorage so message survives a page refresh while model is working
+    if (!pendingFile && msg) {
+      localStorage.setItem(`octis-pending-${session.key}`, JSON.stringify({ text: msg, timestamp: Date.now() }))
+    }
+    // Add to sent queue for visual feedback
+    setSentQueue(prev => [...prev, { id: optimisticId, text: (msg || (pendingFile ? pendingFile.name : '')).slice(0, 60) + ((msg.length > 60) ? '\u2026' : ''), status: 'sending' }])
+    // Safety timeout: if streaming events are missed (reconnect, iOS bg, etc.),
+    // force-clear sendingRef so polls resume and the reply becomes visible.
+    setTimeout(() => setSending(false), 15000)
     setTimeout(() => scrollToBottom(true), 50)
   }
+
+  // Auto-flush queued message when model finishes
+  useEffect(() => {
+    if (!sending && queuedMessageRef.current) {
+      const queued = queuedMessageRef.current
+      setQueuedMessage(null)
+      queuedMessageRef.current = null
+      setTimeout(() => handleSend(queued), 300)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sending])
 
   // Auto-scroll the sessions pill strip to keep active pill in view when session changes
   useEffect(() => {
@@ -393,8 +774,9 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     setAutoRenaming(true)
     const slim = messages
       .filter(m => m.role === 'user' || m.role === 'assistant')
-      .slice(0, 6)
       .map(m => ({ role: m.role, content: extractText(m.content).slice(0, 300) }))
+      .filter(m => m.content.trim().length > 0)
+      .slice(0, 6)
     try {
       const res = await fetch(`${API}/api/session-autoname`, {
         method: 'POST',
@@ -416,7 +798,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
   }
 
   return (
-    <div className="fixed inset-0 bg-[#181c24] flex flex-col z-50" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
+    <div ref={outerRef} className="bg-[#181c24] flex flex-col overflow-hidden" style={{ position: 'fixed', top: 0, left: 0, right: 0 }}>
       <div
         className="flex items-center gap-3 px-4 py-3 bg-[#181c24] border-b border-[#2a3142] shrink-0"
         style={{ paddingTop: 'max(0.75rem, env(safe-area-inset-top))' }}
@@ -438,13 +820,16 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
             autoFocus
           />
         ) : (
-          <span
-            className="text-sm font-semibold text-white truncate flex-1 select-none"
-            onDoubleClick={startEditing}
-            title="Double-tap to rename"
-          >
-            {label}
-          </span>
+          <>
+            <span
+              className="text-sm font-semibold text-white truncate flex-1 select-none"
+              onDoubleClick={startEditing}
+              title="Double-tap to rename"
+            >
+              {label}
+            </span>
+
+          </>
         )}
         {!editing && (
           <button
@@ -482,13 +867,21 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
       <div className="flex gap-1.5 px-4 py-1.5 bg-[#0f1117] border-b border-[#1e2330] shrink-0">
         {([
           { icon: '💬', label: 'Brief', msg: "Give me a 3-sentence status update: (1) what you last did, (2) what you're working on now, (3) what's next. No fluff." },
+          { icon: '🚪', label: 'Away', msg: "I'm stepping away for a while. Please do the following:\n1. Summarize what you're currently working on (1-2 sentences).\n2. List anything you're blocked on or need from me before I go - be specific (credentials, a decision, a file, etc.).\n3. List everything you CAN do autonomously while I'm gone, in order.\n4. Estimate how long you can run without me.\nBe concise. I'll read this on my phone." },
           { icon: '💾', label: 'Save', msg: '💾 checkpoint - save any key decisions, context, or tasks from this session to MEMORY.md and TODOS.md now. One-line ack only.' },
         ] as { icon: string; label: string; msg: string }[]).map(({ icon, label, msg }) => (
           <button
             key={label}
             onClick={() => {
-              send({ type: 'req', id: `quick-${label}-${Date.now()}`, method: 'chat.send', params: { sessionKey: session.key, message: msg } })
+              const idempotencyKey = `octis-quick-${Date.now()}-${Math.random().toString(36).slice(2)}`
+              send({ type: 'req', id: `quick-${label}-${Date.now()}`, method: 'chat.send', params: { sessionKey: session.key, message: msg, idempotencyKey } })
+              // Add optimistic user message so it appears immediately
+              const optimisticId = Date.now()
+              setMessages(prev => [...prev, { role: 'user', content: msg, id: optimisticId }])
+              preSendCountRef.current = messages.length
               setSending(true)
+              // Safety timeout — quick actions have no handleSend wrapper to set this
+              setTimeout(() => setSending(false), 15000)
               userScrolledUpRef.current = false
               setTimeout(() => scrollToBottom(false), 50)
             }}
@@ -503,7 +896,46 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
         >
           <span>📦</span><span>Archive</span>
         </button>
+        <button
+          onClick={() => setCardOpen(v => !v)}
+          className={`flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap transition-colors shrink-0 border ${
+            cardOpen ? 'bg-[#6366f1]/20 border-[#6366f1] text-[#a5b4fc]' : 'bg-[#1e2330] border-[#2a3142] text-[#9ca3af]'
+          }`}
+          title="Session brief"
+        >
+          <span>📋</span><span>Card</span>
+        </button>
       </div>
+
+      {/* Session brief card */}
+      {cardOpen && (() => {
+        const firstUser = messages.find((m) => m.role === 'user')
+        const lastAssistant = [...messages].reverse().find(
+          (m) => m.role === 'assistant' && extractText(m.content).trim() && !isHeartbeatMsg(m)
+        )
+        return (
+          <div className="px-4 py-3 border-b border-[#2a3142] bg-[#0a0d14] shrink-0 space-y-2">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-semibold text-[#6366f1] uppercase tracking-wider">Session</span>
+              <span className="text-xs text-white font-medium truncate flex-1">{label}</span>
+              <span className="text-[10px] text-[#4b5563] font-mono shrink-0">{session.key.slice(-16)}</span>
+            </div>
+            {firstUser ? (
+              <div>
+                <div className="text-[10px] text-[#6b7280] uppercase tracking-wider mb-0.5">Started with</div>
+                <div className="text-xs text-[#e8eaf0] leading-relaxed line-clamp-2">{extractText(firstUser.content).slice(0, 200)}</div>
+              </div>
+            ) : null}
+            {lastAssistant ? (
+              <div>
+                <div className="text-[10px] text-[#6b7280] uppercase tracking-wider mb-0.5">Last reply</div>
+                <div className="text-xs text-[#a5b4fc] leading-relaxed line-clamp-2">{extractText(lastAssistant.content).slice(0, 200)}</div>
+              </div>
+            ) : null}
+            {!firstUser && <div className="text-xs text-[#4b5563]">No messages yet.</div>}
+          </div>
+        )
+      })()}
 
       {/* Recent sessions strip */}
       {recentSessions && recentSessions.length > 0 && (
@@ -546,18 +978,15 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
           touchStartX.current = e.touches[0].clientX
           touchStartY.current = e.touches[0].clientY
           isDraggingRef.current = false
-          // Remove any transition so dragging is instant
           if (scrollRef.current) scrollRef.current.style.transition = ''
         }}
         onTouchMove={(e) => {
           if (!recentSessions || !onSwitch) return
           const dx = e.touches[0].clientX - touchStartX.current
           const dy = e.touches[0].clientY - touchStartY.current
-          // Only hijack if clearly horizontal
           if (!isDraggingRef.current && Math.abs(dx) < 10) return
           if (!isDraggingRef.current && Math.abs(dx) <= Math.abs(dy)) return
           isDraggingRef.current = true
-          // Check a valid next session exists; dampen if at edge
           const idx = recentSessions.findIndex(s => s.key === session.key)
           const wouldGoTo = dx < 0 ? idx + 1 : idx - 1
           const atEdge = wouldGoTo < 0 || wouldGoTo >= recentSessions.length
@@ -569,9 +998,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
           const deltaX = e.changedTouches[0].clientX - touchStartX.current
           const deltaY = e.changedTouches[0].clientY - touchStartY.current
           const el = scrollRef.current
-
           if (!isDraggingRef.current || Math.abs(deltaX) < 60 || Math.abs(deltaX) <= Math.abs(deltaY) * 1.5) {
-            // Snap back
             if (el) {
               el.style.transition = 'transform 220ms ease-out'
               el.style.transform = 'translateX(0)'
@@ -580,11 +1007,9 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
             isDraggingRef.current = false
             return
           }
-
           const idx = recentSessions.findIndex(s => s.key === session.key)
           const newIdx = deltaX < 0 ? idx + 1 : idx - 1
           if (newIdx < 0 || newIdx >= recentSessions.length) {
-            // Edge — snap back
             if (el) {
               el.style.transition = 'transform 220ms ease-out'
               el.style.transform = 'translateX(0)'
@@ -593,8 +1018,6 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
             isDraggingRef.current = false
             return
           }
-
-          // Slide out fully, then switch
           const target = deltaX < 0 ? '-100vw' : '100vw'
           setSwipeHint(deltaX < 0 ? 'Next →' : '← Previous')
           setTimeout(() => setSwipeHint(null), 600)
@@ -611,29 +1034,82 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
           isDraggingRef.current = false
         }}
         onScroll={() => {
-          if (programmaticScrollRef.current) return // ignore scroll events we triggered
+          if (programmaticScrollRef.current) return
           const el = scrollRef.current
           if (!el) return
           const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
           userScrolledUpRef.current = distFromBottom > 80
         }}
       >
-        {messages.filter((msg) => !isHeartbeatMsg(msg) && !(noiseHidden && isNoiseMsg(msg))).map((msg, i) => (
-          <div
-            key={msg.id !== undefined ? String(msg.id) : i}
-            className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-          >
+        {/* Show messages from cache while loading (when loadedKey doesn't match yet) */}
+        {(() => {
+          const showMessages = (loadedKey === session?.key || (loadedKey === null && messages.length > 0))
+            ? messages
+            : []
+          return showMessages.filter((msg) => !isHeartbeatMsg(msg) && !(noiseHidden && isNoiseMsg(msg)) && !(msg.role === 'assistant' && extractText(msg.content).trimStart().startsWith('📁 **'))).map((msg, i) => (
             <div
-              className={`max-w-[85%] px-3 py-2.5 rounded-2xl text-sm whitespace-pre-wrap break-words leading-relaxed ${
-                msg.role === 'user'
-                  ? 'bg-[#6366f1] text-white rounded-br-sm'
-                  : 'bg-[#1e2330] text-[#e8eaf0] rounded-bl-sm'
-              }`}
+              key={msg.id !== undefined ? String(msg.id) : i}
+              className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
             >
-              {renderMessageContent(msg.content)}
+              <div
+                className={`max-w-[85%] px-3 py-2.5 rounded-2xl text-sm whitespace-pre-wrap break-words leading-relaxed ${
+                  msg.role === 'user'
+                    ? 'bg-[#6366f1] text-white rounded-br-sm'
+                    : 'bg-[#1e2330] text-[#e8eaf0] rounded-bl-sm'
+                }`}
+              >
+                {msg.MediaPaths && msg.MediaPaths.length > 0
+                  ? msg.MediaPaths.map((p: string, i: number) => {
+                      const filename = p.split('/').pop() || ''
+                      const mime = (msg.MediaTypes?.[i] || msg.MediaType || '')
+                      const src = `${API}/api/media/${encodeURIComponent(filename)}`
+                      return mime.includes('pdf')
+                        ? <a key={i} href={src} target="_blank" rel="noopener noreferrer"
+                            className="flex items-center gap-2 bg-[#4f51c0] rounded-lg px-3 py-2 my-1 max-w-xs no-underline">
+                            <span className="text-2xl">📄</span>
+                            <span className="text-xs text-white truncate">{filename}</span>
+                          </a>
+                        : <img key={i} src={src} alt="attachment"
+                            className="max-w-full rounded-lg my-1 max-h-64 object-contain"
+                            style={{ maxWidth: '100%', borderRadius: '8px' }}
+                            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
+                    })
+                  : msg.MediaPath
+                    ? (() => {
+                        const filename = (msg.MediaPath as string).split('/').pop() || ''
+                        const src = `${API}/api/media/${encodeURIComponent(filename)}`
+                        return (msg.MediaType || '').includes('pdf')
+                          ? <a href={src} target="_blank" rel="noopener noreferrer"
+                              className="flex items-center gap-2 bg-[#4f51c0] rounded-lg px-3 py-2 my-1 max-w-xs no-underline">
+                              <span className="text-2xl">📄</span>
+                              <span className="text-xs text-white truncate">{filename}</span>
+                            </a>
+                          : <img src={src} alt="attachment"
+                              className="max-w-full rounded-lg my-1 max-h-64 object-contain"
+                              style={{ maxWidth: '100%', borderRadius: '8px' }}
+                              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
+                      })()
+                    : null
+                }
+                {renderMessageContent(msg.content)}
+                {(() => {
+                  const ts = getMsgTs(msg)
+                  const isInFlight = msg.role === 'user' && sentQueue.some(e => e.id === msg.id)
+                  return (
+                    <div className={`text-[10px] mt-1 flex items-center gap-1 ${msg.role === 'user' ? 'justify-end' : ''}`}>
+                      {isInFlight && (
+                        <span className="text-[#a5b4fc] opacity-70">sending…</span>
+                      )}
+                      {ts > 0 && !isInFlight && (
+                        <span className={msg.role === 'user' ? 'text-[#a5b4fc]' : 'text-[#4b5563]'}>{fmtMsgTs(ts)}</span>
+                      )}
+                    </div>
+                  )
+                })()}
+              </div>
             </div>
-          </div>
-        ))}
+          ))
+        })()}
         {sending && (
           <div className="flex justify-start">
             <div className="bg-[#1e2330] px-4 py-3 rounded-2xl rounded-bl-sm flex items-center gap-1">
@@ -646,18 +1122,41 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
         <div ref={bottomRef} />
       </div>
       </div>
-
       <div
-        className="px-3 py-3 bg-[#181c24] border-t border-[#2a3142] shrink-0"
+        className="px-3 pt-3 pb-1.5 bg-[#181c24] border-t border-[#2a3142] shrink-0"
       >
+        {/* Queued message indicator */}
+        {queuedMessage && (
+          <div className="px-1 pb-2 flex items-center gap-2">
+            <div className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" style={{ animation: 'typingBounce 1.2s infinite' }} />
+            <span className="text-xs text-amber-400 flex-1 truncate">Queued: {queuedMessage.slice(0, 50)}{queuedMessage.length > 50 ? '…' : ''}</span>
+            <button onClick={() => { setQueuedMessage(null); queuedMessageRef.current = null }} className="text-xs text-[#6b7280] hover:text-white shrink-0">✕</button>
+          </div>
+        )}
+        {/* Sent queue strip removed — status shown inline on the message bubble */}
         {/* Pending file preview */}
         {pendingFile && (
-          <div className="flex items-center gap-2 mb-2 px-1">
-            {pendingFile.kind === 'image'
-              ? <img src={pendingFile.dataUrl} alt="preview" className="h-14 w-14 rounded-xl object-cover border border-[#6366f1]" />
-              : <div className="flex items-center gap-2 bg-[#1e2330] rounded-xl px-3 py-2"><span className="text-xl">📄</span><span className="text-xs text-white truncate max-w-[160px]">{pendingFile.name}</span></div>
-            }
-            <button onClick={() => setPendingFile(null)} className="text-[#6b7280] hover:text-red-400 text-lg ml-auto">✕</button>
+          <div className="flex flex-col gap-1.5 mb-2 px-1">
+            <div className="flex items-center gap-2">
+              {pendingFile.kind === 'image'
+                ? <img src={pendingFile.dataUrl} alt="preview" className="h-14 w-14 rounded-xl object-cover border border-[#6366f1]" />
+                : (
+                  <div className="flex flex-col gap-0.5 bg-[#1e2330] rounded-xl px-3 py-2 flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xl">📄</span>
+                      <span className="text-xs text-white truncate flex-1">{pendingFile.name}</span>
+                    </div>
+                    {pendingFile.extracting && (
+                      <span className="text-[10px] text-[#6b7280] animate-pulse">Extracting text…</span>
+                    )}
+                    {!pendingFile.extracting && pendingFile.extractedText !== undefined && (
+                      <span className="text-[10px] text-[#22c55e]">✓ {pendingFile.pages ? `${pendingFile.pages}p · ` : ''}{Math.round((pendingFile.extractedText?.length || 0) / 4)} tokens</span>
+                    )}
+                  </div>
+                )
+              }
+              <button onClick={() => setPendingFile(null)} className="text-[#6b7280] hover:text-red-400 text-lg ml-auto shrink-0">✕</button>
+            </div>
           </div>
         )}
         <div className="flex gap-2 items-end">
@@ -690,14 +1189,17 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
             }}
           />
           <button
-            onClick={handleSend}
-            disabled={(!input.trim() && !pendingFile) || sending}
+            onClick={() => handleSend()}
+            disabled={(!input.trim() && !pendingFile) || pendingFile?.extracting === true}
             className="bg-[#6366f1] disabled:opacity-40 text-white rounded-2xl w-11 h-11 flex items-center justify-center shrink-0 transition-colors active:scale-95"
           >
             ↑
           </button>
         </div>
       </div>
+
+      {/* iOS safe area filler — prevents black gap at the bottom */}
+      <div className="shrink-0 bg-[#181c24]" style={{ height: 'env(safe-area-inset-bottom)' }} />
 
       {/* Archive action sheet */}
       {showArchiveSheet && (
@@ -713,11 +1215,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
             <button
               onClick={() => {
                 setShowArchiveSheet(false)
-                onArchive?.()
-                // After archiving, switch to the next available session instead of going back
-                const next = (recentSessions || []).find(s => s.key !== session.key)
-                if (next && onSwitch) onSwitch(next)
-                else onBack()
+                onArchive?.()  // parent handles navigation (next session or back)
               }}
               className="w-full text-left px-4 py-3.5 rounded-xl text-red-400 font-medium text-sm hover:bg-[#2a3142] transition-colors"
             >

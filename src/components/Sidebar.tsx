@@ -3,35 +3,36 @@ import { useSessionStore, useGatewayStore, useProjectStore, useLabelStore, useHi
 
 // ─── Health Circle ─────────────────────────────────────────────────────────────
 function HealthCircle({ session }: { session: Session }) {
-  const { getCostDelta } = useSessionStore()
+  const { sessionMeta } = useSessionStore()
   const { send } = useGatewayStore()
   const [show, setShow] = useState(false)
 
   const cost = session.estimatedCostUsd
   if (cost == null || cost < 0.01) return null
 
-  const delta = getCostDelta(session.key)
+  const exchangeCost = sessionMeta[session.key]?.lastExchangeCost ?? null
+  if (exchangeCost == null) return null
 
-  // Color: based on growth rate (delta per poll) + absolute floor
-  let color = '#22c55e' // green
-  let label = 'Low'
-  if (cost > 60 || (delta != null && delta > 0.20)) {
-    color = '#ef4444'; label = 'Hot'
-  } else if (cost > 15 || (delta != null && delta > 0.05)) {
-    color = '#f59e0b'; label = 'Warm'
+  // Per-exchange cost: signals context overhead, only appears after first completed exchange
+  let color = '#22c55e'
+  let label = 'Light'
+  if (exchangeCost > 0.15) {
+    color = '#ef4444'; label = 'Heavy'
+  } else if (exchangeCost > 0.05) {
+    color = '#f59e0b'; label = 'Growing'
   }
 
   const sendCompact = (e: React.MouseEvent) => {
     e.stopPropagation()
     const sk = session.key || session.sessionKey
-    send({ type: 'req', id: `compact-${Date.now()}`, method: 'chat.send', params: { sessionKey: sk, message: '/compact' } })
+    send({ type: 'req', id: `compact-${Date.now()}`, method: 'chat.send', params: { sessionKey: sk, message: '/compact', idempotencyKey: `octis-compact-${Date.now()}-${Math.random().toString(36).slice(2)}` } })
     setShow(false)
   }
 
   const sendNew = (e: React.MouseEvent) => {
     e.stopPropagation()
     const sk = session.key || session.sessionKey
-    send({ type: 'req', id: `new-${Date.now()}`, method: 'chat.send', params: { sessionKey: sk, message: '/new' } })
+    send({ type: 'req', id: `new-${Date.now()}`, method: 'chat.send', params: { sessionKey: sk, message: '/new', idempotencyKey: `octis-new-${Date.now()}-${Math.random().toString(36).slice(2)}` } })
     setShow(false)
   }
 
@@ -43,16 +44,13 @@ function HealthCircle({ session }: { session: Session }) {
       />
       {show && (
         <div className="absolute left-4 top-0 z-50 bg-[#1a1f2e] border border-[#2a3142] rounded-xl shadow-2xl p-3 min-w-[180px] text-xs">
-          <div className="text-white font-semibold mb-1">Session cost</div>
+          <div className="text-white font-semibold mb-1">Context overhead</div>
           <div className="text-[#e8eaf0] mb-0.5">
-            Total: <span className="font-mono text-amber-400">${cost.toFixed(2)}</span>
+            Per message: <span className="font-mono" style={{ color }}>${exchangeCost.toFixed(3)}</span>
           </div>
-          {delta != null && (
-            <div className="text-[#e8eaf0] mb-2">
-              +<span className="font-mono" style={{ color }}>${delta.toFixed(3)}</span> last 30s
-            </div>
-          )}
-          <div className="text-[10px] mb-2" style={{ color }}>{label} — {label === 'Hot' ? 'compact now' : label === 'Warm' ? 'consider compacting' : 'healthy'}</div>
+          <div className="text-[10px] mb-2" style={{ color }}>
+            {label === 'Heavy' ? '🔴 Heavy — compact or start a new session' : label === 'Growing' ? '🟡 Growing — consider compacting soon' : '🟢 Light — context is healthy'}
+          </div>
           <div className="flex gap-1.5">
             <button
               onClick={sendCompact}
@@ -301,7 +299,10 @@ function SessionItem({ session, isPinned, onPin, onRename, onArchive, onContinue
             <button className="w-full px-3 py-1.5 text-xs text-left text-[#e8eaf0] hover:bg-[#2a3142]" onClick={() => { onContinue(session); setShowMenu(false) }}>▶ Continue</button>
           )}
           <div className="border-t border-[#2a3142] my-1" />
-          <button className="w-full px-3 py-1.5 text-xs text-left text-red-400 hover:bg-[#2a3142]" onClick={() => { onArchive(session.key); setShowMenu(false) }}>🗑 Archive</button>
+          <button className="w-full px-3 py-1.5 text-xs text-left text-red-400 hover:bg-[#2a3142] flex items-center justify-between" onClick={() => { onArchive(session.key); setShowMenu(false) }}>
+            <span>🗑 Archive</span>
+            <span className="text-[9px] opacity-50 font-mono bg-white/5 rounded px-1 py-0.5 leading-none">E</span>
+          </button>
         </div>
       )}
 
@@ -395,6 +396,7 @@ function ProjectGroup({ name, sessions, activePanes, paneCount, onPin, onRename,
               onContinue={onContinue}
               selected={selected.has(session.key)}
               onSelect={(k, e) => onSelect(k, e)}
+
             />
           ))}
           {/* Todos section */}
@@ -440,14 +442,14 @@ function ProjectGroup({ name, sessions, activePanes, paneCount, onPin, onRename,
 
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => void }) {
-  const { sessions, getStatus, getSortedSessions, pinToPane, activePanes, paneCount, setSessions, setManualOrder } = useSessionStore()
+  const { sessions, getStatus, getSortedSessions, pinToPane, activePanes, paneCount, setPaneCount, setSessions, setManualOrder } = useSessionStore()
   // Re-render every 60s so stuck detection updates live
   const [, setTick] = useState(0)
   useEffect(() => {
     const t = setInterval(() => setTick(n => n + 1), 60_000)
     return () => clearInterval(t)
   }, [])
-  const { connected, send } = useGatewayStore()
+  const { connected, send, agentId } = useGatewayStore()
   const { getTag, getProjects } = useProjectStore()
   const { getLabel } = useLabelStore()
   const { hide: hideSession } = useHiddenStore()
@@ -459,6 +461,9 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
   const [dragKey, setDragKey] = useState<string | null>(null)
   const [todoCounts, setTodoCounts] = useState<Record<string, number>>({})
   const [todoItems, setTodoItems] = useState<Record<string, TodoItem[]>>({})
+  const [showNewSessionPicker, setShowNewSessionPicker] = useState(false)
+  const [pickerProjects, setPickerProjects] = useState<{ id: string; name: string; slug: string; emoji: string }[]>([])
+  const newSessionPickerRef = useRef<HTMLDivElement>(null)
 
   // Fetch todo counts + items for project badges
   const refreshTodos = () => {
@@ -492,11 +497,24 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     if (sidebarView === 'archives') void loadArchives()
   }, [sidebarView, loadArchives])
 
+  // Close new-session project picker on outside click
+  useEffect(() => {
+    if (!showNewSessionPicker) return
+    const handler = (e: MouseEvent) => {
+      if (newSessionPickerRef.current && !newSessionPickerRef.current.contains(e.target as Node)) {
+        setShowNewSessionPicker(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showNewSessionPicker])
+
   // Poll sessions.list every 30s to refresh live cost data
   useEffect(() => {
     if (!connected) return
+    const listParams = agentId ? { agentId } : {}
     const poll = () => {
-      send({ type: 'req', id: `sessions-list-${Date.now()}`, method: 'sessions.list', params: {} })
+      send({ type: 'req', id: `sessions-list-${Date.now()}`, method: 'sessions.list', params: listParams })
     }
     const t = setInterval(poll, 30_000)
     return () => clearInterval(t)
@@ -557,7 +575,16 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     const alreadyAt = activePanes.indexOf(sessionKey)
     if (alreadyAt >= 0 && alreadyAt < paneCount) return
     const emptyPane = activePanes.findIndex((p, i) => i < paneCount && !p)
-    pinToPane(emptyPane >= 0 ? emptyPane : paneCount - 1, sessionKey)
+    if (emptyPane >= 0) {
+      pinToPane(emptyPane, sessionKey)
+    } else if (paneCount < 8) {
+      // Auto-expand: add a new pane for this session (up to 8)
+      setPaneCount(paneCount + 1)
+      pinToPane(paneCount, sessionKey)
+    } else {
+      // At max auto-expand — replace the last pane
+      pinToPane(paneCount - 1, sessionKey)
+    }
   }
 
   const handleRename = (sessionKey: string, newLabel: string) => {
@@ -594,7 +621,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     // Seed message for the new session
     const seedMsg = `Continuing from "${prevLabel}".${project ? ` Project: ${project}.` : ''}\n\n${card}\n\nPick up from here — no need to re-explain context.`
 
-    send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey: newKey, message: seedMsg } })
+    send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey: newKey, message: seedMsg, idempotencyKey: `octis-continue-${Date.now()}-${Math.random().toString(36).slice(2)}` } })
 
     // Add to sessions list locally
     setSessions([{ key: newKey, label: `↪ ${prevLabel}`, sessionKey: newKey }, ...sessions])
@@ -619,7 +646,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     setSessions([{ key: newKey, label: text.slice(0, 40), sessionKey: newKey }, ...sessions])
     useProjectStore.getState().setTag(newKey, project)
     setTimeout(() => {
-      send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey: newKey, message: text } })
+      send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey: newKey, message: text, idempotencyKey: `octis-todo-${Date.now()}-${Math.random().toString(36).slice(2)}` } })
     }, 300)
     const emptyPane = activePanes.findIndex((p, i) => i < paneCount && !p)
     pinToPane(emptyPane >= 0 ? emptyPane : paneCount - 1, newKey)
@@ -627,7 +654,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
 
   const hideHeartbeat = localStorage.getItem('octis-show-heartbeat-sessions') !== 'true'
   const hideCron = localStorage.getItem('octis-show-cron-sessions') !== 'true'
-  const hideAgentSessions = localStorage.getItem('octis-show-agent-sessions') !== 'true'
+  const hideAgentSessions = true // Always hide subagent/ACP sessions — never show in sidebar
 
   const isHeartbeatSession = (s: Session) => {
     const lbl = (getLabel(s.key, s.label || s.key) || '').toLowerCase()
@@ -687,7 +714,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
   const untaggedSessions = sessions.filter(s => !taggedKeys.has(s.key))
 
   return (
-    <aside className="w-80 shrink-0 bg-[#181c24] border-r border-[#2a3142] flex flex-col h-full">
+    <aside className="w-full shrink-0 bg-[#181c24] border-r border-[#2a3142] flex flex-col h-full">
       {/* Header */}
       <div className="px-4 py-3 border-b border-[#2a3142]">
         <div className="flex items-center gap-2 mb-2">
@@ -819,6 +846,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
                 onDragOver={handleDragOver}
                 onDrop={handleDrop}
                 isDragOver={dragOverKey === session.key && dragKey !== session.key}
+
               />
             ))}
           </>
@@ -870,6 +898,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
                     onContinue={handleContinue}
                     selected={selected.has(session.key)}
                     onSelect={(k, e) => handleSelect(k, e, untaggedSessions)}
+
                   />
                 ))}
               </div>
@@ -939,24 +968,58 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
       </div>
 
       {/* Footer */}
-      <div className="border-t border-[#2a3142] px-3 py-2 flex items-center gap-2">
+      <div ref={newSessionPickerRef} className="border-t border-[#2a3142] px-3 py-2 relative">
+        {/* Project picker dropdown */}
+        {showNewSessionPicker && (
+          <div className="absolute bottom-full left-3 right-3 mb-1 bg-[#1e2333] border border-[#2a3142] rounded-lg shadow-xl z-50 overflow-hidden">
+            <div className="px-3 py-1.5 text-[10px] text-[#6b7280] border-b border-[#2a3142] font-medium uppercase tracking-wide">Open in project</div>
+            <button
+              onClick={() => {
+                const key = `session-${Date.now()}`
+                setSessions([{ key, label: 'New session', sessionKey: key }, ...sessions])
+                const emptyPane = activePanes.findIndex((p, i) => i < paneCount && !p)
+                pinToPane(emptyPane >= 0 ? emptyPane : paneCount - 1, key)
+                setShowNewSessionPicker(false)
+              }}
+              className="w-full text-left px-3 py-2 text-xs text-[#9ca3af] hover:bg-[#2a3142] hover:text-white transition-colors flex items-center gap-2"
+            >
+              <span>📋</span> No project
+            </button>
+            {pickerProjects.map(p => (
+              <button
+                key={p.slug}
+                onClick={() => {
+                  const key = `session-${Date.now()}`
+                  setSessions([{ key, label: 'New session', sessionKey: key }, ...sessions])
+                  useProjectStore.getState().setTag(key, p.slug)
+                  fetch(`${API}/api/session-projects`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sessionKey: key, projectTag: p.slug }),
+                  }).catch(() => {})
+                  const emptyPane = activePanes.findIndex((pn, i) => i < paneCount && !pn)
+                  pinToPane(emptyPane >= 0 ? emptyPane : paneCount - 1, key)
+                  setShowNewSessionPicker(false)
+                }}
+                className="w-full text-left px-3 py-2 text-xs text-[#e8eaf0] hover:bg-[#2a3142] transition-colors flex items-center gap-2"
+              >
+                <span>{p.emoji || '📁'}</span> {p.name}
+              </button>
+            ))}
+          </div>
+        )}
         <button
           onClick={() => {
-            const key = `session-${Date.now()}`
-            setSessions([{ key, label: 'New session', sessionKey: key }, ...sessions])
-            const emptyPane = activePanes.findIndex((p, i) => i < paneCount && !p)
-            pinToPane(emptyPane >= 0 ? emptyPane : paneCount - 1, key)
+            if (!showNewSessionPicker) {
+              fetch(`${API}/api/projects`).then(r => r.json()).then(d => setPickerProjects(d.projects || [])).catch(() => {})
+            }
+            setShowNewSessionPicker(v => !v)
           }}
-          className="flex-1 bg-[#6366f1] hover:bg-[#818cf8] text-white text-xs py-1.5 rounded-lg transition-colors font-medium"
+          className="w-full bg-[#6366f1] hover:bg-[#818cf8] text-white text-xs py-1.5 rounded-lg transition-colors font-medium flex items-center justify-center gap-1.5"
+          title="New session (N)"
         >
           + New Session
-        </button>
-        <button
-          onClick={onSettingsClick}
-          className="text-xs text-[#6b7280] hover:text-white transition-colors px-2 py-1.5 rounded hover:bg-[#2a3142]"
-          title="Gateway settings"
-        >
-          ⚙
+          <span className="text-[9px] opacity-60 font-mono bg-white/10 rounded px-1 py-0.5 leading-none">N</span>
         </button>
       </div>
     </aside>

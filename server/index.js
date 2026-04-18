@@ -3,8 +3,13 @@ import cors from 'cors'
 import pg from 'pg'
 import fs from 'fs/promises'
 import path from 'path'
+import { createRequire } from 'module'
 import { verifyToken } from '@clerk/backend'
 import webpush from 'web-push'
+
+const _require = createRequire(import.meta.url)
+const WS = _require('/usr/lib/node_modules/openclaw/node_modules/ws')
+const pdfParse = _require('pdf-parse')
 
 // VAPID config for Web Push
 const VAPID_PUBLIC = 'BD3-GUgiWEFtJPoQGpSVy6YtoACLQtVCvU6Xu8WwiuvDxVFfE4Z9_ayommNrdmkhFzdWlKu9zkZNNKofWL3qrn8'
@@ -41,6 +46,61 @@ async function writeLabels(labels) {
   await fs.writeFile(LABELS_FILE, JSON.stringify(labels, null, 2))
 }
 
+// --- Admin gateway WebSocket helper ---
+const GW_TOKEN = '8UJBwudjSyOifNfPltG0Nedqn1w5UcmTY9abYqGrAcY'
+
+function adminGwCall(calls) {
+  // calls = array of { method, params } to execute in sequence
+  // Returns promise that resolves to array of results
+  return new Promise((resolve, reject) => {
+    const ws = new WS('ws://localhost:18789/gateway', {
+      headers: { Authorization: `Bearer ${GW_TOKEN}`, Origin: 'http://localhost:18789' }
+    })
+    let reqId = 1
+    const pending = new Map()
+    const results = []
+
+    function sendReq(method, params) {
+      return new Promise((res, rej) => {
+        const id = String(reqId++)
+        pending.set(id, { resolve: res, reject: rej })
+        ws.send(JSON.stringify({ type: 'req', id, method, params }))
+        setTimeout(() => {
+          if (pending.has(id)) { pending.delete(id); rej(new Error(`Timeout: ${method}`)) }
+        }, 8000)
+      })
+    }
+
+    ws.on('message', async (raw) => {
+      let msg
+      try { msg = JSON.parse(raw.toString()) } catch { return }
+
+      if (msg.type === 'event' && msg.event === 'connect.challenge') {
+        try {
+          await sendReq('connect', {
+            minProtocol: 3, maxProtocol: 3,
+            client: { id: 'openclaw-control-ui', version: '2026.4.10', platform: 'linux', mode: 'ui' },
+            caps: [], auth: { token: GW_TOKEN }, role: 'operator', scopes: ['operator.admin']
+          })
+          for (const call of calls) {
+            results.push(await sendReq(call.method, call.params))
+          }
+          ws.close()
+          resolve(results)
+        } catch (err) { ws.close(); reject(err) }
+      }
+
+      if (msg.type === 'res') {
+        const p = pending.get(msg.id)
+        if (p) { pending.delete(msg.id); if (msg.ok) p.resolve(msg.payload); else p.reject(new Error(msg.error?.message || 'RPC failed')) }
+      }
+    })
+
+    ws.on('error', (err) => { ws.close(); reject(err) })
+    setTimeout(() => { ws.close(); reject(new Error('Connection timeout')) }, 15000)
+  })
+}
+
 // --- Read gateway token directly from openclaw.json (single source of truth) ---
 async function getGatewayConfig() {
   try {
@@ -64,6 +124,10 @@ const USER_CONFIG = {
   'user_3C2XKvwT0WPSIz0JFdd7GJIMq1V': { role: 'owner', agentId: 'main' },
   // Casin (admin@beatimo.ca)
   'user_3BrnhtjopGTmVIepkoMlRzjLG0t': { role: 'owner', agentId: 'main' },
+
+  // Beatimo team — own agents
+  'user_3CSJfPvh51DFPgm8J2YsJKaPutU': { role: 'member', agentId: 'roxanne', displayName: 'Roxanne' },
+  'user_3CSJfdpKXaOdAL7OKA7nvDDDWcw': { role: 'member', agentId: 'jp', displayName: 'JP' },
 }
 
 async function requireAuth(req, res, next) {
@@ -95,6 +159,40 @@ const PORT = process.env.OCTIS_API_PORT || 3747
 // --- Endpoints ---
 
 app.get('/api/health', (req, res) => res.json({ ok: true }))
+
+// Force-clear page: nukes SW cache + stale octis localStorage, redirects to fresh load
+app.get('/api/clear', (req, res) => {
+  res.setHeader('Content-Type', 'text/html')
+  res.send(`<!DOCTYPE html><html><head><title>Octis — Clearing cache…</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{background:#0f1117;color:#e8eaf0;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:12px}
+p{color:#6b7280;font-size:14px}</style></head><body>
+<div style="font-size:2rem">&#x1F9F9;</div>
+<div>Clearing Octis cache…</div>
+<p id="s">Unregistering service workers…</p>
+<script>
+async function clear() {
+  document.getElementById('s').textContent = 'Clearing caches…'
+  if ('caches' in window) {
+    const keys = await caches.keys()
+    await Promise.all(keys.map(k => caches.delete(k)))
+  }
+  document.getElementById('s').textContent = 'Unregistering service workers…'
+  if ('serviceWorker' in navigator) {
+    const regs = await navigator.serviceWorker.getRegistrations()
+    await Promise.all(regs.map(r => r.unregister()))
+  }
+  document.getElementById('s').textContent = 'Clearing local state…'
+  const keysToRemove = Object.keys(localStorage).filter(k =>
+    k.startsWith('octis-pending-') || k.startsWith('octis-msg-cache-')
+  )
+  keysToRemove.forEach(k => localStorage.removeItem(k))
+  document.getElementById('s').textContent = 'Done! Redirecting…'
+  setTimeout(() => location.replace('/'), 1000)
+}
+clear().catch(e => { document.getElementById('s').textContent = 'Error: ' + e; })
+<\/script></body></html>`)
+})
 
 // Gateway config
 app.get('/api/gateway-config', requireAuth, async (req, res) => {
@@ -221,6 +319,9 @@ app.post('/api/session-autoname', async (req, res) => {
         return `${m.role === 'user' ? 'User' : 'Assistant'}: ${content.slice(0, 300)}`
       })
       .join('\n')
+
+    if (!excerpt.trim() || excerpt.replace(/User:|Assistant:/g, '').trim().length < 10)
+      return res.status(400).json({ error: 'Not enough conversation content to generate a title' })
 
     const prompt = `Given this conversation excerpt, generate a short session title: 3–5 words. \nCapture the specific topic or task — be concrete, not generic. No filler words ("help with", "working on", "discussion about"). No quotes, no period.\nExamples: "Octis Sidebar Layout Fixes", "Sage GL Batch Push", "Centurion Deal Analysis", "Loan Schema Audit", "Email Triage Setup".\n\n${excerpt}\n\nTitle:`
 
@@ -474,6 +575,41 @@ app.post('/api/hidden-sessions/unhide', requireAuth, async (req, res) => {
   }
 })
 
+// ─── Pinned sessions ─────────────────────────────────────────────────────────
+app.get('/api/pinned-sessions', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT session_key FROM raw_nexus.octis_pinned_sessions ORDER BY pinned_at ASC')
+    res.json(rows.map(r => r.session_key))
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.post('/api/pinned-sessions/pin', requireAuth, async (req, res) => {
+  try {
+    const { sessionKey } = req.body
+    if (!sessionKey) return res.status(400).json({ error: 'sessionKey required' })
+    await pool.query(
+      'INSERT INTO raw_nexus.octis_pinned_sessions (session_key) VALUES ($1) ON CONFLICT DO NOTHING',
+      [sessionKey]
+    )
+    res.json({ ok: true })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.post('/api/pinned-sessions/unpin', requireAuth, async (req, res) => {
+  try {
+    const { sessionKey } = req.body
+    if (!sessionKey) return res.status(400).json({ error: 'sessionKey required' })
+    await pool.query('DELETE FROM raw_nexus.octis_pinned_sessions WHERE session_key = $1', [sessionKey])
+    res.json({ ok: true })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 // VAPID public key (for frontend to subscribe)
 app.get('/api/push/vapid-public-key', (req, res) => {
   res.json({ key: VAPID_PUBLIC })
@@ -562,6 +698,32 @@ app.post('/api/session-projects', requireAuth, async (req, res) => {
     res.json({ ok: true })
   } catch (err) {
     res.status(500).json({ error: err.message })
+  }
+})
+
+// Session init — called after new session creation to inject project context
+app.post('/api/session-init', requireAuth, async (req, res) => {
+  try {
+    const { sessionKey, projectSlug } = req.body
+    if (!sessionKey || !projectSlug) return res.json({ error: 'sessionKey and projectSlug required' })
+    const { rows } = await pool.query(
+      'SELECT id, name, slug, emoji, description, memory_file FROM raw_nexus.octis_projects WHERE slug=$1',
+      [projectSlug]
+    )
+    const project = rows[0]
+    if (!project) return res.json({ error: 'Project not found' })
+    const { name, emoji, description, memory_file } = project
+    const contextNote = `📁 **${emoji} ${name}** — You are working in the ${name} project.${
+      memory_file ? ` Context file: memory/${memory_file}` : ''
+    }${description ? '\n' + description : ''}`
+    await adminGwCall([
+      { method: 'sessions.patch', params: { key: sessionKey, label: `${emoji} ${name}`.trim() } },
+      { method: 'chat.inject', params: { sessionKey, message: contextNote, label: '📁 Project' } },
+    ])
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('[octis] session-init error:', err.message)
+    res.json({ error: err.message })
   }
 })
 
@@ -746,7 +908,39 @@ app.patch('/api/todos/:id/complete', requireAuth, async (req, res) => {
 })
 
 // Serve media files from OpenClaw inbound media store
-app.get('/api/media/:filename', requireAuth, async (req, res) => {
+// GET /api/uploads/:filename — serve files from workspace/uploads/ (no auth — same as /api/media)
+app.get('/api/uploads/:filename', async (req, res) => {
+  try {
+    const filename = path.basename(req.params.filename)
+    const filePath = path.join(WORKSPACE, 'uploads', filename)
+    const data = await fs.readFile(filePath)
+    const ext = path.extname(filename).toLowerCase()
+    const mimeMap = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.pdf': 'application/pdf' }
+    res.set('Content-Type', mimeMap[ext] || 'application/octet-stream')
+    res.set('Cache-Control', 'private, max-age=86400')
+    res.send(data)
+  } catch {
+    res.status(404).json({ error: 'File not found' })
+  }
+})
+
+// POST /api/upload — save a file to workspace/uploads/ from base64 dataUrl
+app.post('/api/upload', requireAuth, async (req, res) => {
+  try {
+    const { filename, data } = req.body
+    if (!filename || !data) return res.status(400).json({ error: 'filename and data required' })
+    const safeName = path.basename(filename).replace(/[^a-zA-Z0-9._-]/g, '_')
+    const uploadsDir = path.join(WORKSPACE, 'uploads')
+    await fs.mkdir(uploadsDir, { recursive: true })
+    const filePath = path.join(uploadsDir, safeName)
+    await fs.writeFile(filePath, Buffer.from(data, 'base64'))
+    res.json({ ok: true, path: filePath, filename: safeName })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.get('/api/media/:filename', async (req, res) => {
   try {
     const filename = path.basename(req.params.filename) // sanitize: strip any path traversal
     const filePath = path.join(HOME, '.openclaw/media/inbound', filename)
@@ -758,6 +952,70 @@ app.get('/api/media/:filename', requireAuth, async (req, res) => {
     res.send(data)
   } catch {
     res.status(404).json({ error: 'Media file not found' })
+  }
+})
+
+// POST /api/issues — create GitHub issue on octis-app/octis
+const GITHUB_PAT = process.env.GITHUB_PAT || ''
+const GITHUB_REPO = 'octis-app/octis'
+
+// Ensure required labels exist (best-effort, ignores errors)
+async function ensureGitHubLabel(name, color, description = '') {
+  await fetch(`https://api.github.com/repos/${GITHUB_REPO}/labels`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${GITHUB_PAT}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+    body: JSON.stringify({ name, color, description }),
+  }).catch(() => {})
+}
+
+app.post('/api/issues', requireAuth, async (req, res) => {
+  const { type, title, body } = req.body
+  if (!title?.trim()) return res.status(400).json({ error: 'Title required' })
+
+  // Map type → GitHub label (create if missing)
+  const labelMap = { bug: 'bug', feature: 'enhancement', ux: 'ux' }
+  const labelColors = { bug: 'd73a4a', enhancement: 'a2eeef', ux: 'bfd4f2' }
+  const label = labelMap[type] || 'bug'
+  if (label === 'ux') await ensureGitHubLabel('ux', 'bfd4f2', 'UX / Design issue')
+
+  try {
+    const ghRes = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/issues`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${GITHUB_PAT}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+      body: JSON.stringify({ title: title.trim(), body: body || '', labels: [label] }),
+    })
+    const data = await ghRes.json()
+    if (!ghRes.ok) return res.status(500).json({ error: data.message || 'GitHub API error' })
+    console.log(`[octis] Issue #${data.number} created: ${data.html_url}`)
+    res.json({ number: data.number, url: data.html_url })
+  } catch (e) {
+    console.error('[octis] Issue create error:', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// POST /api/extract-pdf — extract text from a base64-encoded PDF
+app.post('/api/extract-pdf', requireAuth, async (req, res) => {
+  try {
+    const { data } = req.body // base64 string (no data: prefix)
+    if (!data) return res.status(400).json({ error: 'data required' })
+    const buffer = Buffer.from(data, 'base64')
+    const result = await pdfParse(buffer)
+    const text = result.text?.trim() || ''
+    const pages = result.numpages || 1
+    res.json({ text, pages })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
   }
 })
 

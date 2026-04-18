@@ -61,7 +61,9 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
     sessions.filter((s: Session) => getTag(s.key).project === slug && getStatus(s) === 'active').length
 
   const lastActivityForProject = (slug: string): Date | null => {
-    const tagged = sessions.filter((s: Session) => getTag(s.key).project === slug)
+    const tagged = sessions.filter((s: Session) =>
+      slug === 'others' ? !getTag(s.key).project : getTag(s.key).project === slug
+    )
     if (!tagged.length) return null
     const ts = tagged
       .map((s: Session) => s.lastActivity ? new Date(s.lastActivity as string).getTime() : 0)
@@ -192,6 +194,41 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
               </button>
             )
           })}
+
+          {/* Others — always-present catch-all for untagged sessions */}
+          {(() => {
+            const othersCount = sessions.filter((s: Session) => !getTag(s.key).project).length
+            const othersActive = sessions.filter((s: Session) => !getTag(s.key).project && getStatus(s) === 'active').length
+            const othersActivity = lastActivityForProject('others')
+            const othersProject = { id: 'others', name: 'Others', slug: 'others', emoji: '📂', color: '#6b7280', description: 'Sessions not assigned to a project', memory_file: '', position: 9999 }
+            return (
+              <button
+                key="others"
+                onClick={() => onOpenProject(othersProject)}
+                className="text-left bg-[#181c24] hover:bg-[#1e2330] border border-[#2a3142] hover:border-[#3a4152] rounded-2xl p-5 transition-all group"
+              >
+                <div className="flex items-start justify-between mb-3">
+                  <div className="w-12 h-12 rounded-2xl flex items-center justify-center text-2xl shrink-0 bg-[#6b728022] border border-[#6b728044]">
+                    📂
+                  </div>
+                  {othersActive > 0 && (
+                    <div className="flex items-center gap-1.5 mt-1">
+                      <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                      <span className="text-xs text-green-400">{othersActive} active</span>
+                    </div>
+                  )}
+                </div>
+                <div className="text-white font-semibold text-base mb-1 group-hover:text-[#a5b4fc] transition-colors">Others</div>
+                <div className="text-[#6b7280] text-xs mb-3 line-clamp-2">Sessions not assigned to a project</div>
+                <div className="flex items-center justify-between mt-3 pt-3 border-t border-[#2a3142]">
+                  <span className="text-[#4b5563] text-xs">
+                    {othersCount === 0 ? 'No sessions' : `${othersCount} session${othersCount !== 1 ? 's' : ''}`}
+                  </span>
+                  {othersActivity && <span className="text-[#4b5563] text-xs">{formatAgo(othersActivity)}</span>}
+                </div>
+              </button>
+            )
+          })()}
 
           {/* Empty state */}
           {projects.length === 0 && (

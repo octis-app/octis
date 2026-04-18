@@ -24,6 +24,7 @@ export interface SessionMeta {
   lastRole?: 'user' | 'assistant'
   isStreaming?: boolean
   unreadCount?: number
+  lastExchangeCost?: number // cost of the most recent completed exchange
 }
 
 export interface ProjectTag {
@@ -306,8 +307,29 @@ export const useGatewayStore = create<GatewayState>()(
 
         if (msg.type === 'event' && msg.event === 'chat' && msg.payload?.sessionKey) {
           const sk = msg.payload.sessionKey as string
-          const role = msg.payload.role as string
-          if (role === 'assistant') {
+          const payload = msg.payload as Record<string, unknown>
+          const stream = payload.stream as string | undefined
+          const state = payload.state as string | undefined
+          const role = payload.role as string | undefined
+
+          if (stream === 'lifecycle') {
+            // Authoritative run signal from the gateway runner
+            const phase = (payload.data as Record<string, unknown>)?.phase as string | undefined
+            if (phase === 'start') {
+              useSessionStore.getState().markStreaming(sk)
+            } else if (phase === 'end' || phase === 'error') {
+              useSessionStore.getState().setLastRole(sk, 'assistant')
+            }
+          } else if (stream === 'tool') {
+            // Tool executing — keep streaming indicator alive
+            const phase = (payload.data as Record<string, unknown>)?.phase as string | undefined
+            if (phase === 'start') useSessionStore.getState().markStreaming(sk)
+          } else if (state === 'delta') {
+            // Streaming tokens
+            useSessionStore.getState().markStreaming(sk)
+          } else if (state === 'final') {
+            // Stream finalized — do NOT clear here; wait for lifecycle:end
+          } else if (role === 'assistant') {
             useSessionStore.getState().markStreaming(sk)
           } else if (role === 'user') {
             useSessionStore.getState().setLastRole(sk, 'user')
@@ -469,6 +491,98 @@ export const useHiddenStore = create<HiddenState>()(
   )
 )
 
+// ─── Pinned sessions store ────────────────────────────────────────────────────
+const PINNED_API = (import.meta as any).env?.VITE_API_URL || ''
+
+async function getPinnedAuthToken(): Promise<string> {
+  try {
+    // @ts-ignore
+    const token = await window.Clerk?.session?.getToken()
+    return token || ''
+  } catch { return '' }
+}
+
+async function fetchPinnedFromServer(token?: string): Promise<string[]> {
+  try {
+    const t = token || await getPinnedAuthToken()
+    const r = await fetch(`${PINNED_API}/api/pinned-sessions`, {
+      headers: t ? { Authorization: `Bearer ${t}` } : {},
+    })
+    if (!r.ok) return []
+    return await r.json()
+  } catch { return [] }
+}
+
+async function pushPinToServer(sessionKey: string, pin: boolean): Promise<void> {
+  try {
+    const token = await getPinnedAuthToken()
+    await fetch(`${PINNED_API}/api/pinned-sessions/${pin ? 'pin' : 'unpin'}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ sessionKey }),
+    })
+  } catch { /* best-effort */ }
+}
+
+interface PinnedState {
+  pinned: Set<string>
+  hydrated: boolean
+  pin: (sessionKey: string) => void
+  unpin: (sessionKey: string) => void
+  isPinned: (sessionKey: string) => boolean
+  hydrateFromServer: (token?: string) => Promise<void>
+}
+
+export const usePinnedStore = create<PinnedState>()(
+  persist(
+    (set, get) => ({
+      pinned: new Set<string>(),
+      hydrated: false,
+
+      hydrateFromServer: async (token?: string) => {
+        const keys = await fetchPinnedFromServer(token)
+        set({ hydrated: true, pinned: new Set(keys) })
+      },
+
+      pin: (sessionKey) => {
+        set((s) => ({ pinned: new Set([...s.pinned, sessionKey]) }))
+        pushPinToServer(sessionKey, true)
+      },
+
+      unpin: (sessionKey) => {
+        set((s) => { const p = new Set(s.pinned); p.delete(sessionKey); return { pinned: p } })
+        pushPinToServer(sessionKey, false)
+      },
+
+      isPinned: (sessionKey) => get().pinned.has(sessionKey),
+    }),
+    {
+      name: 'octis-pinned-sessions',
+      storage: {
+        getItem: (name) => {
+          const raw = localStorage.getItem(name)
+          if (!raw) return null
+          try {
+            const parsed = JSON.parse(raw)
+            if (parsed?.state?.pinned) {
+              parsed.state.pinned = new Set(parsed.state.pinned)
+            }
+            return parsed
+          } catch { return null }
+        },
+        setItem: (name, value) => {
+          const v = { ...value, state: { ...value.state, pinned: [...(value.state.pinned as Set<string>)] } }
+          localStorage.setItem(name, JSON.stringify(v))
+        },
+        removeItem: (name) => localStorage.removeItem(name),
+      },
+    }
+  )
+)
+
 // ─── Project store ────────────────────────────────────────────────────────────
 
 // Server sync helpers for project tags
@@ -586,6 +700,8 @@ interface SessionState {
   activePanes: (string | null)[]
   paneCount: number
   manualOrder: string[]
+  pendingProjectPrefixes: Record<string, string>
+  pendingProjectInits: Record<string, string>
 
   setSessions: (sessions: Session[]) => void
   getCostDelta: (sessionKey: string) => number | null
@@ -595,10 +711,15 @@ interface SessionState {
   incrementUnread: (sessionKey: string) => void
   clearUnread: (sessionKey: string) => void
   getUnreadCount: (sessionKey: string) => number
+  setLastExchangeCost: (sessionKey: string, cost: number) => void
   getStatus: (session: Session) => SessionStatus
   getLastActivityMs: (session: Session) => number | null
   getSortedSessions: () => Session[]
   setManualOrder: (keys: string[]) => void
+  setPendingProjectPrefix: (sessionKey: string, prefix: string) => void
+  consumePendingProjectPrefix: (sessionKey: string) => string | null
+  setPendingProjectInit: (sessionKey: string, projectSlug: string) => void
+  consumePendingProjectInit: (sessionKey: string) => string | null
   setSessionProject: (sessionKey: string, projectTag: string) => void
   pinToPane: (paneIndex: number, sessionKey: string | null) => void
   setPaneCount: (n: number) => void
@@ -614,20 +735,59 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
   activePanes: [null, null, null, null, null, null, null, null],
   paneCount: 2,
   manualOrder: [],
+  pendingProjectPrefixes: {},
+  pendingProjectInits: {},
 
   setSessions: (sessions) => {
     // Deduplicate by key — gateway sometimes sends the same session under different forms
     const seen = new Set<string>()
     const hiddenStore = useHiddenStore.getState()
+    const { agentId } = useGatewayStore.getState()
     const deduped = sessions.filter((s) => {
       if (!s.key || seen.has(s.key)) return false
       if (hiddenStore.isHidden(s.key) || hiddenStore.isHidden(s.id || '') || hiddenStore.isHidden(s.sessionId || '')) return false
+      // Client-side agentId guard: filter out sessions belonging to other agents
+      if (agentId && s.agentId && s.agentId !== agentId) return false
+      // Key-prefix guard: sessions keyed as agent:<other>:... belong to a different agent
+      // e.g. agent:nexus:slack:direct:<someone_else>:... leaks through when server-side filter is loose
+      if (agentId) {
+        const agentPrefixMatch = (s.key || '').match(/^agent:([^:]+):/)
+        if (agentPrefixMatch && agentPrefixMatch[1] !== agentId) return false
+      }
       seen.add(s.key)
+      // Also mark the short form (session-<ts>) as seen so the pendingLocal filter drops it
+      // immediately when the gateway returns the full agent:main:session-<ts> key.
+      // Without this, both keys linger for up to 2 min and appear as duplicates.
+      const shortMatch = s.key.match(/^agent:[^:]+:(session-\d+)$/)
+      if (shortMatch) seen.add(shortMatch[1])
       return true
     })
+    // Auto-copy project tags from optimistic key (session-<ts>) to real gateway key (agent:main:session-<ts>).
+    // This runs on every setSessions call so it works even when the originating component has unmounted.
+    const projectStore = useProjectStore.getState()
+    for (const s of deduped) {
+      const shortMatch = s.key.match(/^agent:[^:]+:(session-\d+)$/)
+      if (shortMatch) {
+        const optimisticKey = shortMatch[1]
+        const optimisticTag = projectStore.getTag(optimisticKey)
+        if (optimisticTag.project && !projectStore.getTag(s.key).project) {
+          // Copy tag to real key (setTag also pushes to server)
+          projectStore.setTag(s.key, optimisticTag.project)
+        }
+      }
+    }
     // Update cost history for sessions with live cost data
     const now = Date.now()
     set((state) => {
+      // Preserve locally-created pending sessions (key = "session-<timestamp>") that haven't
+      // appeared on the gateway yet — they get wiped otherwise on the next 30s poll.
+      // TTL: drop pending sessions older than 2 minutes — they never get a matching gateway key
+      // so they accumulate as ghost sessions (same label as real sessions, vanish on reload).
+      const pendingLocal = state.sessions.filter((s) => {
+        if (!/^session-\d+$/.test(s.key) || seen.has(s.key)) return false
+        const ts = parseInt(s.key.split('-')[1], 10)
+        return !isNaN(ts) && (now - ts) < 2 * 60 * 1000 // keep for max 2 min
+      })
       const newHistory = { ...state.costHistory }
       for (const s of deduped) {
         if (s.estimatedCostUsd != null) {
@@ -636,7 +796,7 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
           newHistory[s.key] = updated
         }
       }
-      return { sessions: deduped, costHistory: newHistory }
+      return { sessions: [...pendingLocal, ...deduped], costHistory: newHistory }
     })
   },
 
@@ -694,10 +854,20 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
     }))
   },
 
+  setLastExchangeCost: (sessionKey, cost) => {
+    set((s) => ({
+      sessionMeta: {
+        ...s.sessionMeta,
+        [sessionKey]: { ...(s.sessionMeta[sessionKey] || {}), lastExchangeCost: cost },
+      },
+    }))
+  },
+
   markStreaming: (sessionKey) => {
     const existing = get().streamingTimers[sessionKey]
     if (existing) clearTimeout(existing)
 
+    // 90s fallback — lifecycle:end is the authoritative clear; this catches dropped events
     const timer = setTimeout(() => {
       set((s) => ({
         sessionMeta: {
@@ -708,7 +878,7 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
           Object.entries(s.streamingTimers).filter(([k]) => k !== sessionKey)
         ),
       }))
-    }, 4000)
+    }, 90_000)
 
     set((s) => ({
       streamingTimers: { ...s.streamingTimers, [sessionKey]: timer },
@@ -725,7 +895,13 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
 
   getLastActivityMs: (session) => {
     const key = session.key || session.sessionKey || ''
-    const activity = get().sessionActivity[key]
+    let activity = get().sessionActivity[key]
+    // Temp sessions (session-<ts>) get their activity tracked under the real gateway key
+    // (agent:<agentId>:session-<ts>). Bridge the lookup so status reflects actual activity.
+    if (!activity && /^session-\d+$/.test(key)) {
+      const { agentId } = useGatewayStore.getState()
+      if (agentId) activity = get().sessionActivity[`agent:${agentId}:${key}`]
+    }
     const last = activity || session.updatedAt || session.lastActivity || session.updated_at
     if (!last) return null
     return typeof last === 'number' ? last : new Date(last).getTime()
@@ -733,7 +909,15 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
 
   getStatus: (session) => {
     const key = session.key || session.sessionKey || ''
-    const meta = get().sessionMeta[key] || {}
+    // Resolve temp key to real key for meta lookup (same bridge as getLastActivityMs)
+    const resolvedKey = (() => {
+      if (!/^session-\d+$/.test(key)) return key
+      const { agentId } = useGatewayStore.getState()
+      if (!agentId) return key
+      const realKey = `agent:${agentId}:${key}`
+      return get().sessionMeta[realKey] ? realKey : key
+    })()
+    const meta = get().sessionMeta[resolvedKey] || {}
 
     if (meta.isStreaming) return 'working'
 
@@ -741,19 +925,32 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
     if (!lastMs) return 'quiet'
     const age = Date.now() - lastMs
 
-    // Session was recently active (user sent, waiting for reply) but has gone quiet — stuck
-    if (meta.lastRole === 'user' && age > 5 * 60 * 1000) return 'stuck'
-    if (age < 5 * 60 * 1000) return 'working'  // recently active, likely still running
+    // User sent a message and no reply yet
+    if (meta.lastRole === 'user') {
+      if (age > 5 * 60 * 1000) return 'stuck'   // sent >5 min ago with no reply = stuck
+      return 'working'                            // sent recently, waiting for reply
+    }
+
+    // Assistant replied (or lastRole unknown) — use recency for active/quiet
     if (age < 30 * 60 * 1000) return 'active'  // active in last 30 min
     return 'quiet'
   },
 
   getSortedSessions: () => {
     const { sessions, getStatus, manualOrder } = get()
+    // Tagged + active sessions always float to top automatically
+    const projectState = useProjectStore.getState()
+    const isTaggedAndActive = (s: Session) => {
+      const tag = projectState.getTag(s.key)
+      const status = getStatus(s)
+      return !!(tag?.project) && status !== 'quiet'
+    }
     if (manualOrder.length > 0) {
-      // Respect manual order; append any new sessions not yet in the order
       const orderMap = new Map(manualOrder.map((k, i) => [k, i]))
       return [...sessions].sort((a, b) => {
+        const at = isTaggedAndActive(a) ? 0 : 1
+        const bt = isTaggedAndActive(b) ? 0 : 1
+        if (at !== bt) return at - bt
         const ia = orderMap.has(a.key) ? orderMap.get(a.key)! : 9999
         const ib = orderMap.has(b.key) ? orderMap.get(b.key)! : 9999
         return ia - ib
@@ -766,6 +963,11 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
       'quiet':     3,
     }
     return [...sessions].sort((a, b) => {
+      // Tagged + active sessions always float to top
+      const at = isTaggedAndActive(a) ? 0 : 1
+      const bt = isTaggedAndActive(b) ? 0 : 1
+      if (at !== bt) return at - bt
+      // Within same tier: sort by status
       const sa = order[getStatus(a)] ?? 5
       const sb = order[getStatus(b)] ?? 5
       return sa - sb
@@ -773,6 +975,38 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
   },
 
   setManualOrder: (keys) => set({ manualOrder: keys }),
+
+  setPendingProjectPrefix: (sessionKey, prefix) => set((state) => ({
+    pendingProjectPrefixes: { ...state.pendingProjectPrefixes, [sessionKey]: prefix },
+  })),
+
+  consumePendingProjectPrefix: (sessionKey) => {
+    const prefix = get().pendingProjectPrefixes[sessionKey] ?? null
+    if (prefix) {
+      set((state) => {
+        const next = { ...state.pendingProjectPrefixes }
+        delete next[sessionKey]
+        return { pendingProjectPrefixes: next }
+      })
+    }
+    return prefix
+  },
+
+  setPendingProjectInit: (sessionKey, projectSlug) => set((state) => ({
+    pendingProjectInits: { ...state.pendingProjectInits, [sessionKey]: projectSlug },
+  })),
+
+  consumePendingProjectInit: (sessionKey) => {
+    const slug = get().pendingProjectInits[sessionKey] ?? null
+    if (slug) {
+      set((state) => {
+        const next = { ...state.pendingProjectInits }
+        delete next[sessionKey]
+        return { pendingProjectInits: next }
+      })
+    }
+    return slug
+  },
 
   setSessionProject: (sessionKey, projectTag) => {
     useProjectStore.getState().setTag(sessionKey, projectTag)
