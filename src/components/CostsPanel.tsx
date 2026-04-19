@@ -73,7 +73,7 @@ export default function CostsPanel() {
 
   const load = async () => {
     try {
-      const r = await fetch(`${API}/api/costs?days=30`)
+      const r = await fetch(`${API}/api/costs?days=30`, { credentials: 'include' })
       if (!r.ok) throw new Error(`HTTP ${r.status}`)
       setData((await r.json()) as CostsData)
       setError(null)

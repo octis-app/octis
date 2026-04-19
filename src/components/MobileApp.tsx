@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
-import { useAuth } from '@clerk/clerk-react'
+import { useAuth } from '../lib/auth'
 import { useGatewayStore, useSessionStore, useHiddenStore, useProjectStore, useLabelStore, Session } from '../store/gatewayStore'
 
 const API = ''  // same-origin
@@ -23,9 +23,9 @@ type FilterType = 'all' | 'active' | 'idle'
 
 export default function MobileApp() {
   const { getToken } = useAuth()
-  const { connected, gatewayUrl } = useGatewayStore()
+  const { connected, gatewayUrl, connect } = useGatewayStore()
   const { sessions, getStatus, getLastActivityMs } = useSessionStore()
-  const { isHidden, hide: hideSession, hydrateFromServer: hydrateHidden } = useHiddenStore()
+  const { hidden, isHidden, hide: hideSession, hydrateFromServer: hydrateHidden } = useHiddenStore()
   const { setSessions } = useSessionStore()
   const { hydrateFromServer: hydrateProjects } = useProjectStore()
   const { labels, setLabel } = useLabelStore()
@@ -37,8 +37,8 @@ export default function MobileApp() {
       hydrateProjects(token),
     ])
     // Fetch server-side session labels
-    const authHeader = token ? { Authorization: `Bearer ${token}` } : {}
-    fetch('/api/session-labels', { headers: authHeader })
+    const authHeader = {}
+    fetch('/api/session-labels', { credentials: 'include' })
       .then(r => r.json())
       .then((data: Record<string, string>) => {
         if (typeof data === 'object' && !('error' in data)) {
@@ -60,12 +60,27 @@ export default function MobileApp() {
 
   useEffect(() => { void hydrateAll() }, [hydrateAll])
 
+  // Reconnect WS when tab becomes visible — only if dead (unconditional reconnect blanks ChatPane history)
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        const { ws } = useGatewayStore.getState()
+        if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+          connect()
+        }
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => document.removeEventListener('visibilitychange', handleVisibility)
+  }, [connect])
+
   // Fetch projects list for new-session picker
   useEffect(() => {
     fetch(`${API}/api/projects`)
       .then(r => r.json())
-      .then((data: Array<{id: string; name: string; slug: string; emoji?: string; color?: string}>) => {
-        if (Array.isArray(data)) setAvailableProjects(data.filter(p => p.slug !== 'others'))
+      .then((data: {projects?: Array<{id: string; name: string; slug: string; emoji?: string; color?: string}>} | Array<{id: string; name: string; slug: string; emoji?: string; color?: string}>) => {
+        const list = Array.isArray(data) ? data : (data.projects || [])
+        setAvailableProjects(list.filter(p => p.slug !== 'others'))
       })
       .catch(() => {})
   }, [])
@@ -80,6 +95,39 @@ export default function MobileApp() {
   const [showNewSessionSheet, setShowNewSessionSheet] = useState(false)
   const [availableProjects, setAvailableProjects] = useState<Array<{id: string; name: string; slug: string; emoji?: string; color?: string}>>([])
   const [archiveToast, setArchiveToast] = useState<string | null>(null)
+  const [longPressSessionKey, setLongPressSessionKey] = useState<string | null>(null)
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const longPressDetectedRef = useRef(false)
+  const [showMoveSheet, setShowMoveSheet] = useState(false)
+
+  const handleSessionLongPressStart = (s: Session) => {
+    longPressDetectedRef.current = false
+    longPressTimerRef.current = setTimeout(() => {
+      longPressDetectedRef.current = true
+      setLongPressSessionKey(s.key)
+      setShowMoveSheet(true)
+    }, 500)
+  }
+
+  const handleSessionLongPressEnd = () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current)
+      longPressTimerRef.current = null
+    }
+  }
+
+  const handleMoveSessionTo = async (sessionKey: string, projectSlug: string) => {
+    useProjectStore.getState().setTag(sessionKey, projectSlug)
+    setShowMoveSheet(false)
+    setLongPressSessionKey(null)
+    const token = await getToken()
+    fetch(`${API}/api/session-projects`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionKey, projectTag: projectSlug }),
+    }).catch(() => {})
+  }
 
   const handleArchive = (session: Session) => {
     const lbl = labels[session.key] || session.label || 'Session'
@@ -142,7 +190,7 @@ export default function MobileApp() {
     if ((hideHeartbeat || hideCron) && isHeartbeatOrCron(s)) return false
     return true
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [sessionFingerprint, hideAgentSessions, hideHeartbeat, hideCron])
+  }), [sessionFingerprint, hideAgentSessions, hideHeartbeat, hideCron, hidden])
 
   const filtered = useMemo(() => visibleSessions.filter((s: Session) => {
     const st = getStatus(s)
@@ -180,6 +228,7 @@ export default function MobileApp() {
         const next = visibleSessions.find(s => s.key !== archivedKey)
         setFullChatSession(next || null)
       }}
+      onNewSession={() => handleNewSession()}
     />
   }
 
@@ -301,7 +350,10 @@ export default function MobileApp() {
                       className="flex items-center border-b border-[#1e2330]"
                     >
                       <button
-                        onClick={() => setFullChatSession(s)}
+                        onClick={() => { if (longPressDetectedRef.current) { longPressDetectedRef.current = false; return } setFullChatSession(s) }}
+                        onTouchStart={() => handleSessionLongPressStart(s)}
+                        onTouchEnd={handleSessionLongPressEnd}
+                        onTouchMove={handleSessionLongPressEnd}
                         className="flex-1 flex items-center gap-3 px-4 py-3.5 active:bg-[#1e2330] text-left min-w-0"
                       >
                         <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: statusColor }} />
@@ -423,6 +475,55 @@ export default function MobileApp() {
       )}
       {showIssueReporter && (
         <IssueReporter onClose={() => setShowIssueReporter(false)} context={{ view: tab }} />
+      )}
+
+      {/* Move to project bottom sheet */}
+      {showMoveSheet && longPressSessionKey && (
+        <div
+          className="fixed inset-0 z-50 flex flex-col justify-end"
+          style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+          onClick={() => { setShowMoveSheet(false); setLongPressSessionKey(null) }}
+        >
+          <div className="absolute inset-0 bg-black/60" />
+          <div
+            className="relative bg-[#181c24] rounded-t-3xl border-t border-[#2a3142] px-4 pt-4 pb-6"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="w-10 h-1 bg-[#2a3142] rounded-full mx-auto mb-4" />
+            <div className="text-[#6b7280] text-xs font-medium mb-1 px-1">Move to project</div>
+            <div className="text-white text-sm font-medium mb-3 px-1 truncate">
+              {labels[longPressSessionKey] || sessions.find(s => s.key === longPressSessionKey)?.label || longPressSessionKey}
+            </div>
+            <div className="space-y-1 max-h-72 overflow-y-auto">
+              {availableProjects.map(p => (
+                <button
+                  key={p.slug}
+                  onClick={() => handleMoveSessionTo(longPressSessionKey, p.slug)}
+                  className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left hover:bg-[#2a3142] transition-colors active:bg-[#2a3142]"
+                >
+                  <div
+                    className="w-9 h-9 rounded-xl flex items-center justify-center text-lg shrink-0"
+                    style={{ background: (p.color || '#6366f1') + '22', border: `1px solid ${(p.color || '#6366f1')}44` }}
+                  >
+                    {p.emoji || '📁'}
+                  </div>
+                  <span className="text-sm font-medium text-white">{p.name}</span>
+                </button>
+              ))}
+              {useProjectStore.getState().getTag(longPressSessionKey).project && (
+                <button
+                  onClick={() => handleMoveSessionTo(longPressSessionKey, '')}
+                  className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left hover:bg-[#2a3142] transition-colors active:bg-[#2a3142]"
+                >
+                  <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg shrink-0 bg-gray-800 border border-gray-700">
+                    📂
+                  </div>
+                  <span className="text-sm font-medium text-[#6b7280]">Move to Others (unassign)</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Archive toast */}

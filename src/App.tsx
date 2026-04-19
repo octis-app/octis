@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
-import { useAuth, SignedIn, SignedOut, UserButton } from '@clerk/clerk-react'
+import LoginPage from './components/LoginPage'
 import { useGatewayStore, useSessionStore, useLabelStore, useProjectStore, useHiddenStore, Session } from './store/gatewayStore'
 import Sidebar from './components/Sidebar'
 import ChatPane from './components/ChatPane'
@@ -39,21 +39,29 @@ const NAV_ALL = [
 const API = (import.meta.env.VITE_API_URL as string) || ''
 
 export default function App() {
-  const { isSignedIn, isLoaded, getToken } = useAuth()
+  const [authState, setAuthState] = useState<'loading' | 'authed' | 'login'>('loading')
 
-  if (!isLoaded) {
+  useEffect(() => {
+    fetch(API + '/api/auth/me', { credentials: 'include' })
+      .then(r => r.ok ? r.json() : null)
+      .then(user => setAuthState(user ? 'authed' : 'login'))
+      .catch(() => setAuthState('login'))
+  }, [])
+
+  if (authState === 'loading') {
     return (
       <div className="flex h-screen items-center justify-center bg-[#0f1117]">
-        <span className="text-[#6b7280] text-sm">Loading…</span>
+        <div className="w-8 h-8 border-2 border-[#6366f1] border-t-transparent rounded-full animate-spin" />
       </div>
     )
   }
-  if (!isSignedIn) return <AuthGate />
+  if (authState === 'login') return <LoginPage API={API} onLogin={() => setAuthState('authed')} />
 
-  return <AuthenticatedApp getToken={getToken} />
+  return <AuthenticatedApp />
 }
 
-function AuthenticatedApp({ getToken }: { getToken: () => Promise<string | null> }) {
+function AuthenticatedApp() {
+  const getToken = async () => null
   const { connected, gatewayUrl, connect, setCredentials } = useGatewayStore()
   const { activePanes, pinToPane, sessions, setSessions } = useSessionStore()
   const { labels, setLabel } = useLabelStore()
@@ -101,9 +109,8 @@ function AuthenticatedApp({ getToken }: { getToken: () => Promise<string | null>
   useEffect(() => {
     const fetchConfig = async () => {
       try {
-        const token = await getToken()
         const res = await fetch(`${API}/api/gateway-config`, {
-          headers: { Authorization: `Bearer ${token}` },
+          credentials: 'include',
         })
         if (!res.ok) throw new Error(`Config fetch failed: ${res.status}`)
         const data = (await res.json()) as { url?: string; token?: string; agentId?: string; role?: string; needsSetup?: boolean }
@@ -114,9 +121,9 @@ function AuthenticatedApp({ getToken }: { getToken: () => Promise<string | null>
         }
         setCredentials(data.url!, data.token!, data.agentId)
         connect()
-        const t = token || undefined
-        void hydrateProjects(t)
-        void hydrateHidden(t)
+        
+        void hydrateProjects()
+        void hydrateHidden()
       } catch (e) {
         console.error('[octis] Failed to fetch gateway config:', e)
         setShowConnect(true)
@@ -367,17 +374,16 @@ function AuthenticatedApp({ getToken }: { getToken: () => Promise<string | null>
           {connected ? '🟢' : '🔴'}
         </button>
         <div className="mt-2 mb-1">
-          <UserButton
-            appearance={{
-              elements: {
-                avatarBox: 'w-8 h-8',
-                userButtonPopoverCard: 'bg-[#181c24] border border-[#2a3142]',
-                userButtonPopoverActionButton: 'text-[#e8eaf0] hover:bg-[#2a3142]',
-                userButtonPopoverActionButtonText: 'text-[#e8eaf0]',
-                userButtonPopoverFooter: 'hidden',
-              },
+          <button
+            onClick={async () => {
+              await fetch(API + '/api/auth/logout', { method: 'POST', credentials: 'include' })
+              window.location.reload()
             }}
-          />
+            className="w-9 h-9 rounded-lg text-sm text-[#6b7280] hover:bg-[#2a3142] hover:text-white transition-colors flex items-center justify-center"
+            title="Sign out"
+          >
+            ⏻
+          </button>
         </div>
       </div>
 
@@ -552,6 +558,3 @@ function SidebarWrapper({ onSettingsClick }: { onSettingsClick: () => void }) {
   )
 }
 
-// Keep TS happy — SignedIn/SignedOut are imported but may be used in future
-void SignedIn
-void SignedOut

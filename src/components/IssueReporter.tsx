@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useAuth } from '@clerk/clerk-react'
+import { useAuth } from '../lib/auth'
 
 const API = (import.meta.env.VITE_API_URL as string) || ''
 
@@ -46,7 +46,7 @@ export default function IssueReporter({ onClose, context = {} }: Props) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          credentials: 'include',
         },
         body: JSON.stringify({ type, title: title.trim(), body: fullBody }),
       })
