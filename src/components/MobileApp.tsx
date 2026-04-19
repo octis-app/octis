@@ -64,8 +64,11 @@ export default function MobileApp() {
   useEffect(() => {
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
-        const { ws } = useGatewayStore.getState()
+        const store = useGatewayStore.getState()
+        const { ws } = store
         if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+          // Reset backoff so reconnect is immediate instead of waiting up to 30s
+          useGatewayStore.setState({ _reconnectAttempts: 0 })
           connect()
         }
       }
