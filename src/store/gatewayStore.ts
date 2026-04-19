@@ -42,6 +42,7 @@ interface GatewayState {
   ws: WebSocket | null
   pendingRequests: Record<string, unknown>
   _reconnectAttempts?: number
+  _pingInterval?: ReturnType<typeof setInterval>
 
   setCredentials: (url: string, token: string, agentId?: string) => void
   setAgentId: (agentId: string) => void
@@ -160,6 +161,10 @@ export const useGatewayStore = create<GatewayState>()(
         const { gatewayUrl, ws: oldWs } = get()
         if (!gatewayUrl) return
 
+        // Clear existing ping interval
+        const { _pingInterval } = get()
+        if (_pingInterval) clearInterval(_pingInterval)
+
         if (oldWs) {
           oldWs.onclose = null
           oldWs.onerror = null
@@ -214,7 +219,17 @@ export const useGatewayStore = create<GatewayState>()(
           }
         }
 
+        // Keepalive ping every 25s — prevents iOS from killing idle WS connections
+        const pingInterval = setInterval(() => {
+          if (get().ws === socket && socket.readyState === WebSocket.OPEN) {
+            try { socket.send(JSON.stringify({ type: 'ping' })) } catch {}
+          }
+        }, 25000)
+        set({ _pingInterval: pingInterval })
+
         socket.onclose = (e: CloseEvent) => {
+          clearInterval(pingInterval)
+          set({ _pingInterval: undefined })
           if (get().ws !== socket) return
           console.log('[octis] WS closed:', e.code, e.reason)
           set({ connected: false, ws: null })
@@ -259,7 +274,8 @@ export const useGatewayStore = create<GatewayState>()(
           if (msg.ok) {
             console.log('[octis] Connected ✅', msg.payload)
             set({ connected: true, _reconnectAttempts: 0 })
-            useSessionStore.getState().setSessions([])
+            // Don't clear sessions on reconnect — keep stale list visible while new one loads.
+            // Clearing caused project page to flash empty on every iOS WS reconnect.
             const { ws, agentId } = useGatewayStore.getState()
             const listParams = agentId ? { agentId } : {}
             if (ws) {
