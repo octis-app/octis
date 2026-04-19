@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useLabelStore } from '../store/gatewayStore'
+import CostChart from './CostChart'
 
 const API = (import.meta.env.VITE_API_URL as string) || ''
 
@@ -72,7 +73,7 @@ export default function CostsPanel() {
 
   const load = async () => {
     try {
-      const r = await fetch(`${API}/api/costs`)
+      const r = await fetch(`${API}/api/costs?days=30`)
       if (!r.ok) throw new Error(`HTTP ${r.status}`)
       setData((await r.json()) as CostsData)
       setError(null)
@@ -100,44 +101,56 @@ export default function CostsPanel() {
   const maxSessionCost = Math.max(...(data.sessions?.map((s) => s.cost) || [0]))
   const maxTodaySessionCost = Math.max(...(data.todaySessions?.map((s) => s.cost) || [0]))
   const maxDailyCost = Math.max(...(data.daily?.map((d) => d.total_cost_usd) || [0]))
-  const DAILY_LIMIT = 15
+
+  // KPI helpers
+  const todaySessionCount = data.todaySessions?.length ?? 0
+  const sortedDays = [...(data.daily ?? [])].sort((a, b) => a.date.localeCompare(b.date))
+  const yesterday = sortedDays.length >= 2 ? sortedDays[sortedDays.length - 2].total_cost_usd : null
+  const todayDelta = yesterday !== null && yesterday > 0
+    ? ((data.today - yesterday) / yesterday) * 100
+    : null
+  const weekTotal = data.daily?.reduce((s, d) => s + d.total_cost_usd, 0) ?? 0
+  const avgPerDay = data.daily?.length > 0 ? weekTotal / data.daily.length : 0
+  const avgCostPerSession = todaySessionCount > 0 ? data.today / todaySessionCount : null
 
   return (
     <div className="flex-1 overflow-y-auto p-6 space-y-6">
-      {/* Today summary */}
+      {/* KPI cards */}
       <div className="grid grid-cols-3 gap-3">
+        {/* Today + delta vs yesterday */}
         <div className="bg-[#181c24] border border-[#2a3142] rounded-xl p-4">
           <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-1">Today</div>
-          <div
-            className={`text-2xl font-bold ${data.today > DAILY_LIMIT ? 'text-red-400' : 'text-white'}`}
-          >
-            ${data.today.toFixed(2)}
-          </div>
-          {data.today > DAILY_LIMIT && (
-            <div className="text-xs text-red-400 mt-1">⚠️ Over $15 limit</div>
+          <div className="text-2xl font-bold text-white">${data.today.toFixed(2)}</div>
+          {todayDelta !== null && (
+            <div className={`text-xs mt-1 font-medium ${todayDelta > 0 ? 'text-amber-400' : 'text-emerald-400'}`}>
+              {todayDelta > 0 ? '↑' : '↓'} {Math.abs(todayDelta).toFixed(0)}% vs yesterday
+            </div>
           )}
-          <div className="mt-2">
-            <Bar value={data.today} max={DAILY_LIMIT} />
-            <div className="text-xs text-[#6b7280] mt-1">${DAILY_LIMIT} daily limit</div>
-          </div>
+          {todayDelta === null && yesterday === null && (
+            <div className="text-xs text-[#6b7280] mt-1">No comparison yet</div>
+          )}
         </div>
 
+        {/* Sessions today + avg cost per session */}
         <div className="bg-[#181c24] border border-[#2a3142] rounded-xl p-4">
-          <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-1">This Week</div>
-          <div className="text-2xl font-bold text-white">
-            ${data.daily?.reduce((s, d) => s + d.total_cost_usd, 0).toFixed(2)}
-          </div>
-          <div className="text-xs text-[#6b7280] mt-1">{data.daily?.length} days tracked</div>
+          <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-1">Sessions Today</div>
+          <div className="text-2xl font-bold text-white">{todaySessionCount}</div>
+          {avgCostPerSession !== null && (
+            <div className="text-xs text-[#6b7280] mt-1">
+              avg ${avgCostPerSession.toFixed(3)} / session
+            </div>
+          )}
         </div>
 
+        {/* Avg per day + week total */}
         <div className="bg-[#181c24] border border-[#2a3142] rounded-xl p-4">
           <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-1">Avg / Day</div>
           <div className="text-2xl font-bold text-white">
-            {data.daily?.length > 0
-              ? `$${(data.daily.reduce((s, d) => s + d.total_cost_usd, 0) / data.daily.length).toFixed(2)}`
-              : '—'}
+            {avgPerDay > 0 ? `$${avgPerDay.toFixed(2)}` : '—'}
           </div>
-          <div className="text-xs text-[#6b7280] mt-1">7-day rolling</div>
+          <div className="text-xs text-[#6b7280] mt-1">
+            ${weekTotal.toFixed(2)} this week
+          </div>
         </div>
       </div>
 
@@ -146,29 +159,7 @@ export default function CostsPanel() {
         <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-3">
           Daily Spend (7 days)
         </div>
-        <div className="space-y-2">
-          {data.daily?.map((d) => (
-            <div key={d.date} className="flex items-center gap-3">
-              <div className="text-xs text-[#6b7280] w-20 shrink-0">
-                {d.date ? new Date(d.date).toLocaleDateString('en-CA') : ''}
-              </div>
-              <div className="flex-1">
-                <Bar
-                  value={d.total_cost_usd}
-                  max={Math.max(maxDailyCost, DAILY_LIMIT)}
-                />
-              </div>
-              <div
-                className={`text-xs w-14 text-right ${d.total_cost_usd > DAILY_LIMIT ? 'text-red-400' : 'text-white'}`}
-              >
-                ${d.total_cost_usd.toFixed(2)}
-              </div>
-              <div className="text-xs text-[#6b7280] w-20 text-right">
-                {d.session_count} sess
-              </div>
-            </div>
-          ))}
-        </div>
+        <CostChart data={data.daily ?? []} maDays={7} />
       </div>
 
       {/* Today's top sessions */}

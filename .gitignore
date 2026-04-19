@@ -2,3 +2,5 @@ node_modules
 dist
 .env
 *.local
+.env.production
+server/config/users.json
