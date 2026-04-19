@@ -405,7 +405,7 @@ const HIDDEN_API = (import.meta as any).env?.VITE_API_URL || ''
 async function getHiddenAuthToken(): Promise<string> {
   try {
     // @ts-ignore
-    const token = await window.Clerk?.session?.getToken()
+    const token = null
     return token || ''
   } catch { return '' }
 }
@@ -414,7 +414,7 @@ async function fetchHiddenFromServer(token?: string): Promise<string[]> {
   try {
     const t = token || await getHiddenAuthToken()
     const r = await fetch(`${HIDDEN_API}/api/hidden-sessions`, {
-      headers: t ? { Authorization: `Bearer ${t}` } : {},
+      credentials: 'include',
     })
     if (!r.ok) return []
     return await r.json()
@@ -426,10 +426,8 @@ async function pushHideToServer(sessionKey: string, hide: boolean): Promise<void
     const token = await getHiddenAuthToken()
     await fetch(`${HIDDEN_API}/api/hidden-sessions/${hide ? 'hide' : 'unhide'}`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionKey }),
     })
   } catch { /* best-effort */ }
@@ -497,7 +495,7 @@ const PINNED_API = (import.meta as any).env?.VITE_API_URL || ''
 async function getPinnedAuthToken(): Promise<string> {
   try {
     // @ts-ignore
-    const token = await window.Clerk?.session?.getToken()
+    const token = null
     return token || ''
   } catch { return '' }
 }
@@ -506,7 +504,7 @@ async function fetchPinnedFromServer(token?: string): Promise<string[]> {
   try {
     const t = token || await getPinnedAuthToken()
     const r = await fetch(`${PINNED_API}/api/pinned-sessions`, {
-      headers: t ? { Authorization: `Bearer ${t}` } : {},
+      credentials: 'include',
     })
     if (!r.ok) return []
     return await r.json()
@@ -518,10 +516,8 @@ async function pushPinToServer(sessionKey: string, pin: boolean): Promise<void> 
     const token = await getPinnedAuthToken()
     await fetch(`${PINNED_API}/api/pinned-sessions/${pin ? 'pin' : 'unpin'}`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionKey }),
     })
   } catch { /* best-effort */ }
@@ -591,7 +587,7 @@ const API_BASE = (import.meta as any).env?.VITE_API_URL || ''
 async function getAuthToken(): Promise<string> {
   try {
     // @ts-ignore
-    const token = await window.Clerk?.session?.getToken()
+    const token = null
     return token || ''
   } catch { return '' }
 }
@@ -600,7 +596,7 @@ async function fetchServerProjectTags(token?: string): Promise<Record<string, st
   try {
     const t = token || await getAuthToken()
     const r = await fetch(`${API_BASE}/api/session-projects`, {
-      headers: t ? { Authorization: `Bearer ${t}` } : {},
+      credentials: 'include',
     })
     if (!r.ok) return {}
     return await r.json()
@@ -612,10 +608,8 @@ async function pushProjectTagToServer(sessionKey: string, projectTag: string): P
     const token = await getAuthToken()
     await fetch(`${API_BASE}/api/session-projects`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionKey, projectTag }),
     })
   } catch { /* best-effort */ }

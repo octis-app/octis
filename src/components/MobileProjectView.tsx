@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { useAuth } from '@clerk/clerk-react'
+import { useAuth } from '../lib/auth'
 import { useSessionStore, useProjectStore, useLabelStore, useHiddenStore, Session } from '../store/gatewayStore'
 import { useGatewayStore, useHiddenStore } from '../store/gatewayStore'
 import MobileFullChat from './MobileFullChat'
@@ -43,13 +43,21 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
     getToken().then(token => {
       fetch(`${API}/api/session-projects`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        headers: { 'Content-Type': 'application/json', credentials: 'include' },
         body: JSON.stringify({ sessionKey: matched.key, projectTag: slug }),
       }).catch(() => {})
     })
-    setOpenSession(matched)
+    // Update pendingNewSession to the real key so pill strip stays accurate
+    setPendingNewSession(matched)
+    // Only force-navigate to the new session if the user is still on the temp session
+    // or on the project list. If they've already switched to a different real session,
+    // don't interrupt — they can find the new session in the pill strip or project list.
+    setOpenSession(prev => (prev === null || prev.key === pendingKey) ? matched : prev)
   }, [sessions])
   const [openSession, setOpenSession] = useState<Session | null>(null)
+  // Track the most-recently created (pending) session so it stays pinned in the pill strip
+  // even after the user swipes to another session. Cleared when the real key arrives.
+  const [pendingNewSession, setPendingNewSession] = useState<Session | null>(null)
   const [renamingKey, setRenamingKey] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const { setLabel: saveLabelLocal } = useLabelStore()
@@ -70,40 +78,23 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
     const token = await getToken()
     fetch(`${API}/api/session-rename`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      headers: { 'Content-Type': 'application/json', credentials: 'include' },
       body: JSON.stringify({ sessionKey: s.key, label: trimmed }),
     }).catch(() => {})
   }
 
+  const [longPressSession, setLongPressSession] = useState<Session | null>(null)
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const longPressDetectedRef = useRef(false)
   const [showPicker, setShowPicker] = useState(false)
   const [showProjectSwitcher, setShowProjectSwitcher] = useState(false)
   const [allProjects, setAllProjects] = useState<Project[]>([])
-  const [todos, setTodos] = useState<Array<{ id: number; text: string; owner: string | null }>>([]) 
-  const [todosOpen, setTodosOpen] = useState(false)
-
   useEffect(() => {
     fetch(`${API}/api/projects`)
       .then(r => r.json())
       .then(d => setAllProjects(d.projects || []))
       .catch(() => {})
   }, [])
-
-  const refreshTodos = async () => {
-    try {
-      const token = await getToken()
-      const r = await fetch(`${API}/api/todos`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {}
-      })
-      const data: Record<string, { items: Array<{ id: number; text: string; owner: string | null }> }> = await r.json()
-      setTodos(data[project.slug]?.items || data[project.name]?.items || [])
-    } catch {}
-  }
-  useEffect(() => { refreshTodos() }, [project.slug])
-
-  const handleTodoComplete = async (id: number) => {
-    await fetch(`${API}/api/todos/${id}/complete`, { method: 'PATCH' }).catch(() => {})
-    refreshTodos()
-  }
 
   const handleTodoNewSession = async (text: string) => {
     const key = `session-${Date.now()}`
@@ -123,7 +114,7 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
     getToken().then(token => {
       fetch(`${API}/api/session-projects`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        headers: { 'Content-Type': 'application/json', credentials: 'include' },
         body: JSON.stringify({ sessionKey: key, projectTag: project.slug }),
       }).catch(() => {})
     })
@@ -158,12 +149,13 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
     setSessions([newSession, ...getLiveSessions()])
     setTag(key, project.slug)
     setShowPicker(false)
+    setPendingNewSession(newSession)
     setOpenSession(newSession)
     // Persist the tag to server async
     getToken().then(token => {
       fetch(`${API}/api/session-projects`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        headers: { 'Content-Type': 'application/json', credentials: 'include' },
         body: JSON.stringify({ sessionKey: key, projectTag: project.slug }),
       }).catch(() => {})
     })
@@ -171,11 +163,37 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
     setPendingProjectInit(key, project.slug)
   }
 
+  const handleLongPressStart = (s: Session) => {
+    longPressDetectedRef.current = false
+    longPressTimerRef.current = setTimeout(() => {
+      longPressDetectedRef.current = true
+      setLongPressSession(s)
+    }, 500)
+  }
+
+  const handleLongPressEnd = () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current)
+      longPressTimerRef.current = null
+    }
+  }
+
+  const handleMoveTo = async (sessionKey: string, newSlug: string) => {
+    setTag(sessionKey, newSlug)
+    setLongPressSession(null)
+    const token = await getToken()
+    fetch(`${API}/api/session-projects`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', credentials: 'include' },
+      body: JSON.stringify({ sessionKey, projectTag: newSlug }),
+    }).catch(() => {})
+  }
+
   const handleTag = async (sessionKey: string) => {
     const token = await getToken()
     await fetch(`${API}/api/session-projects`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      headers: { 'Content-Type': 'application/json', credentials: 'include' },
       body: JSON.stringify({ sessionKey, projectTag: project.slug }),
     })
     setTag(sessionKey, project.slug)
@@ -205,10 +223,15 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
       const filtered = sessions.filter((s: Session) =>
         !isHidden(s.key) && !isAgentSession(s) && !/^session-\d+$/.test(s.key)
       ).slice(0, 10)
-      if (!filtered.find(s => s.key === openSession.key)) {
-        return [openSession, ...filtered].slice(0, 10)
+      const result: Session[] = [...filtered]
+      // Always include current openSession if not already present
+      if (!result.find(s => s.key === openSession.key)) result.unshift(openSession)
+      // Pin the pending new session in the strip so the user can swipe back to it
+      // even after switching to another session (temp key filtered by regex otherwise)
+      if (pendingNewSession && !result.find(s => s.key === pendingNewSession.key)) {
+        result.unshift(pendingNewSession)
       }
-      return filtered
+      return result.slice(0, 10)
     })()
     return <MobileFullChat
       key={openSession.key}
@@ -219,6 +242,7 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
       onArchive={() => {
         hideSession(openSession.key)
         if (openSession.id) hideSession(openSession.id)
+        if (pendingNewSession?.key === openSession.key) setPendingNewSession(null)
         // Jump to next project session instead of returning to project list
         const remaining = projectSessions.filter((s: Session) => s.key !== openSession.key)
         if (remaining.length > 0) {
@@ -331,7 +355,10 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
                   />
                 ) : (
                 <button
-                  onClick={() => setOpenSession(s)}
+                  onClick={() => { if (longPressDetectedRef.current) { longPressDetectedRef.current = false; return } setOpenSession(s) }}
+                  onTouchStart={() => handleLongPressStart(s)}
+                  onTouchEnd={handleLongPressEnd}
+                  onTouchMove={handleLongPressEnd}
                   className="flex-1 min-w-0 text-left px-4 py-3.5 hover:bg-[#1e2330] transition-colors overflow-hidden"
                 >
                   <div className="flex items-center gap-3">
@@ -372,49 +399,6 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
             )
           })}
 
-          {/* Todos section */}
-          {todos.length > 0 && (
-            <div className="mt-3">
-              <button
-                onClick={() => setTodosOpen(o => !o)}
-                className="w-full flex items-center gap-2 px-2 py-2 rounded-xl hover:bg-[#1e2330] transition-colors"
-              >
-                <span className="text-sm font-medium text-[#6b7280] flex-1 text-left">Todos</span>
-                <span className="text-xs px-2 py-0.5 rounded-full bg-yellow-900/40 text-yellow-300 font-mono">{todos.length}</span>
-                <span className="text-xs text-[#4b5563]">{todosOpen ? '▲' : '▼'}</span>
-              </button>
-              {todosOpen && (
-                <div className="mt-1 space-y-1">
-                  {todos.map(todo => {
-                    let pressTimer: ReturnType<typeof setTimeout> | null = null
-                    return (
-                      <div
-                        key={todo.id}
-                        className="flex items-start gap-3 bg-[#181c24] border border-[#2a3142] rounded-xl px-4 py-3"
-                        onClick={() => handleTodoNewSession(todo.text)}
-                        onTouchStart={() => { pressTimer = setTimeout(() => {
-                          if (confirm(`Mark as done?\n\n"${todo.text}"`))
-                            handleTodoComplete(todo.id)
-                        }, 600) }}
-                        onTouchEnd={() => { if (pressTimer) clearTimeout(pressTimer) }}
-                        onTouchMove={() => { if (pressTimer) clearTimeout(pressTimer) }}
-                      >
-                        {todo.owner && (
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono shrink-0 mt-0.5 ${
-                            todo.owner === 'ME' ? 'bg-blue-900/50 text-blue-300' :
-                            todo.owner === 'YOU' ? 'bg-amber-900/50 text-amber-300' :
-                            todo.owner === 'BOTH' ? 'bg-green-900/50 text-green-300' :
-                            'bg-gray-800 text-gray-400'
-                          }`}>{todo.owner}</span>
-                        )}
-                        <span className="text-sm text-[#9ca3af] leading-snug flex-1">{todo.text}</span>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-            </div>
-          )}
           </div>
         )}
       </div>
@@ -452,6 +436,54 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
                   {p.slug === project.slug && <span className="ml-auto text-[#6366f1] text-xs">current</span>}
                 </button>
               ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Move to project bottom sheet */}
+      {longPressSession && (
+        <div
+          className="absolute inset-0 z-50 flex flex-col justify-end"
+          style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+        >
+          <div className="absolute inset-0 bg-black/60" onClick={() => setLongPressSession(null)} />
+          <div className="relative bg-[#181c24] rounded-t-3xl border-t border-[#2a3142] px-4 pt-4 pb-6">
+            <div className="w-10 h-1 bg-[#2a3142] rounded-full mx-auto mb-4" />
+            <div className="text-[#6b7280] text-xs font-medium mb-1 px-1">Move to project</div>
+            <div className="text-white text-sm font-medium mb-3 px-1 truncate">
+              {getLabel(longPressSession.key) || longPressSession.label || longPressSession.key}
+            </div>
+            <div className="space-y-1 max-h-72 overflow-y-auto">
+              {allProjects
+                .filter(p => p.slug !== getTag(longPressSession.key).project)
+                .map(p => (
+                  <button
+                    key={p.id}
+                    onClick={() => handleMoveTo(longPressSession.key, p.slug)}
+                    className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left hover:bg-[#2a3142] transition-colors"
+                  >
+                    <div
+                      className="w-9 h-9 rounded-xl flex items-center justify-center text-lg shrink-0"
+                      style={{ background: p.color + '22', border: `1px solid ${p.color}44` }}
+                    >
+                      {p.emoji}
+                    </div>
+                    <span className="text-sm font-medium text-white">{p.name}</span>
+                  </button>
+                ))
+              }
+              {getTag(longPressSession.key).project && getTag(longPressSession.key).project !== 'others' && (
+                <button
+                  onClick={() => handleMoveTo(longPressSession.key, '')}
+                  className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left hover:bg-[#2a3142] transition-colors"
+                >
+                  <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg shrink-0 bg-gray-800 border border-gray-700">
+                    📂
+                  </div>
+                  <span className="text-sm font-medium text-[#6b7280]">Move to Others (unassign)</span>
+                </button>
+              )}
             </div>
           </div>
         </div>

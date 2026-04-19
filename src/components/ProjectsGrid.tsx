@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
-import { useAuth } from '@clerk/clerk-react'
-import { useSessionStore, useProjectStore, Session } from '../store/gatewayStore'
+import { useAuth } from '../lib/auth'
+import { useSessionStore, useProjectStore, useHiddenStore, Session } from '../store/gatewayStore'
 
 interface Project {
   id: string
@@ -23,6 +23,17 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
   const { getToken } = useAuth()
   const { sessions, getStatus } = useSessionStore()
   const { getTag } = useProjectStore()
+  const { isHidden } = useHiddenStore()
+
+  // Must match MobileProjectView's filters exactly so counts are accurate
+  const isAgentSession = (s: Session) => {
+    const key = (s.key || '').toLowerCase()
+    if (key.includes(':subagent:')) return true
+    const lbl = (s.label || '').toLowerCase()
+    return lbl.startsWith('continue where you left off')
+  }
+  const isVisibleSession = (s: Session) =>
+    !isHidden(s.key) && !isHidden((s as Session & {id?: string}).id || '') && !isAgentSession(s) && !/^session-\d+$/.test(s.key)
   const [projects, setProjects] = useState<Project[]>([])
   const [loading, setLoading] = useState(true)
   const [creating, setCreating] = useState(false)
@@ -41,7 +52,7 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
     const token = await getToken()
     const r = await fetch(`${API}/api/projects`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      headers: { 'Content-Type': 'application/json', credentials: 'include' },
       body: JSON.stringify({ name: newName.trim(), emoji: newEmoji }),
     })
     const d = await r.json()
@@ -53,12 +64,12 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
     }
   }
 
-  // Count sessions per project (by project_tag matching slug)
+  // Count sessions per project — must apply same visibility filters as MobileProjectView
   const sessionCountForProject = (slug: string) =>
-    sessions.filter((s: Session) => getTag(s.key).project === slug).length
+    sessions.filter((s: Session) => isVisibleSession(s) && getTag(s.key).project === slug).length
 
   const activeCountForProject = (slug: string) =>
-    sessions.filter((s: Session) => getTag(s.key).project === slug && getStatus(s) === 'active').length
+    sessions.filter((s: Session) => isVisibleSession(s) && getTag(s.key).project === slug && getStatus(s) === 'active').length
 
   const lastActivityForProject = (slug: string): Date | null => {
     const tagged = sessions.filter((s: Session) =>
@@ -197,8 +208,8 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
 
           {/* Others — always-present catch-all for untagged sessions */}
           {(() => {
-            const othersCount = sessions.filter((s: Session) => !getTag(s.key).project).length
-            const othersActive = sessions.filter((s: Session) => !getTag(s.key).project && getStatus(s) === 'active').length
+            const othersCount = sessions.filter((s: Session) => isVisibleSession(s) && !getTag(s.key).project).length
+            const othersActive = sessions.filter((s: Session) => isVisibleSession(s) && !getTag(s.key).project && getStatus(s) === 'active').length
             const othersActivity = lastActivityForProject('others')
             const othersProject = { id: 'others', name: 'Others', slug: 'others', emoji: '📂', color: '#6b7280', description: 'Sessions not assigned to a project', memory_file: '', position: 9999 }
             return (

@@ -1,5 +1,4 @@
 import { createRoot } from 'react-dom/client'
-import { ClerkProvider } from '@clerk/clerk-react'
 import { useRegisterSW } from 'virtual:pwa-register/react'
 import './index.css'
 import App from './App'
@@ -23,13 +22,6 @@ function UpdateBanner() {
   )
 }
 
-const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string
-
-if (!PUBLISHABLE_KEY) {
-  throw new Error('Missing VITE_CLERK_PUBLISHABLE_KEY')
-}
-
-// Clear stale localStorage that could cause crashes
 try {
   const stored = localStorage.getItem('octis-gateway')
   if (stored) {
@@ -47,10 +39,8 @@ const rootEl = document.getElementById('root')
 if (!rootEl) throw new Error('No root element')
 
 createRoot(rootEl).render(
-  <ClerkProvider publishableKey={PUBLISHABLE_KEY} afterSignInUrl="/" afterSignUpUrl="/">
-    <ErrorBoundary>
-      <App />
-      <UpdateBanner />
-    </ErrorBoundary>
-  </ClerkProvider>
+  <ErrorBoundary>
+    <App />
+    <UpdateBanner />
+  </ErrorBoundary>
 )

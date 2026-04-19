@@ -26,6 +26,7 @@ export default defineConfig({
       strategies: 'generateSW',
       injectRegister: 'auto',
       workbox: {
+        navigateFallbackDenylist: [/^\/dev\//],
         importScripts: ['/sw-push.js'],
         skipWaiting: true,
         clientsClaim: true,
