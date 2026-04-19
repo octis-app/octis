@@ -1,0 +1,12 @@
+{
+  "clerk_user_id_owner": {
+    "role": "owner",
+    "agentId": "main",
+    "displayName": "Owner"
+  },
+  "clerk_user_id_member": {
+    "role": "member",
+    "agentId": "main",
+    "displayName": "Team Member"
+  }
+}

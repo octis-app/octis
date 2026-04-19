@@ -11,10 +11,15 @@ const _require = createRequire(import.meta.url)
 const WS = _require('/usr/lib/node_modules/openclaw/node_modules/ws')
 const pdfParse = _require('pdf-parse')
 
-// VAPID config for Web Push
-const VAPID_PUBLIC = 'BD3-GUgiWEFtJPoQGpSVy6YtoACLQtVCvU6Xu8WwiuvDxVFfE4Z9_ayommNrdmkhFzdWlKu9zkZNNKofWL3qrn8'
-const VAPID_PRIVATE = '23EU9_x-Uu7U9DTN7X93CIDDhxFZ5ulQK9qri_pFSD8'
-webpush.setVapidDetails('mailto:casin.hoa@beatimo.ca', VAPID_PUBLIC, VAPID_PRIVATE)
+// VAPID config for Web Push — all values must be set via env vars
+const VAPID_PUBLIC = process.env.VAPID_PUBLIC_KEY || ''
+const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY || ''
+const VAPID_CONTACT = process.env.VAPID_CONTACT || 'mailto:admin@example.com'
+if (VAPID_PUBLIC && VAPID_PRIVATE) {
+  webpush.setVapidDetails(VAPID_CONTACT, VAPID_PUBLIC, VAPID_PRIVATE)
+} else {
+  console.warn('[octis] VAPID keys not set — push notifications disabled')
+}
 
 const app = express()
 app.use(cors())
@@ -116,18 +121,21 @@ async function getGatewayConfig() {
 }
 
 // --- Clerk auth ---
-const CLERK_SECRET_KEY = process.env.CLERK_SECRET_KEY || 'sk_test_CidHH52KOvMFDQWCyegQHFAsu97xpstV4xG2SGWxpU'
+const CLERK_SECRET_KEY = process.env.CLERK_SECRET_KEY
+if (!CLERK_SECRET_KEY) {
+  console.error('[octis] CLERK_SECRET_KEY env var is required')
+  process.exit(1)
+}
 
-// Owner config: Clerk userId → role + agentId (server-managed, gateway from openclaw.json)
-const USER_CONFIG = {
-  // Casin (casin.hoa@beatimo.ca)
-  'user_3C2XKvwT0WPSIz0JFdd7GJIMq1V': { role: 'owner', agentId: 'main' },
-  // Casin (admin@beatimo.ca)
-  'user_3BrnhtjopGTmVIepkoMlRzjLG0t': { role: 'owner', agentId: 'main' },
-
-  // Beatimo team — own agents
-  'user_3CSJfPvh51DFPgm8J2YsJKaPutU': { role: 'member', agentId: 'roxanne', displayName: 'Roxanne' },
-  'user_3CSJfdpKXaOdAL7OKA7nvDDDWcw': { role: 'member', agentId: 'jp', displayName: 'JP' },
+// User config: loaded from config/users.json (not committed — copy from config/users.example.json)
+// Structure: { "clerk_user_id": { "role": "owner"|"member", "agentId": "main", "displayName": "Name" } }
+let USER_CONFIG = {}
+try {
+  const usersPath = new URL('./config/users.json', import.meta.url).pathname
+  USER_CONFIG = JSON.parse(await fs.readFile(usersPath, 'utf8'))
+  console.log(`[octis] Loaded ${Object.keys(USER_CONFIG).length} user(s) from config/users.json`)
+} catch {
+  console.warn('[octis] config/users.json not found — no users configured. Copy config/users.example.json to get started.')
 }
 
 async function requireAuth(req, res, next) {
@@ -147,10 +155,11 @@ async function requireAuth(req, res, next) {
 
 // --- Postgres ---
 const pool = new pg.Pool({
-  host: process.env.PG_HOST || '34.95.39.115',
-  database: process.env.PG_DB || 'beatimo_warehouse',
+  host: process.env.PG_HOST || 'localhost',
+  database: process.env.PG_DB || 'postgres',
   user: process.env.PG_USER || 'postgres',
-  password: process.env.PG_PASSWORD || 'M$fxV6bM!wQRSn',
+  password: process.env.PG_PASSWORD || '',
+  port: parseInt(process.env.PG_PORT || '5432'),
   ssl: false,
 })
 
@@ -230,9 +239,35 @@ app.get('/api/me', requireAuth, async (req, res) => {
   res.json({ userId: req.clerkUserId, role, agentId: '' })
 })
 
+// Clean a raw first_message into a readable session label
+function cleanSessionLabel(raw, sessionId) {
+  let label = (raw || '').trim()
+  const slackDmMatch = label.match(/Slack DM from [^:]+:\s*(.+)/i)
+  if (slackDmMatch) {
+    label = slackDmMatch[1]
+  } else {
+    label = label
+      .replace(/^\[Thread history[^\]]*\][\s\S]*?System:\s*\[[^\]]*\]\s*/i, '')
+      .replace(/^System: \[\d{4}-\d{2}-\d{2}[^\]]*\] Slack DM from [^:]+: /i, '')
+      .replace(/^System: \[[^\]]*\] /i, '')
+      .replace(/^New Assistant Thread\s*/i, '')
+      .replace(/^Nouveau fil de discussion assistant\s*/i, '')
+  }
+  label = label
+    .replace(/Sender \(untrusted metadata\):[\s\S]*/i, '')
+    .replace(/Conversation info \(untrusted metadata\):[\s\S]*/i, '')
+    .replace(/\n[\s\S]*/s, '')
+    .replace(/\[.*?\]/g, '')
+    .trim()
+    .slice(0, 70)
+  return label || (sessionId ? sessionId.slice(0, 16) + '…' : 'Session')
+}
+
 // Session costs
 app.get('/api/costs', async (req, res) => {
   try {
+    const days = Math.min(parseInt(req.query.days || '30'), 90)
+
     const { rows: daily } = await pool.query(`
       SELECT
         cost_date AS date,
@@ -241,49 +276,62 @@ app.get('/api/costs', async (req, res) => {
         SUM(output_tokens) AS output_tokens,
         SUM(session_count) AS session_count
       FROM raw_nexus.claw_user_daily_costs
-      WHERE cost_date >= CURRENT_DATE - INTERVAL '7 days'
+      WHERE cost_date >= CURRENT_DATE - ($1 || ' days')::INTERVAL
       GROUP BY cost_date
-      ORDER BY cost_date DESC
-    `)
+      ORDER BY cost_date ASC
+    `, [days])
+
     const { rows: sessions } = await pool.query(`
       SELECT
-        session_id AS session_key,
-        first_message AS session_label,
-        sender_name,
-        SUM(total_cost_usd) AS cost,
-        MAX(last_ts) AS last_activity,
-        SUM(input_tokens) AS input_tokens,
-        SUM(output_tokens) AS output_tokens
-      FROM raw_nexus.claw_session_costs
-      WHERE session_date >= CURRENT_DATE - INTERVAL '7 days'
-      GROUP BY session_id, first_message, sender_name
+        cs.session_id AS session_key,
+        COALESCE(ol.label, cs.first_message) AS session_label,
+        cs.sender_name,
+        SUM(cs.total_cost_usd) AS cost,
+        MAX(cs.last_ts) AS last_activity,
+        SUM(cs.input_tokens) AS input_tokens,
+        SUM(cs.output_tokens) AS output_tokens
+      FROM raw_nexus.claw_session_costs cs
+      LEFT JOIN raw_nexus.octis_session_labels ol ON ol.session_key = cs.session_id
+      WHERE cs.session_date >= CURRENT_DATE - ($1 || ' days')::INTERVAL
+      GROUP BY cs.session_id, cs.first_message, cs.sender_name, ol.label
       ORDER BY cost DESC
       LIMIT 50
-    `)
+    `, [days])
+
     const { rows: todaySessions } = await pool.query(`
       SELECT
-        session_id AS session_key,
-        first_message AS session_label,
-        sender_name,
-        SUM(total_cost_usd) AS cost,
-        SUM(input_tokens) AS input_tokens,
-        SUM(output_tokens) AS output_tokens
-      FROM raw_nexus.claw_session_costs
-      WHERE session_date = CURRENT_DATE
-      GROUP BY session_id, first_message, sender_name
+        cs.session_id AS session_key,
+        COALESCE(ol.label, cs.first_message) AS session_label,
+        cs.sender_name,
+        SUM(cs.total_cost_usd) AS cost,
+        SUM(cs.input_tokens) AS input_tokens,
+        SUM(cs.output_tokens) AS output_tokens
+      FROM raw_nexus.claw_session_costs cs
+      LEFT JOIN raw_nexus.octis_session_labels ol ON ol.session_key = cs.session_id
+      WHERE cs.session_date = CURRENT_DATE
+      GROUP BY cs.session_id, cs.first_message, cs.sender_name, ol.label
       ORDER BY cost DESC
       LIMIT 20
     `)
+
     const { rows: todayRow } = await pool.query(`
       SELECT COALESCE(SUM(total_cost_usd), 0) AS today_cost
       FROM raw_nexus.claw_user_daily_costs
       WHERE cost_date = CURRENT_DATE
     `)
+
+    // Apply label cleaning to sessions that didn't have a saved override
+    const cleanSessions = (rows) => rows.map(r => ({
+      ...r,
+      cost: parseFloat(r.cost),
+      session_label: r.session_label === r.session_key ? r.session_label : cleanSessionLabel(r.session_label, r.session_key)
+    }))
+
     res.json({
       today: parseFloat(todayRow[0]?.today_cost || 0),
-      daily: daily.map(r => ({ ...r, total_cost_usd: parseFloat(r.total_cost_usd) })),
-      sessions: sessions.map(r => ({ ...r, cost: parseFloat(r.cost) })),
-      todaySessions: todaySessions.map(r => ({ ...r, cost: parseFloat(r.cost) })),
+      daily: daily.map(r => ({ ...r, total_cost_usd: parseFloat(r.total_cost_usd), date: r.date instanceof Date ? r.date.toISOString().slice(0, 10) : String(r.date).slice(0, 10) })),
+      sessions: cleanSessions(sessions),
+      todaySessions: cleanSessions(todaySessions),
     })
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -650,7 +698,7 @@ app.post('/api/push/unsubscribe', requireAuth, async (req, res) => {
 app.post('/api/push/send', async (req, res) => {
   try {
     const { userId, title, body, data } = req.body
-    const target = userId || 'user_3C2XKvwT0WPSIz0JFdd7GJIMq1V' // default to Casin
+    const target = userId || Object.keys(USER_CONFIG).find(k => USER_CONFIG[k].role === 'owner') || ''
     const { rows } = await pool.query(
       'SELECT subscription FROM raw_nexus.octis_push_subscriptions WHERE user_id = $1',
       [target]
