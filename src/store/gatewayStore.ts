@@ -509,7 +509,9 @@ export const useHiddenStore = create<HiddenState>()(
 
       hydrateFromServer: async (token?: string) => {
         const keys = await fetchHiddenFromServer(token)
-        set({ hydrated: true, hidden: new Set(keys) })
+        // Merge with local state — don't discard in-flight archives that haven't
+        // persisted to server yet (race condition on WS reconnect)
+        set(s => ({ hydrated: true, hidden: new Set([...s.hidden, ...keys]) }))
       },
 
       hide: (sessionKey) => {
