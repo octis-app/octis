@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { authFetch } from '../lib/authFetch'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -34,6 +35,8 @@ export interface ProjectTag {
 
 export type SessionStatus = 'working' | 'active' | 'stuck' | 'quiet'
 
+type ConnState = 'disconnected' | 'connecting' | 'connected' | 'suspended'
+
 interface GatewayState {
   gatewayUrl: string
   gatewayToken: string
@@ -41,15 +44,16 @@ interface GatewayState {
   connected: boolean
   ws: WebSocket | null
   pendingRequests: Record<string, unknown>
-  _reconnectAttempts?: number
-  _pingInterval?: ReturnType<typeof setInterval>
+  _reconnectAttempts: number
 
   setCredentials: (url: string, token: string, agentId?: string) => void
   setAgentId: (agentId: string) => void
   setConnected: (connected: boolean) => void
   subscribe: (fn: (msg: unknown) => void) => () => void
   connect: () => void
+  forceReconnect: () => void
   disconnect: () => void
+  sendChat: (params: { sessionKey: string; message: string; idempotencyKey?: string; deliver?: boolean }) => Promise<{ ok: boolean; via: 'ws' | 'http'; runId?: string }>
   send: (payload: unknown) => boolean
   handleMessage: (msg: GatewayMessage) => void
 }
@@ -146,6 +150,7 @@ export const useGatewayStore = create<GatewayState>()(
       connected: false,
       ws: null,
       pendingRequests: {},
+      _reconnectAttempts: 0,
 
       setCredentials: (url, token, agentId) =>
         set({ gatewayUrl: url, gatewayToken: token, agentId: agentId || '' }),
@@ -157,31 +162,32 @@ export const useGatewayStore = create<GatewayState>()(
         return () => listeners.delete(fn)
       },
 
+      // ─── Connection (simplified) ─────────────────────────────────────────────
+      // No state machine. Simple rule: onclose fires → schedule retry with backoff.
+      // visibilitychange resets backoff and calls connect() if not connected.
+      // This mirrors the pre-Apr19 code that was stable.
+
       connect: () => {
-        const { gatewayUrl, ws: oldWs } = get()
+        const { gatewayUrl, connected, ws: oldWs } = get()
         if (!gatewayUrl) return
 
-        // Clear existing ping interval
-        const { _pingInterval } = get()
-        if (_pingInterval) clearInterval(_pingInterval)
+        if (!gatewayUrl) return
+        // Guard: skip only if the socket is genuinely OPEN and connected.
+        // NOT just connected=true — that can be a zombie (iOS killed TCP silently,
+        // no onclose fired, connected flag stuck true). Check readyState too.
+        if (connected && oldWs && oldWs.readyState === WebSocket.OPEN) return
 
+        // Kill old socket cleanly
         if (oldWs) {
-          oldWs.onclose = null
-          oldWs.onerror = null
-          oldWs.onmessage = null
+          oldWs.onclose = null; oldWs.onerror = null; oldWs.onmessage = null
           try { oldWs.close() } catch {}
         }
-
         set({ connected: false, ws: null })
 
-        const wsUrl = gatewayUrl.startsWith('http')
-          ? gatewayUrl.replace(/^http/, 'ws')
-          : gatewayUrl
+        const wsUrl = gatewayUrl.startsWith('http') ? gatewayUrl.replace(/^http/, 'ws') : gatewayUrl
         const socket = new WebSocket(wsUrl)
 
-        socket.onopen = () => {
-          console.log('[octis] WS open, waiting for challenge...')
-        }
+        socket.onopen = () => { console.log('[octis] WS open, awaiting challenge...') }
 
         socket.onmessage = async (event: MessageEvent) => {
           if (get().ws !== socket) return
@@ -189,74 +195,68 @@ export const useGatewayStore = create<GatewayState>()(
             const msg = JSON.parse(event.data as string) as GatewayMessage
             get().handleMessage(msg)
             emit(msg)
-
             if (msg.type === 'event' && msg.event === 'connect.challenge') {
+              if (socket.readyState !== WebSocket.OPEN) return
               const token = get().gatewayToken
-              socket.send(
-                JSON.stringify({
-                  type: 'req',
-                  id: 'octis-connect',
-                  method: 'connect',
-                  params: {
-                    minProtocol: 3,
-                    maxProtocol: 3,
-                    client: { id: 'openclaw-control-ui', version: '0.1.0', platform: 'web', mode: 'ui' },
-                    role: 'operator',
-                    scopes: ['operator.read', 'operator.write'],
-                    caps: [],
-                    commands: [],
-                    permissions: {},
-                    auth: { token },
-                    locale: navigator.language || 'en-US',
-                    userAgent: 'octis/0.1.0',
-                  },
-                })
-              )
-              console.log('[octis] Sent connect (token-only auth)')
+              socket.send(JSON.stringify({
+                type: 'req', id: 'octis-connect', method: 'connect',
+                params: {
+                  minProtocol: 3, maxProtocol: 3,
+                  client: { id: 'openclaw-control-ui', version: '0.1.0', platform: 'web', mode: 'ui' },
+                  role: 'operator',
+                  scopes: ['operator.read', 'operator.write', 'operator.admin'],
+                  caps: [], commands: [], permissions: {},
+                  auth: { token },
+                  locale: navigator.language || 'en-US',
+                  userAgent: 'octis/0.1.0',
+                },
+              }))
+              console.log('[octis] Sent connect response')
             }
-          } catch (e) {
-            console.warn('[octis] Failed to parse message', e)
-          }
+          } catch (e) { console.warn('[octis] Failed to parse message', e) }
         }
 
-        // Keepalive ping every 25s — prevents iOS from killing idle WS connections
+        // Keepalive ping every 45s
         const pingInterval = setInterval(() => {
-          if (get().ws === socket && socket.readyState === WebSocket.OPEN) {
-            try { socket.send(JSON.stringify({ type: 'ping' })) } catch {}
-          }
-        }, 25000)
-        set({ _pingInterval: pingInterval })
+          if (get().ws === socket && socket.readyState === WebSocket.OPEN && get().connected)
+            try { socket.send(JSON.stringify({ type: 'req', id: `ping-${Date.now()}`, method: 'sessions.list', params: { limit: 1 } })) } catch {}
+        }, 45000)
 
         socket.onclose = (e: CloseEvent) => {
           clearInterval(pingInterval)
-          set({ _pingInterval: undefined })
           if (get().ws !== socket) return
-          console.log('[octis] WS closed:', e.code, e.reason)
-          set({ connected: false, ws: null })
-          if (e.code !== 1000) {
-            const delay = Math.min(1000 * Math.pow(2, get()._reconnectAttempts || 0), 30000)
-            set((s) => ({ _reconnectAttempts: (s._reconnectAttempts || 0) + 1 }))
-            console.log(`[octis] Reconnecting in ${delay}ms...`)
-            setTimeout(() => {
-              if (!useGatewayStore.getState().connected) {
-                useGatewayStore.getState().connect()
-              }
-            }, delay)
-          }
+          console.log(`[octis] WS closed (${e.code})`)
+          set({ ws: null, connected: false })
+          // Always schedule reconnect regardless of visibility.
+          // iOS fires onclose when JS resumes, so this works even after backgrounding.
+          const attempts = get()._reconnectAttempts || 0
+          const delay = Math.min(1000 * Math.pow(2, attempts), 10000)
+          console.log(`[octis] Reconnecting in ${delay}ms (attempt ${attempts + 1})`)
+          set({ _reconnectAttempts: attempts + 1 })
+          setTimeout(() => {
+            if (!useGatewayStore.getState().connected) useGatewayStore.getState().connect()
+          }, delay)
         }
 
         socket.onerror = (e: Event) => {
           if (get().ws !== socket) return
           console.warn('[octis] WS error', e)
-          set({ connected: false })
         }
 
         set({ ws: socket })
       },
 
+      // Keep forceReconnect for watchdog — kills socket and reconnects immediately
+      forceReconnect: () => {
+        const { ws } = get()
+        if (ws) { ws.onclose = null; ws.onerror = null; ws.onmessage = null; try { ws.close() } catch {} }
+        set({ ws: null, connected: false, _reconnectAttempts: 0 })
+        useGatewayStore.getState().connect()
+      },
+
       disconnect: () => {
         const { ws } = get()
-        if (ws) ws.close()
+        if (ws) { ws.onclose = null; try { ws.close() } catch {} }
         set({ ws: null, connected: false })
       },
 
@@ -267,6 +267,50 @@ export const useGatewayStore = create<GatewayState>()(
           return true
         }
         return false
+      },
+
+      // sendChat: WS-first with HTTP fallback for chat.send specifically.
+      // When WS is dead (iOS zombie TCP, disconnect, etc.), routes through
+      // the server which proxies to the gateway via its own connection.
+      sendChat: async (params: {
+        sessionKey: string
+        message: string
+        idempotencyKey?: string
+        deliver?: boolean
+      }): Promise<{ ok: boolean; via: 'ws' | 'http'; runId?: string }> => {
+        const { ws, connected } = get()
+        const API = (import.meta as Record<string, unknown>).env
+          ? ((import.meta as Record<string, unknown>).env as Record<string, string>).VITE_API_URL || ''
+          : ''
+        // Try WS if the socket is genuinely open
+        if (connected && ws && ws.readyState === WebSocket.OPEN) {
+          try {
+            ws.send(JSON.stringify({
+              type: 'req',
+              id: `chat-send-${Date.now()}`,
+              method: 'chat.send',
+              params,
+            }))
+            return { ok: true, via: 'ws' }
+          } catch (e) {
+            console.warn('[octis] WS send failed, falling back to HTTP', e)
+          }
+        }
+        // HTTP fallback — reliable even when WS is dead
+        console.log('[octis] Sending via HTTP fallback')
+        try {
+          const r = await fetch(`${API}/api/chat-send`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(params),
+          })
+          const data = await r.json() as { ok: boolean; runId?: string; error?: string }
+          return { ok: r.ok, via: 'http', runId: data.runId }
+        } catch (e) {
+          console.error('[octis] HTTP chat-send also failed', e)
+          return { ok: false, via: 'http' }
+        }
       },
 
       handleMessage: (msg) => {
@@ -291,6 +335,7 @@ export const useGatewayStore = create<GatewayState>()(
           } else {
             console.error('[octis] Auth failed:', msg.error)
             set({ connected: false })
+            useGatewayStore.getState().scheduleReconnect()
           }
         }
 
@@ -439,10 +484,8 @@ async function fetchHiddenFromServer(token?: string): Promise<string[]> {
 
 async function pushHideToServer(sessionKey: string, hide: boolean): Promise<void> {
   try {
-    const token = await getHiddenAuthToken()
-    await fetch(`${HIDDEN_API}/api/hidden-sessions/${hide ? 'hide' : 'unhide'}`, {
+    await authFetch(`${HIDDEN_API}/api/hidden-sessions/${hide ? 'hide' : 'unhide'}`, {
       method: 'POST',
-      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionKey }),
     })
@@ -529,10 +572,8 @@ async function fetchPinnedFromServer(token?: string): Promise<string[]> {
 
 async function pushPinToServer(sessionKey: string, pin: boolean): Promise<void> {
   try {
-    const token = await getPinnedAuthToken()
-    await fetch(`${PINNED_API}/api/pinned-sessions/${pin ? 'pin' : 'unpin'}`, {
+    await authFetch(`${PINNED_API}/api/pinned-sessions/${pin ? 'pin' : 'unpin'}`, {
       method: 'POST',
-      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionKey }),
     })
@@ -621,10 +662,8 @@ async function fetchServerProjectTags(token?: string): Promise<Record<string, st
 
 async function pushProjectTagToServer(sessionKey: string, projectTag: string): Promise<void> {
   try {
-    const token = await getAuthToken()
-    await fetch(`${API_BASE}/api/session-projects`, {
+    await authFetch(`${API_BASE}/api/session-projects`, {
       method: 'POST',
-      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionKey, projectTag }),
     })
@@ -634,6 +673,9 @@ async function pushProjectTagToServer(sessionKey: string, projectTag: string): P
 interface ProjectState {
   tags: Record<string, ProjectTag>
   hydrated: boolean
+  projectMeta: Record<string, { emoji: string; name: string; color: string }>
+  setProjectMeta: (meta: Record<string, { emoji: string; name: string; color: string }>) => void
+  getProjectEmoji: (slug: string) => string
   setTag: (sessionKey: string, project: string) => void
   setCard: (sessionKey: string, card: string) => void
   getTag: (sessionKey: string) => ProjectTag
@@ -646,6 +688,10 @@ export const useProjectStore = create<ProjectState>()(
     (set, get) => ({
       tags: {},
       hydrated: false,
+      projectMeta: {},
+
+      setProjectMeta: (meta) => set({ projectMeta: meta }),
+      getProjectEmoji: (slug) => get().projectMeta[slug]?.emoji || '',
 
       hydrateFromServer: async (token?: string) => {
         const serverTags = await fetchServerProjectTags(token)
@@ -713,6 +759,8 @@ interface SessionState {
   pendingProjectPrefixes: Record<string, string>
   pendingProjectInits: Record<string, string>
 
+  hiddenSessions: Session[]
+  setHiddenSessions: (sessions: Session[]) => void
   setSessions: (sessions: Session[]) => void
   getCostDelta: (sessionKey: string) => number | null
   touchSession: (sessionKey: string) => void
@@ -738,6 +786,7 @@ interface SessionState {
 
 export const useSessionStore = create<SessionState>()(persist((set, get) => ({
   sessions: [],
+  hiddenSessions: [],
   sessionActivity: {},
   sessionMeta: {},
   costHistory: {},
@@ -748,14 +797,20 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
   pendingProjectPrefixes: {},
   pendingProjectInits: {},
 
+  setHiddenSessions: (sessions) => set({ hiddenSessions: sessions }),
+
   setSessions: (sessions) => {
     // Deduplicate by key — gateway sometimes sends the same session under different forms
     const seen = new Set<string>()
     const hiddenStore = useHiddenStore.getState()
     const { agentId } = useGatewayStore.getState()
+    const hiddenCollected: Session[] = []
     const deduped = sessions.filter((s) => {
       if (!s.key || seen.has(s.key)) return false
-      if (hiddenStore.isHidden(s.key) || hiddenStore.isHidden(s.id || '') || hiddenStore.isHidden(s.sessionId || '')) return false
+      if (hiddenStore.isHidden(s.key) || hiddenStore.isHidden(s.id || '') || hiddenStore.isHidden(s.sessionId || '')) {
+        hiddenCollected.push({ ...s, key: s.key || s.id || s.sessionId || '' })
+        return false
+      }
       // Client-side agentId guard: filter out sessions belonging to other agents
       if (agentId && s.agentId && s.agentId !== agentId) return false
       // Key-prefix guard: sessions keyed as agent:<other>:... belong to a different agent
@@ -806,7 +861,7 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
           newHistory[s.key] = updated
         }
       }
-      return { sessions: [...pendingLocal, ...deduped], costHistory: newHistory }
+      return { sessions: [...pendingLocal, ...deduped], costHistory: newHistory, hiddenSessions: hiddenCollected }
     })
   },
 
@@ -1036,5 +1091,11 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
   },
 }), {
   name: 'octis-session-layout',
-  partialize: (s) => ({ activePanes: s.activePanes, paneCount: s.paneCount, manualOrder: s.manualOrder }),
+  partialize: (s) => ({
+    activePanes: s.activePanes,
+    paneCount: s.paneCount,
+    manualOrder: s.manualOrder,
+    // Persist last-known sessions so they show instantly on next open (stale-while-revalidate)
+    sessions: s.sessions.slice(0, 200),
+  }),
 }))

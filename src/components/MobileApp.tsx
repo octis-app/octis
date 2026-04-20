@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useAuth } from '../lib/auth'
+import { authFetch } from '../lib/authFetch'
 import { useGatewayStore, useSessionStore, useHiddenStore, useProjectStore, useLabelStore, Session } from '../store/gatewayStore'
 
 const API = ''  // same-origin
@@ -60,22 +61,76 @@ export default function MobileApp() {
 
   useEffect(() => { void hydrateAll() }, [hydrateAll])
 
-  // Reconnect WS when tab becomes visible — only if dead (unconditional reconnect blanks ChatPane history)
+    // Track last received WS message time — used to detect zombie connections.
+  const lastRxRef = useRef<number>(Date.now())
+  useEffect(() => {
+    const unsub = useGatewayStore.getState().subscribe(() => { lastRxRef.current = Date.now() })
+    return unsub
+  }, [])
+
+  // Watchdog: fire every 30s. If connected but 60s of silence — zombie TCP, force reconnect.
+  // Keepalive ping fires every 45s, so 60s of silence means the ping response never came.
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (!useGatewayStore.getState().connected) return
+      if (document.visibilityState !== 'visible') return
+      if (Date.now() - lastRxRef.current > 60_000) {
+        console.log('[octis] Watchdog: 60s silence — zombie TCP, reconnecting')
+        useGatewayStore.setState({ _reconnectAttempts: 0 })
+        useGatewayStore.getState().forceReconnect()
+      }
+    }, 30_000)
+    return () => clearInterval(t)
+  }, [])
+
+  // Visibility handler: reconnect on return from background.
+  // Handles both disconnected state AND zombie (connected=true but WS is dead).
   useEffect(() => {
     const handleVisibility = () => {
-      if (document.visibilityState === 'visible') {
-        const store = useGatewayStore.getState()
-        const { ws } = store
-        if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-          // Reset backoff so reconnect is immediate instead of waiting up to 30s
-          useGatewayStore.setState({ _reconnectAttempts: 0 })
-          connect()
+      if (document.visibilityState !== 'visible') return
+      setTimeout(() => {
+        if (document.visibilityState !== 'visible') return
+        const { connected } = useGatewayStore.getState()
+        useGatewayStore.setState({ _reconnectAttempts: 0 })
+        if (!connected) {
+          console.log('[octis] Visible + disconnected — reconnecting')
+          useGatewayStore.getState().connect()
+        } else {
+          // Zombie check: if connected but silent for >20s, the WS is likely dead.
+          // iOS kills the TCP connection when backgrounded but onclose may not fire.
+          const silentMs = Date.now() - lastRxRef.current
+          if (silentMs > 20_000) {
+            console.log(`[octis] Visible + zombie (${silentMs}ms silent) — force reconnecting`)
+            useGatewayStore.getState().forceReconnect()
+          }
         }
-      }
+      }, 600)
     }
     document.addEventListener('visibilitychange', handleVisibility)
     return () => document.removeEventListener('visibilitychange', handleVisibility)
-  }, [connect])
+  }, [])
+
+  // HTTP sessions fallback — fetches sessions when WS is dead or on first load.
+  // Runs every 20s so the session list stays fresh even without WS.
+  useEffect(() => {
+    const fetchSessions = async () => {
+      const { connected: c, agentId } = useGatewayStore.getState()
+      if (c) return // WS is fine, no need
+      try {
+        const url = `${API}/api/sessions-list${agentId ? `?agentId=${encodeURIComponent(agentId)}` : ''}`
+        const r = await authFetch(url)
+        if (!r.ok) return
+        const data = await r.json() as { ok: boolean; sessions?: Session[] }
+        if (data.ok && data.sessions?.length) {
+          useSessionStore.getState().setSessions(data.sessions)
+        }
+      } catch { /* best-effort */ }
+    }
+    // Fetch immediately on mount (covers the window before WS connects after hard refresh)
+    void fetchSessions()
+    const t = setInterval(fetchSessions, 20000)
+    return () => clearInterval(t)
+  }, [])
 
   // Fetch projects list for new-session picker
   useEffect(() => {
@@ -84,6 +139,10 @@ export default function MobileApp() {
       .then((data: {projects?: Array<{id: string; name: string; slug: string; emoji?: string; color?: string}>} | Array<{id: string; name: string; slug: string; emoji?: string; color?: string}>) => {
         const list = Array.isArray(data) ? data : (data.projects || [])
         setAvailableProjects(list.filter(p => p.slug !== 'others'))
+        // Publish to global store so emoji prefixes work everywhere
+        const meta: Record<string, { emoji: string; name: string; color: string }> = {}
+        for (const p of list) meta[p.slug] = { emoji: p.emoji || '📁', name: p.name, color: p.color || '#6366f1' }
+        useProjectStore.getState().setProjectMeta(meta)
       })
       .catch(() => {})
   }, [])
@@ -123,10 +182,8 @@ export default function MobileApp() {
     useProjectStore.getState().setTag(sessionKey, projectSlug)
     setShowMoveSheet(false)
     setLongPressSessionKey(null)
-    const token = await getToken()
-    fetch(`${API}/api/session-projects`, {
+    authFetch(`${API}/api/session-projects`, {
       method: 'POST',
-      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionKey, projectTag: projectSlug }),
     }).catch(() => {})
@@ -216,30 +273,8 @@ export default function MobileApp() {
   const fullChatSessionRef = useRef(fullChatSession)
   fullChatSessionRef.current = fullChatSession
 
-  if (fullChatSession) {
-    return <MobileFullChat
-      session={fullChatSession}
-      onBack={() => setFullChatSession(null)}
-      recentSessions={recentSessions}
-      onSwitch={(s) => setFullChatSession(s)}
-      onArchive={() => {
-        const current = fullChatSessionRef.current
-        if (!current) return
-        const archivedKey = current.key
-        hideSession(archivedKey)
-        if (current.id) hideSession(current.id)
-        const next = visibleSessions.find(s => s.key !== archivedKey)
-        setFullChatSession(next || null)
-      }}
-      onNewSession={() => handleNewSession()}
-    />
-  }
-
-  if (activeProject) {
-    return <MobileProjectView project={activeProject} onBack={() => setActiveProject(null)} onSwitchProject={(p) => setActiveProject(p)} />
-  }
-
   return (
+    <>
     <div
       className="flex flex-col bg-[#0f1117] overflow-hidden"
       style={{ height: '100dvh' }}
@@ -266,11 +301,13 @@ export default function MobileApp() {
 
       {/* Content */}
       <div className="flex-1 overflow-hidden flex flex-col">
-        {tab === 'projects' && (
+        {/* ProjectsGrid kept mounted — re-fetches on every unmount/mount causing "loading" flash */}
+        <div className={tab === 'projects' ? 'flex-1 min-h-0 flex flex-col' : 'hidden'}>
           <ProjectsGrid onOpenProject={(p) => setActiveProject(p)} />
-        )}
+        </div>
 
-        {tab === 'sessions' && (
+        <div className={tab === 'sessions' ? 'flex-1 overflow-hidden flex flex-col' : 'hidden'}>
+        {true && (
           <>
             {/* Filter pills + New Session */}
             <div className="flex gap-2 px-4 pt-3 pb-2 shrink-0 items-center">
@@ -325,6 +362,7 @@ export default function MobileApp() {
               <div className="flex-1 overflow-y-auto overflow-x-hidden" style={{ WebkitOverflowScrolling: 'touch', touchAction: 'pan-y' }}>
                 {filtered.map((s: Session) => {
                   const st = getStatus(s)
+                  const projEmoji = useProjectStore.getState().getProjectEmoji(useProjectStore.getState().getTag(s.key).project || '')
                   const lbl = labels[s.key] || s.label || s.key
                   const actMs = getLastActivityMs(s)
                   const ago = actMs ? (() => {
@@ -360,10 +398,12 @@ export default function MobileApp() {
                         className="flex-1 flex items-center gap-3 px-4 py-3.5 active:bg-[#1e2330] text-left min-w-0"
                       >
                         <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: statusColor }} />
+                        {projEmoji && <span className="text-sm shrink-0">{projEmoji}</span>}
                         <span className="flex-1 text-sm text-white truncate min-w-0">{lbl}</span>
                         <span className="text-xs shrink-0 font-medium" style={{ color: statusColor }}>{statusLabel}</span>
-                        {ago && <span className="text-xs text-[#4b5563] shrink-0 ml-1.5">{ago}</span>}
-                        <span className="text-[#4b5563] shrink-0 ml-1">›</span>
+                        {ago && <span className="text-xs text-[#4b5563] shrink-0">{ago}</span>}
+                        {(() => { const cost = useSessionStore.getState().sessionMeta[s.key]?.lastExchangeCost; return cost != null ? <span className="text-[10px] text-[#4b5563] shrink-0 font-mono">${(cost * 100).toFixed(1)}¢</span> : null })()}
+                        <span className="text-[#4b5563] shrink-0">›</span>
                       </button>
                       <button
                         onClick={() => {
@@ -381,24 +421,22 @@ export default function MobileApp() {
             )}
           </>
         )}
+        </div>
 
-        {tab === 'costs' && (
-          <div className="flex-1 overflow-hidden flex flex-col">
-            <div className="px-4 py-3 border-b border-[#2a3142] bg-[#181c24] shrink-0">
-              <h1 className="text-white font-semibold text-sm">💰 Costs</h1>
-            </div>
-            <CostsPanel />
+        {/* Costs + Memory kept mounted so they don't re-fetch every tab switch */}
+        <div className={`flex-1 overflow-hidden flex flex-col ${tab === 'costs' ? '' : 'hidden'}`}>
+          <div className="px-4 py-3 border-b border-[#2a3142] bg-[#181c24] shrink-0">
+            <h1 className="text-white font-semibold text-sm">💰 Costs</h1>
           </div>
-        )}
+          <CostsPanel />
+        </div>
 
-        {tab === 'memory' && (
-          <div className="flex-1 overflow-hidden flex flex-col">
-            <div className="px-4 py-3 border-b border-[#2a3142] bg-[#181c24] shrink-0">
-              <h1 className="text-white font-semibold text-sm">🧠 Memory</h1>
-            </div>
-            <MemoryPanel />
+        <div className={`flex-1 overflow-hidden flex flex-col ${tab === 'memory' ? '' : 'hidden'}`}>
+          <div className="px-4 py-3 border-b border-[#2a3142] bg-[#181c24] shrink-0">
+            <h1 className="text-white font-semibold text-sm">🧠 Memory</h1>
           </div>
-        )}
+          <MemoryPanel />
+        </div>
       </div>
 
       {/* Bottom tab bar */}
@@ -536,5 +574,39 @@ export default function MobileApp() {
         </div>
       )}
     </div>
+
+    {/* Project view overlay */}
+    {activeProject && (
+      <div className="fixed inset-0 z-20 bg-[#0f1117]">
+        <MobileProjectView
+          project={activeProject}
+          onBack={() => setActiveProject(null)}
+          onSwitchProject={(p) => setActiveProject(p)}
+        />
+      </div>
+    )}
+
+    {/* Full chat from sessions list — overlay so ProjectsGrid/Costs/Memory stay mounted */}
+    {fullChatSession && (
+      <div className="fixed inset-0 z-20 bg-[#0f1117]">
+        <MobileFullChat
+          session={fullChatSession}
+          onBack={() => setFullChatSession(null)}
+          recentSessions={recentSessions}
+          onSwitch={(s) => setFullChatSession(s)}
+          onArchive={() => {
+            const current = fullChatSessionRef.current
+            if (!current) return
+            const archivedKey = current.key
+            hideSession(archivedKey)
+            if (current.id) hideSession(current.id)
+            const next = visibleSessions.find(s => s.key !== archivedKey)
+            setFullChatSession(next || null)
+          }}
+          onNewSession={() => handleNewSession()}
+        />
+      </div>
+    )}
+    </>
   )
 }
