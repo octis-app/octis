@@ -303,6 +303,7 @@ app.post('/api/session-autoname', async (req, res) => {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${openrouterKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: 'meta-llama/llama-3.2-3b-instruct', max_tokens: 20, messages: [{ role: 'user', content: prompt }] }),
+      signal: AbortSignal.timeout(8000),
     })
     const data = await r.json()
     // OpenRouter returns OpenAI-format: choices[0].message.content
