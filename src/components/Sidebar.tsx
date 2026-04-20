@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useSessionStore, useGatewayStore, useProjectStore, useLabelStore, useHiddenStore, Session, SessionStatus } from '../store/gatewayStore'
+import { authFetch } from '../lib/authFetch'
 
 // ─── Health Circle ─────────────────────────────────────────────────────────────
 function HealthCircle({ session }: { session: Session }) {
@@ -152,7 +153,7 @@ function SessionItem({ session, isPinned, onPin, onRename, onArchive, onContinue
   isDragOver?: boolean
 }) {
   const { getStatus, getLastActivityMs, getUnreadCount } = useSessionStore()
-  const { getTag } = useProjectStore()
+  const { getTag, getProjectEmoji } = useProjectStore()
   const { getLabel, setLabel: saveLabel } = useLabelStore()
   const lastMs = getLastActivityMs(session)
   const lastSeen = lastMs ? timeAgo(lastMs) : null
@@ -234,11 +235,14 @@ function SessionItem({ session, isPinned, onPin, onRename, onArchive, onContinue
           />
         ) : (
           <span
-            className="text-[13px] text-white truncate flex-1 cursor-pointer leading-snug"
+            className="text-[13px] text-white truncate flex-1 cursor-pointer leading-snug flex items-baseline gap-1"
             onClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) onPin() }}
             onDoubleClick={() => setEditing(true)}
             title={displayLabel}
           >
+            {tag.project && getProjectEmoji(tag.project) && (
+              <span className="text-[11px] shrink-0 opacity-80">{getProjectEmoji(tag.project)}</span>
+            )}
             {displayLabel}
           </span>
         )}
@@ -426,7 +430,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
   const loadArchives = useCallback(async () => {
     setArchiveLoading(true)
     try {
-      const r = await fetch(`${API}/api/sessions/history?days=${archiveDays}`, { credentials: 'include' })
+      const r = await authFetch(`${API}/api/sessions/history?days=${archiveDays}`)
       if (r.ok) setArchiveRows(await r.json() as ArchiveRow[])
     } catch {}
     setArchiveLoading(false)
@@ -527,12 +531,11 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
   }
 
   const handleRename = (sessionKey: string, newLabel: string) => {
-    send({ type: 'req', id: `sessions-patch-${Date.now()}`, method: 'sessions.patch', params: { sessionKey, patch: { label: newLabel } } })
+    send({ type: 'req', id: `sessions-patch-${Date.now()}`, method: 'sessions.patch', params: { key: sessionKey, label: newLabel } })
     setSessions(sessions.map(s => s.key === sessionKey ? { ...s, label: newLabel } : s))
     // Persist to server so renames survive page refresh
-    void fetch(`${API}/api/session-rename`, {
+    void authFetch(`${API}/api/session-rename`, {
       method: 'POST',
-      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionKey, label: newLabel }),
     })
@@ -923,9 +926,8 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
                   const key = `session-${Date.now()}`
                   setSessions([{ key, label: 'New session', sessionKey: key }, ...sessions])
                   useProjectStore.getState().setTag(key, p.slug)
-                  fetch(`${API}/api/session-projects`, {
+                  authFetch(`${API}/api/session-projects`, {
                     method: 'POST',
-                    credentials: 'include',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ sessionKey: key, projectTag: p.slug }),
                   }).catch(() => {})

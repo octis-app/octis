@@ -48,6 +48,13 @@ export default function App() {
       .catch(() => setAuthState('login'))
   }, [])
 
+  // Global 401 interceptor — any authFetch() that gets a 401 fires this event
+  useEffect(() => {
+    const handle = () => setAuthState('login')
+    window.addEventListener('octis-unauthorized', handle)
+    return () => window.removeEventListener('octis-unauthorized', handle)
+  }, [])
+
   if (authState === 'loading') {
     return (
       <div className="flex h-screen items-center justify-center bg-[#0f1117]">
@@ -90,20 +97,23 @@ function AuthenticatedApp() {
 
   const NAV = NAV_ALL.filter(n => !n.ownerOnly || userRole === 'owner')
 
-  // Reconnect when app returns from background — but only if the WS is actually dead.
-  // Unconditional reconnect creates a new ws object → triggers ChatPane history reload → blank screen.
+  // Reconnect when app returns from background — desktop only.
+  // MobileApp has its own visibilitychange handler; running both causes double-connect
+  // (gateway sees rapid open/close → code=1006 disconnect).
   useEffect(() => {
+    if (isMobile) return // MobileApp handles its own reconnect
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
         const { ws } = useGatewayStore.getState()
         if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+          useGatewayStore.setState({ _reconnectAttempts: 0 })
           connect()
         }
       }
     }
     document.addEventListener('visibilitychange', handleVisibility)
     return () => document.removeEventListener('visibilitychange', handleVisibility)
-  }, [connect])
+  }, [connect, isMobile])
 
   // Fetch fresh gateway config from server on every sign-in
   useEffect(() => {
@@ -126,23 +136,46 @@ function AuthenticatedApp() {
         void hydrateHidden()
       } catch (e) {
         console.error('[octis] Failed to fetch gateway config:', e)
-        setShowConnect(true)
+        // Retry once after 3s before showing the connect modal.
+        // Covers the case where the API server is mid-restart (race on app load).
+        setTimeout(async () => {
+          try {
+            const r2 = await fetch(`${API}/api/gateway-config`, { credentials: 'include' })
+            if (!r2.ok) { setShowConnect(true); return }
+            const d2 = await r2.json() as { url?: string; token?: string; agentId?: string; role?: string; needsSetup?: boolean }
+            setUserRole(d2.role || null)
+            if (d2.needsSetup) { setNeedsSetup(true); return }
+            setCredentials(d2.url!, d2.token!, d2.agentId)
+            connect()
+            void hydrateProjects()
+            void hydrateHidden()
+          } catch { setShowConnect(true) }
+        }, 3000)
       }
     }
     void fetchConfig()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Re-hydrate project tags + hidden sessions when user returns to tab (picks up mobile changes)
+  // Re-hydrate project tags + hidden sessions when user returns to tab — desktop only
+  // (MobileApp calls hydrateAll on mount; running both causes redundant re-fetches)
   useEffect(() => {
+    if (isMobile) return
+    let hydrateTimer: ReturnType<typeof setTimeout> | null = null
     const onVisible = () => {
       if (document.visibilityState === 'visible') {
-        void hydrateProjects()
-        void hydrateHidden()
+        if (hydrateTimer) clearTimeout(hydrateTimer)
+        hydrateTimer = setTimeout(() => {
+          void hydrateProjects()
+          void hydrateHidden()
+        }, 2000)
       }
     }
     document.addEventListener('visibilitychange', onVisible)
-    return () => document.removeEventListener('visibilitychange', onVisible)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      if (hydrateTimer) clearTimeout(hydrateTimer)
+    }
   }, [hydrateProjects, hydrateHidden])
 
   // Seed session labels from DB on mount
@@ -445,23 +478,20 @@ function AuthenticatedApp() {
         </>
       )}
 
-      {activeNav === 'costs' && (
-        <div className="flex flex-col flex-1 overflow-hidden">
-          <div className="px-6 py-4 border-b border-[#2a3142] bg-[#181c24] shrink-0">
-            <h1 className="text-white font-semibold">💰 Costs</h1>
-          </div>
-          <CostsPanel />
+      {/* Costs + Memory kept mounted (hidden) so they don't re-fetch on every tab switch */}
+      <div className={`flex flex-col flex-1 overflow-hidden ${activeNav === 'costs' ? '' : 'hidden'}`}>
+        <div className="px-6 py-4 border-b border-[#2a3142] bg-[#181c24] shrink-0">
+          <h1 className="text-white font-semibold">💰 Costs</h1>
         </div>
-      )}
+        <CostsPanel />
+      </div>
 
-      {activeNav === 'memory' && (
-        <div className="flex flex-col flex-1 overflow-hidden">
-          <div className="px-6 py-4 border-b border-[#2a3142] bg-[#181c24] shrink-0">
-            <h1 className="text-white font-semibold">🧠 Memory</h1>
-          </div>
-          <MemoryPanel />
+      <div className={`flex flex-col flex-1 overflow-hidden ${activeNav === 'memory' ? '' : 'hidden'}`}>
+        <div className="px-6 py-4 border-b border-[#2a3142] bg-[#181c24] shrink-0">
+          <h1 className="text-white font-semibold">🧠 Memory</h1>
         </div>
-      )}
+        <MemoryPanel />
+      </div>
 
       {showConnect && <ConnectModal onClose={() => setShowConnect(false)} />}
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
