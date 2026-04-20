@@ -105,8 +105,10 @@ app.use(express.json({ limit: '10mb' }))
 
 function requireAuth(req, res, next) {
   if (AUTO_AUTH) {
-    req.user = db.prepare('SELECT * FROM users WHERE role = ? LIMIT 1').get('admin')
-      || { id: 0, email: ADMIN_EMAIL || 'admin', role: 'admin' }
+    req.user = db.prepare('SELECT * FROM users LIMIT 1').get()
+      || { id: 0, email: ADMIN_EMAIL || 'admin', role: 'owner' }
+    // Normalize role
+    if (req.user.role === 'admin') req.user.role = 'owner'
     return next()
   }
   const token = req.cookies?.octis_token
@@ -114,6 +116,11 @@ function requireAuth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Unauthorized' })
   try {
     req.user = jwt.verify(token, JWT_SECRET)
+    // Always read fresh role from DB (so role changes don't require re-login)
+    const freshUser = req.user.id ? db.prepare('SELECT role FROM users WHERE id = ?').get(req.user.id) : null
+    if (freshUser) req.user.role = freshUser.role
+    // Normalize: treat 'admin' as 'owner'
+    if (req.user.role === 'admin') req.user.role = 'owner'
     next()
   } catch {
     res.status(401).json({ error: 'Unauthorized' })
@@ -270,13 +277,9 @@ app.post('/api/session-autoname', async (req, res) => {
     if (!Array.isArray(messages) || messages.length === 0)
       return res.status(400).json({ error: 'No messages provided' })
 
-    const authProfilePath = path.join(HOME, '.openclaw/agents/main/agent/auth-profiles.json')
-    let apiKey = ''
-    try {
-      const prof = JSON.parse(await fs.readFile(authProfilePath, 'utf8'))
-      apiKey = prof?.profiles?.['anthropic:default']?.key || ''
-    } catch {}
-    if (!apiKey) return res.status(500).json({ error: 'No Anthropic API key found' })
+    // Use OpenRouter for autoname — Gemini Flash is faster and cheaper for 30-token labels
+    const openrouterKey = process.env.OPENROUTER_API_KEY || ''
+    if (!openrouterKey) return res.status(500).json({ error: 'No OpenRouter API key found' })
 
     const excerpt = messages
       .filter(m => m.role === 'user' || m.role === 'assistant')
@@ -294,16 +297,18 @@ app.post('/api/session-autoname', async (req, res) => {
     if (!excerpt.trim() || excerpt.replace(/User:|Assistant:/g, '').trim().length < 10)
       return res.status(400).json({ error: 'Not enough conversation content' })
 
-    const prompt = `Given this conversation excerpt, generate a short session title: 3–5 words.\nCapture the specific topic — be concrete, not generic. No filler words. No quotes, no period.\nExamples: "Octis Sidebar Layout Fixes", "Sage GL Batch Push", "Centurion Deal Analysis".\n\n${excerpt}\n\nTitle:`
+    const prompt = `Generate a 3-5 word session title for this conversation. Reply with ONLY the title — no quotes, no punctuation, no explanation.\nExamples: Octis Sidebar Layout Fixes | Sage GL Batch Push | Centurion Deal Analysis\n\n${excerpt}\n\nTitle:`
 
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
+    const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
-      headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'claude-haiku-4-5', max_tokens: 30, messages: [{ role: 'user', content: prompt }] }),
+      headers: { 'Authorization': `Bearer ${openrouterKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'google/gemini-2.5-flash', max_tokens: 20, messages: [{ role: 'user', content: prompt }] }),
     })
     const data = await r.json()
-    const label = (data?.content?.[0]?.text || '').trim().replace(/^[\'"]+|[\'"]+$/g, '').slice(0, 60)
-    if (!label) return res.status(500).json({ error: 'Empty label from Claude' })
+    // OpenRouter returns OpenAI-format: choices[0].message.content
+    const raw = (data?.choices?.[0]?.message?.content || '').trim()
+    const label = raw.split('\n')[0].replace(/^['"`*\-•]+|['"`*\-•]+$/g, '').trim().slice(0, 60)
+    if (!label) return res.status(500).json({ error: 'Empty label from model' })
     res.json({ label })
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -552,6 +557,54 @@ app.post('/api/session-init', requireAuth, async (req, res) => {
   }
 })
 
+// ─── HTTP fallback for sessions.list ────────────────────────────────────
+app.get('/api/sessions-list', requireAuth, async (req, res) => {
+  try {
+    const { agentId, limit = 50 } = req.query
+    const params = { limit: Math.min(Number(limit), 100) }
+    if (agentId) params.agentId = agentId
+    const [result] = await adminGwCall([{ method: 'sessions.list', params }])
+    res.json({ ok: true, sessions: result?.sessions || [] })
+  } catch (err) {
+    console.error('[octis] sessions-list HTTP error:', err.message)
+    res.status(502).json({ ok: false, error: err.message })
+  }
+})
+
+// ─── HTTP fallback for chat.history ─────────────────────────────────────
+app.get('/api/chat-history', requireAuth, async (req, res) => {
+  try {
+    const { sessionKey, limit = 50 } = req.query
+    if (!sessionKey) return res.status(400).json({ ok: false, error: 'sessionKey required' })
+    const [result] = await adminGwCall([{
+      method: 'chat.history',
+      params: { sessionKey, limit: Math.min(Number(limit), 100) }
+    }])
+    res.json({ ok: true, messages: result?.messages || [] })
+  } catch (err) {
+    console.error('[octis] chat-history HTTP error:', err.message)
+    res.status(502).json({ ok: false, error: err.message })
+  }
+})
+
+// ─── HTTP fallback for chat.send ────────────────────────────────────────────
+// Used when the client WS is dead (iOS zombie TCP). Server proxies the send
+// via its own persistent-ish admin WS connection to the gateway.
+app.post('/api/chat-send', requireAuth, async (req, res) => {
+  try {
+    const { sessionKey, message, idempotencyKey, deliver } = req.body
+    if (!sessionKey || !message) return res.status(400).json({ ok: false, error: 'sessionKey and message required' })
+    const [result] = await adminGwCall([{
+      method: 'chat.send',
+      params: { sessionKey, message, idempotencyKey, deliver: deliver !== false }
+    }])
+    res.json({ ok: true, runId: result?.runId })
+  } catch (err) {
+    console.error('[octis] chat-send HTTP error:', err.message)
+    res.status(502).json({ ok: false, error: err.message })
+  }
+})
+
 // ─── Costs (optional — requires COSTS_DB_URL) ────────────────────────────────
 
 app.get('/api/costs', requireAuth, async (req, res) => {
@@ -575,11 +628,23 @@ app.get('/api/costs', requireAuth, async (req, res) => {
       GROUP BY cs.session_id, cs.first_message, cs.sender_name, ol.label
       ORDER BY cost DESC LIMIT 50
     `, [days])
-    const { rows: todayRow } = await pgPool.query(`SELECT COALESCE(SUM(total_cost_usd),0) AS today_cost FROM raw_nexus.claw_user_daily_costs WHERE cost_date = CURRENT_DATE`)
+    // Use rolling 24h window for "today" so it matches Montreal timezone and doesn't reset at midnight UTC
+    const { rows: todayRow } = await pgPool.query(`SELECT COALESCE(SUM(total_cost_usd),0) AS today_cost FROM raw_nexus.claw_user_daily_costs WHERE cost_date >= (NOW() - INTERVAL '24 hours')::date`)
+    const { rows: todaySessionRows } = await pgPool.query(`
+      SELECT cs.session_id AS session_key, COALESCE(ol.label, cs.first_message) AS session_label,
+        cs.sender_name, SUM(cs.total_cost_usd) AS cost, MAX(cs.last_ts) AS last_activity,
+        SUM(cs.input_tokens) AS input_tokens, SUM(cs.output_tokens) AS output_tokens
+      FROM raw_nexus.claw_session_costs cs
+      LEFT JOIN raw_nexus.octis_session_labels ol ON ol.session_key = cs.session_id
+      WHERE cs.last_ts >= NOW() - INTERVAL '24 hours'
+      GROUP BY cs.session_id, cs.first_message, cs.sender_name, ol.label
+      ORDER BY cost DESC LIMIT 20
+    `)
     res.json({
       today: parseFloat(todayRow[0]?.today_cost || 0),
       daily: daily.map(r => ({ ...r, total_cost_usd: parseFloat(r.total_cost_usd), date: String(r.date).slice(0, 10) })),
       sessions: sessions.map(r => ({ ...r, cost: parseFloat(r.cost), session_label: cleanSessionLabel(r.session_label, r.session_key) })),
+      todaySessions: todaySessionRows.map(r => ({ ...r, cost: parseFloat(r.cost), session_label: cleanSessionLabel(r.session_label, r.session_key) })),
     })
   } catch (err) {
     res.status(500).json({ error: err.message })
