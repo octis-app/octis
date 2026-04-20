@@ -302,7 +302,7 @@ app.post('/api/session-autoname', async (req, res) => {
     const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${openrouterKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'anthropic/claude-haiku-4-5', max_tokens: 20, messages: [{ role: 'user', content: prompt }] }),
+      body: JSON.stringify({ model: 'meta-llama/llama-3.1-8b-instruct', max_tokens: 20, messages: [{ role: 'user', content: prompt }] }),
     })
     const data = await r.json()
     // OpenRouter returns OpenAI-format: choices[0].message.content
