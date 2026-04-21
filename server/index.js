@@ -72,6 +72,15 @@ const __serverDir = path.dirname(new URL(import.meta.url).pathname)
 const schema = readFileSync(path.join(__serverDir, '..', 'db', 'schema.sql'), 'utf8')
 db.exec(schema)
 
+// Runtime migration: ensure octis_session_ownership exists (for DBs created before this schema)
+try {
+  db.exec(`CREATE TABLE IF NOT EXISTS octis_session_ownership (
+    session_key TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    claimed_at INTEGER DEFAULT (unixepoch())
+  )`)
+} catch {}
+
 // First-run: create admin account if users table empty
 const userCount = db.prepare('SELECT COUNT(*) as n FROM users').get()
 if (userCount.n === 0 && ADMIN_EMAIL) {
@@ -116,15 +125,21 @@ function requireAuth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Unauthorized' })
   try {
     req.user = jwt.verify(token, JWT_SECRET)
-    // Always read fresh role from DB (so role changes don't require re-login)
-    const freshUser = req.user.id ? db.prepare('SELECT role FROM users WHERE id = ?').get(req.user.id) : null
-    if (freshUser) req.user.role = freshUser.role
+    // Always read fresh role + agent_id from DB (so changes don't require re-login)
+    const freshUser = req.user.id ? db.prepare('SELECT role, agent_id FROM users WHERE id = ?').get(req.user.id) : null
+    if (freshUser) { req.user.role = freshUser.role; req.user.agent_id = freshUser.agent_id }
     // Normalize: treat 'admin' as 'owner'
     if (req.user.role === 'admin') req.user.role = 'owner'
     next()
   } catch {
     res.status(401).json({ error: 'Unauthorized' })
   }
+}
+
+function requireOwner(req, res, next) {
+  const role = req.user?.role
+  if (role !== 'owner' && role !== 'admin') return res.status(403).json({ error: 'Owner access required' })
+  next()
 }
 
 // ─── Auth routes ─────────────────────────────────────────────────────────────
@@ -153,6 +168,55 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
 
 app.post('/api/auth/logout', (req, res) => {
   res.clearCookie('octis_token')
+  res.json({ ok: true })
+})
+
+// ─── User management (owner-only) ────────────────────────────────────────────────
+
+app.get('/api/users', requireAuth, requireOwner, (req, res) => {
+  const users = db.prepare('SELECT id, email, role, agent_id, created_at FROM users ORDER BY id').all()
+  res.json({ ok: true, users })
+})
+
+app.post('/api/users', requireAuth, requireOwner, async (req, res) => {
+  const { email, password, role = 'viewer', agentId = 'main' } = req.body
+  if (!email || !password) return res.status(400).json({ error: 'email and password required' })
+  const validRoles = ['owner', 'admin', 'viewer']
+  if (!validRoles.includes(role)) return res.status(400).json({ error: 'Invalid role' })
+  try {
+    const hash = await bcrypt.hash(password, 12)
+    const result = db.prepare('INSERT INTO users (email, password_hash, role, agent_id) VALUES (?, ?, ?, ?)').run(email, hash, role, agentId)
+    res.json({ ok: true, user: { id: result.lastInsertRowid, email, role, agent_id: agentId } })
+  } catch (e) {
+    if (e.message.includes('UNIQUE')) return res.status(409).json({ error: 'Email already exists' })
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.patch('/api/users/:id', requireAuth, requireOwner, async (req, res) => {
+  const id = parseInt(req.params.id)
+  if (id === req.user.id) return res.status(400).json({ error: 'Cannot modify your own account here' })
+  const { role, agentId, password } = req.body
+  if (role) {
+    const validRoles = ['owner', 'admin', 'viewer']
+    if (!validRoles.includes(role)) return res.status(400).json({ error: 'Invalid role' })
+    db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, id)
+  }
+  if (agentId !== undefined) db.prepare('UPDATE users SET agent_id = ? WHERE id = ?').run(agentId, id)
+  if (password) {
+    const hash = await bcrypt.hash(password, 12)
+    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hash, id)
+  }
+  const updated = db.prepare('SELECT id, email, role, agent_id FROM users WHERE id = ?').get(id)
+  if (!updated) return res.status(404).json({ error: 'User not found' })
+  res.json({ ok: true, user: updated })
+})
+
+app.delete('/api/users/:id', requireAuth, requireOwner, (req, res) => {
+  const id = parseInt(req.params.id)
+  if (id === req.user.id) return res.status(400).json({ error: 'Cannot delete your own account' })
+  const result = db.prepare('DELETE FROM users WHERE id = ?').run(id)
+  if (result.changes === 0) return res.status(404).json({ error: 'User not found' })
   res.json({ ok: true })
 })
 
@@ -262,11 +326,11 @@ clear().catch(e => { document.getElementById('s').textContent = 'Error: ' + e })
 // ─── Gateway config ───────────────────────────────────────────────────────────
 
 app.get('/api/gateway-config', requireAuth, (req, res) => {
-  res.json({ url: GATEWAY_URL, token: GATEWAY_TOKEN, agentId: 'main', role: req.user.role })
+  res.json({ url: GATEWAY_URL, token: GATEWAY_TOKEN, agentId: req.user.agent_id || 'main', role: req.user.role })
 })
 
 app.get('/api/me', requireAuth, (req, res) => {
-  res.json({ userId: String(req.user.id), role: req.user.role, agentId: 'main', email: req.user.email })
+  res.json({ userId: String(req.user.id), role: req.user.role, agentId: req.user.agent_id || 'main', email: req.user.email })
 })
 
 // ─── Session autoname ─────────────────────────────────────────────────────────
@@ -302,7 +366,7 @@ app.post('/api/session-autoname', async (req, res) => {
     const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${openrouterKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'meta-llama/llama-3.2-3b-instruct', max_tokens: 20, messages: [{ role: 'user', content: prompt }] }),
+      body: JSON.stringify({ model: req.body.model || process.env.OCTIS_RENAME_MODEL || 'meta-llama/llama-3.2-3b-instruct', max_tokens: 20, messages: [{ role: 'user', content: prompt }] }),
       signal: AbortSignal.timeout(8000),
     })
     const data = await r.json()
@@ -472,6 +536,37 @@ app.post('/api/pinned-sessions/unpin', requireAuth, (req, res) => {
   res.json({ ok: true })
 })
 
+// ─── Session ownership ──────────────────────────────────────────────────────
+// Tracks which user created/opened each session.
+// Owners (role=owner/admin) always see all sessions.
+// Viewers only see sessions they have claimed.
+
+function claimSessionOwnership(sessionKey, userId) {
+  if (!sessionKey || !userId) return
+  try {
+    db.prepare('INSERT OR IGNORE INTO octis_session_ownership (session_key, user_id) VALUES (?, ?)').run(sessionKey, userId)
+  } catch {}
+}
+
+// Claim a session (called from client when opening or creating a session)
+app.post('/api/session-ownership/claim', requireAuth, (req, res) => {
+  const { sessionKey } = req.body
+  if (!sessionKey) return res.status(400).json({ error: 'sessionKey required' })
+  claimSessionOwnership(sessionKey, req.user.id)
+  res.json({ ok: true })
+})
+
+// Return session keys this user owns (used by client to filter session list)
+app.get('/api/my-sessions', requireAuth, (req, res) => {
+  const role = req.user.role
+  if (role === 'owner' || role === 'admin') {
+    // Owners see everything — return null to signal "no filter"
+    return res.json({ all: true, sessionKeys: [] })
+  }
+  const rows = db.prepare('SELECT session_key FROM octis_session_ownership WHERE user_id = ?').all(req.user.id)
+  res.json({ all: false, sessionKeys: rows.map(r => r.session_key) })
+})
+
 // ─── Push notifications ───────────────────────────────────────────────────────
 
 app.get('/api/push/vapid-public-key', (req, res) => {
@@ -551,6 +646,7 @@ app.post('/api/session-init', requireAuth, async (req, res) => {
       { method: 'sessions.patch', params: { key: sessionKey, label: `${emoji} ${name}`.trim() } },
       { method: 'chat.inject', params: { sessionKey, message: contextNote, label: '📁 Project' } },
     ])
+    claimSessionOwnership(sessionKey, req.user.id)
     res.json({ ok: true })
   } catch (err) {
     console.error('[octis] session-init error:', err.message)
@@ -599,6 +695,7 @@ app.post('/api/chat-send', requireAuth, async (req, res) => {
       method: 'chat.send',
       params: { sessionKey, message, idempotencyKey, deliver: deliver !== false }
     }])
+    claimSessionOwnership(sessionKey, req.user.id)
     res.json({ ok: true, runId: result?.runId })
   } catch (err) {
     console.error('[octis] chat-send HTTP error:', err.message)
@@ -686,12 +783,8 @@ app.get('/api/sessions/history', async (req, res) => {
 
 // ─── Todos ────────────────────────────────────────────────────────────────────
 
-const SECTION_TO_PROJECT = {
-  'Octis': 'Octis', 'Quantum Engine': 'Quantum', 'Beatimo Portal': 'Beatimo',
-  'Ops Firm': 'Ops', 'Prospection Pipeline': 'Centurion', 'CRM Decision': 'Beatimo',
-  'Sage': 'Infra', 'Building Stack': 'Infra', 'Monday.com': 'Beatimo',
-  'Billing Generator': 'Beatimo', 'Casin Personal': 'Personal', 'This Week': 'Personal', 'Backlog': 'Personal',
-}
+// Map TODOS.md section headers to project slugs — customize for your workspace
+const SECTION_TO_PROJECT = {}
 
 function parseTodosFile(content) {
   const lines = content.split('\n')

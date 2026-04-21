@@ -1,9 +1,31 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useAuth } from '../lib/auth'
 import { useLabelStore, useSessionStore } from '../store/gatewayStore'
 import { usePushNotifications } from '../hooks/usePushNotifications'
+import { useAuthStore } from '../store/authStore'
+import { authFetch } from '../lib/authFetch'
 
 const API = import.meta.env.VITE_API_URL || ''
+
+// Quick Commands helpers
+const QUICK_COMMAND_DEFAULTS = {
+  brief: "Give me a 3-sentence status update: (1) what you last did, (2) what you're working on now, (3) what's next. No fluff.",
+  away: "I'm stepping away for a while. Please do the following:\n1. Summarize what you're currently working on (1-2 sentences).\n2. List anything you're blocked on or need from me before I go - be specific (credentials, a decision, a file, etc.).\n3. List everything you CAN do autonomously while I'm gone, in order.\n4. Estimate how long you can run without me.\nBe concise. I'll read this on my phone.",
+  save: "💾 checkpoint - save any key decisions, context, or tasks from this session to MEMORY.md and TODOS.md now. One-line ack only.",
+  archive_msg: "💾 Final save - write any remaining decisions, tasks, or context to MEMORY.md and TODOS.md. Reply with NO_REPLY only.",
+}
+
+function getQuickCommands() {
+  try {
+    return { ...QUICK_COMMAND_DEFAULTS, ...JSON.parse(localStorage.getItem('octis-quick-commands') || '{}') }
+  } catch { return { ...QUICK_COMMAND_DEFAULTS } }
+}
+
+function saveQuickCommand(key: keyof typeof QUICK_COMMAND_DEFAULTS, value: string) {
+  const current = getQuickCommands()
+  current[key] = value
+  localStorage.setItem('octis-quick-commands', JSON.stringify(current))
+}
 
 function Toggle({ value, onChange, label, description }: { value: boolean; onChange: (v: boolean) => void; label: string; description?: string }) {
   return (
@@ -35,6 +57,9 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [autoRename, setAutoRename] = useState(() =>
     localStorage.getItem('octis-auto-rename') !== 'false'
   )
+  const [renameModel, setRenameModel] = useState(() =>
+    localStorage.getItem('octis-rename-model') || ''
+  )
   const [noiseHidden, setNoiseHidden] = useState(() =>
     localStorage.getItem('octis-noise-hidden') !== 'false'
   )
@@ -49,6 +74,57 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [renameStatus, setRenameStatus] = useState('')
 
   const save = (key: string, val: boolean) => localStorage.setItem(key, String(val))
+
+  // User management (owner only)
+  const { role: authRole } = useAuthStore()
+  const isOwner = authRole === 'owner' || authRole === 'admin'
+  type OctisUser = { id: number; email: string; role: string; agent_id: string; created_at: number }
+  const [users, setUsers] = useState<OctisUser[]>([])
+  const [usersLoading, setUsersLoading] = useState(false)
+  const [newEmail, setNewEmail] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [newRole, setNewRole] = useState('viewer')
+  const [addingUser, setAddingUser] = useState(false)
+  const [userMsg, setUserMsg] = useState('')
+
+  useEffect(() => {
+    if (!isOwner) return
+    setUsersLoading(true)
+    authFetch(`${API}/api/users`)
+      .then(r => r.json())
+      .then(d => { if (d.ok) setUsers(d.users) })
+      .catch(() => {})
+      .finally(() => setUsersLoading(false))
+  }, [isOwner])
+
+  const handleAddUser = async () => {
+    if (!newEmail || !newPassword) { setUserMsg('Email and password required'); return }
+    setAddingUser(true); setUserMsg('')
+    try {
+      const res = await authFetch(`${API}/api/users`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: newEmail, password: newPassword, role: newRole, agentId: 'main' }),
+      })
+      const d = await res.json()
+      if (!res.ok) { setUserMsg(`❌ ${d.error}`); return }
+      setUsers(prev => [...prev, d.user])
+      setNewEmail(''); setNewPassword(''); setNewRole('viewer')
+      setUserMsg(`✅ Added ${d.user.email}`)
+    } catch { setUserMsg('❌ Network error') }
+    finally { setAddingUser(false) }
+  }
+
+  const handleDeleteUser = async (u: OctisUser) => {
+    if (!confirm(`Remove ${u.email}? They will lose access immediately.`)) return
+    try {
+      const res = await authFetch(`${API}/api/users/${u.id}`, { method: 'DELETE' })
+      const d = await res.json()
+      if (!res.ok) { setUserMsg(`❌ ${d.error}`); return }
+      setUsers(prev => prev.filter(x => x.id !== u.id))
+      setUserMsg(`Removed ${u.email}`)
+    } catch { setUserMsg('❌ Network error') }
+  }
 
   const handleRenameAll = async () => {
     setRenaming(true)
@@ -131,6 +207,18 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
             label="Auto-rename sessions"
             description="Automatically use first message as session name"
           />
+          {autoRename && (
+            <div className="mt-3">
+              <div className="text-xs text-[#6b7280] mb-1">Rename model <span className="text-[#4b5563]">(blank = server default)</span></div>
+              <input
+                type="text"
+                value={renameModel}
+                onChange={e => { setRenameModel(e.target.value); localStorage.setItem('octis-rename-model', e.target.value) }}
+                placeholder="e.g. anthropic/claude-haiku-4-5"
+                className="w-full bg-[#0f1117] border border-[#2a3142] rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-[#6366f1]"
+              />
+            </div>
+          )}
 
           <div className="mt-3 flex gap-2">
             <button
@@ -151,6 +239,33 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
           {renameStatus && (
             <div className="mt-2 text-xs text-[#6b7280] bg-[#0f1117] rounded-lg px-3 py-2">{renameStatus}</div>
           )}
+
+          {/* Quick Commands */}
+          <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-3 mt-5">Quick Commands</div>
+          {(['brief', 'away', 'save', 'archive_msg'] as const).map((key) => {
+            const labels = { brief: '💬 Brief Me', away: '🚪 Stepping Away', save: '💾 Save', archive_msg: '📦 Archive msg' }
+            const notes = { brief: '', away: '', save: '', archive_msg: ' (also hides session from sidebar)' }
+            return (
+              <div key={key} className="mb-4">
+                <div className="flex items-center justify-between mb-1">
+                  <div className="text-sm text-white font-medium">{labels[key]}</div>
+                  <button
+                    onClick={() => saveQuickCommand(key, QUICK_COMMAND_DEFAULTS[key])}
+                    className="text-[10px] text-[#6b7280] hover:text-white transition-colors"
+                  >
+                    Reset
+                  </button>
+                </div>
+                <textarea
+                  value={getQuickCommands()[key]}
+                  onChange={(e) => saveQuickCommand(key, e.target.value)}
+                  className="w-full bg-[#0f1117] border border-[#2a3142] rounded-lg px-3 py-2 text-xs text-[#a5b4fc] font-mono focus:outline-none focus:border-[#6366f1] resize-none"
+                  rows={3}
+                />
+                {notes[key] && <div className="text-[10px] text-[#4b5563] mt-1">{notes[key]}</div>}
+              </div>
+            )
+          })}
 
           {/* Notifications */}
           <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-3 mt-5">Notifications</div>
@@ -184,6 +299,80 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
           <div className="bg-[#0f1117] rounded-lg px-3 py-2 text-xs text-[#6b7280] font-mono">
             {localStorage.getItem('octis-gateway') ? JSON.parse(localStorage.getItem('octis-gateway') || '{}').gatewayUrl : 'Not configured'}
           </div>
+
+          {/* Users — owner only */}
+          {isOwner && (
+            <>
+              <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-3 mt-5">Users</div>
+
+              {/* Existing users list */}
+              {usersLoading ? (
+                <div className="text-xs text-[#6b7280] py-2">Loading…</div>
+              ) : (
+                <div className="space-y-1.5 mb-4">
+                  {users.map(u => (
+                    <div key={u.id} className="flex items-center justify-between bg-[#0f1117] rounded-lg px-3 py-2">
+                      <div className="min-w-0">
+                        <div className="text-sm text-white truncate">{u.email}</div>
+                        <div className="text-[10px] text-[#6b7280] mt-0.5">
+                          <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium mr-1.5 ${
+                            u.role === 'owner' || u.role === 'admin' ? 'bg-[#312e81] text-[#a5b4fc]' : 'bg-[#1f2937] text-[#9ca3af]'
+                          }`}>{u.role}</span>
+                          agent: {u.agent_id || 'main'}
+                        </div>
+                      </div>
+                      {(u.role !== 'owner' && u.role !== 'admin') && (
+                        <button
+                          onClick={() => handleDeleteUser(u)}
+                          className="ml-3 shrink-0 text-[#6b7280] hover:text-red-400 transition-colors text-sm px-1.5"
+                          title="Remove user"
+                        >✕</button>
+                      )}
+                    </div>
+                  ))}
+                  {users.length === 0 && <div className="text-xs text-[#4b5563]">No other users yet.</div>}
+                </div>
+              )}
+
+              {/* Add user form */}
+              <div className="bg-[#0f1117] rounded-lg px-3 py-3 space-y-2">
+                <div className="text-xs text-[#6b7280] font-medium mb-2">Add user</div>
+                <input
+                  type="email"
+                  placeholder="Email address"
+                  value={newEmail}
+                  onChange={e => setNewEmail(e.target.value)}
+                  className="w-full bg-[#181c24] border border-[#2a3142] rounded-lg px-3 py-1.5 text-sm text-white placeholder-[#4b5563] focus:outline-none focus:border-[#6366f1]"
+                />
+                <input
+                  type="password"
+                  placeholder="Password"
+                  value={newPassword}
+                  onChange={e => setNewPassword(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && handleAddUser()}
+                  className="w-full bg-[#181c24] border border-[#2a3142] rounded-lg px-3 py-1.5 text-sm text-white placeholder-[#4b5563] focus:outline-none focus:border-[#6366f1]"
+                />
+                <div className="flex items-center gap-2">
+                  <select
+                    value={newRole}
+                    onChange={e => setNewRole(e.target.value)}
+                    className="flex-1 bg-[#181c24] border border-[#2a3142] rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-[#6366f1]"
+                  >
+                    <option value="viewer">Viewer (read + reply)</option>
+                    <option value="admin">Admin (full access)</option>
+                  </select>
+                  <button
+                    onClick={handleAddUser}
+                    disabled={addingUser}
+                    className="shrink-0 px-3 py-1.5 bg-[#6366f1] hover:bg-[#818cf8] disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
+                  >
+                    {addingUser ? '…' : 'Add'}
+                  </button>
+                </div>
+                {userMsg && <div className="text-xs text-[#6b7280] pt-1">{userMsg}</div>}
+              </div>
+            </>
+          )}
 
           {/* About */}
           <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-3 mt-5">About</div>

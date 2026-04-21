@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useAuth } from '../lib/auth'
 import { useSessionStore, useProjectStore, useHiddenStore, Session } from '../store/gatewayStore'
 
@@ -21,8 +21,8 @@ const API = (import.meta.env.VITE_API_URL as string) || ''
 
 export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
   const { getToken } = useAuth()
-  const { sessions, getStatus } = useSessionStore()
-  const { getTag } = useProjectStore()
+  const { sessions, hiddenSessions, getStatus } = useSessionStore()
+  const { getTag, setProjectMeta } = useProjectStore()
   const { isHidden } = useHiddenStore()
 
   // Must match MobileProjectView's filters exactly so counts are accurate
@@ -40,10 +40,50 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
   const [newName, setNewName] = useState('')
   const [newEmoji, setNewEmoji] = useState('📁')
 
+  // Emoji editing state
+  const [editingEmojiId, setEditingEmojiId] = useState<string | null>(null)
+  const [editEmojiValue, setEditEmojiValue] = useState('')
+  const emojiInputRef = useRef<HTMLInputElement>(null)
+
+  const QUICK_EMOJIS = ['📁', '📂', '🏢', '🏠', '💼', '🚀', '⚙️', '💡', '🔬', '🎯', '📊', '🐙']
+
+  const startEmojiEdit = useCallback((e: React.MouseEvent, project: Project) => {
+    e.stopPropagation()
+    setEditingEmojiId(project.id)
+    setEditEmojiValue(project.emoji || '📁')
+    setTimeout(() => emojiInputRef.current?.focus(), 50)
+  }, [])
+
+  const saveEmojiEdit = useCallback(async (project: Project, overrideEmoji?: string) => {
+    const newVal = (overrideEmoji ?? editEmojiValue).trim() || '📁'
+    setEditingEmojiId(null)
+    if (newVal === project.emoji) return
+    await fetch(`${API}/api/projects/${project.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ emoji: newVal }),
+    })
+    setProjects(prev => prev.map(p => p.id === project.id ? { ...p, emoji: newVal } : p))
+  }, [editEmojiValue])
+
+  const cancelEmojiEdit = useCallback(() => {
+    setEditingEmojiId(null)
+    setEditEmojiValue('')
+  }, [])
+
   useEffect(() => {
     fetch(`${API}/api/projects`)
       .then(r => r.json())
-      .then(d => { setProjects(d.projects || []); setLoading(false) })
+      .then(d => {
+        const list = d.projects || []
+        setProjects(list)
+        setLoading(false)
+        // Publish emoji/name/color to global store so Sidebar + pills can prefix sessions
+        const meta: Record<string, { emoji: string; name: string; color: string }> = {}
+        for (const p of list) meta[p.slug] = { emoji: p.emoji || '📁', name: p.name, color: p.color || '#6366f1' }
+        setProjectMeta(meta)
+      })
       .catch(() => setLoading(false))
   }, [])
 
@@ -52,7 +92,8 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
     const token = await getToken()
     const r = await fetch(`${API}/api/projects`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', credentials: 'include' },
+      headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
       body: JSON.stringify({ name: newName.trim(), emoji: newEmoji }),
     })
     const d = await r.json()
@@ -160,20 +201,87 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
             const count = sessionCountForProject(project.slug)
             const active = activeCountForProject(project.slug)
             const lastActivity = lastActivityForProject(project.slug)
+            const isEditingEmoji = editingEmojiId === project.id
 
             return (
-              <button
+              <div
                 key={project.id}
-                onClick={() => onOpenProject(project)}
-                className="text-left bg-[#181c24] hover:bg-[#1e2330] border border-[#2a3142] hover:border-[#3a4152] rounded-2xl p-5 transition-all group"
+                role="button"
+                tabIndex={0}
+                onClick={() => !isEditingEmoji && onOpenProject(project)}
+                onKeyDown={e => { if ((e.key === 'Enter' || e.key === ' ') && !isEditingEmoji) onOpenProject(project) }}
+                className="text-left bg-[#181c24] hover:bg-[#1e2330] border border-[#2a3142] hover:border-[#3a4152] rounded-2xl p-5 transition-all group cursor-pointer select-none"
               >
                 {/* Emoji + status dot */}
                 <div className="flex items-start justify-between mb-3">
-                  <div
-                    className="w-12 h-12 rounded-2xl flex items-center justify-center text-2xl shrink-0"
-                    style={{ background: project.color + '22', border: `1px solid ${project.color}44` }}
-                  >
-                    {project.emoji}
+                  <div className="relative">
+                    {/* Emoji icon — not directly clickable; use edit button instead */}
+                    <div
+                      className="w-12 h-12 rounded-2xl flex items-center justify-center text-2xl shrink-0 relative"
+                      style={{ background: project.color + '22', border: `1px solid ${project.color}44` }}
+                    >
+                      {project.emoji}
+                    </div>
+                    {/* Dedicated edit button — only appears on card hover, positioned outside emoji hit zone */}
+                    <button
+                      type="button"
+                      className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-[#2a3142] hover:bg-[#6366f1] text-[10px] flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all shadow-md"
+                      onClick={(e) => { e.stopPropagation(); startEmojiEdit(e, project) }}
+                      title="Change icon"
+                    >✏️</button>
+
+                    {/* Emoji picker popover */}
+                    {isEditingEmoji && (
+                      <div
+                        className="absolute top-14 left-0 z-50 bg-[#0f1117] border border-[#6366f1]/60 rounded-2xl p-4 shadow-2xl"
+                        style={{ width: 260 }}
+                        onClick={e => e.stopPropagation()}
+                      >
+                        {/* Header */}
+                        <div className="flex items-center justify-between mb-3">
+                          <span className="text-xs text-[#9ca3af] font-medium">Change icon</span>
+                          <button
+                            type="button"
+                            className="text-[#4b5563] hover:text-white text-sm leading-none px-1"
+                            onClick={e => { e.stopPropagation(); cancelEmojiEdit() }}
+                          >✕</button>
+                        </div>
+
+                        {/* Quick picks */}
+                        <p className="text-[10px] text-[#4b5563] mb-1.5">Quick pick</p>
+                        <div className="flex flex-wrap gap-1 mb-3">
+                          {QUICK_EMOJIS.map(em => (
+                            <button
+                              key={em}
+                              type="button"
+                              className="w-9 h-9 rounded-xl bg-[#181c24] hover:bg-[#6366f1]/30 hover:ring-1 hover:ring-[#6366f1] text-xl transition-all flex items-center justify-center"
+                              onClick={e => { e.stopPropagation(); saveEmojiEdit(project, em) }}
+                            >{em}</button>
+                          ))}
+                        </div>
+
+                        {/* Custom input */}
+                        <p className="text-[10px] text-[#4b5563] mb-1.5">Or type any emoji</p>
+                        <div className="flex gap-2">
+                          <input
+                            ref={emojiInputRef}
+                            type="text"
+                            className="w-14 bg-[#181c24] border border-[#2a3142] focus:border-[#6366f1] rounded-lg px-2 py-1.5 text-center text-xl outline-none"
+                            value={editEmojiValue}
+                            onChange={e => setEditEmojiValue(e.target.value)}
+                            onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter') saveEmojiEdit(project); if (e.key === 'Escape') cancelEmojiEdit() }}
+                            maxLength={2}
+                            placeholder="📁"
+                            onClick={e => e.stopPropagation()}
+                          />
+                          <button
+                            type="button"
+                            className="flex-1 bg-[#6366f1] hover:bg-[#818cf8] text-white rounded-lg text-xs font-medium transition-colors"
+                            onClick={e => { e.stopPropagation(); saveEmojiEdit(project) }}
+                          >Save</button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                   {active > 0 && (
                     <div className="flex items-center gap-1.5 mt-1">
@@ -202,16 +310,16 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
                     <span className="text-[#4b5563] text-xs">{formatAgo(lastActivity)}</span>
                   )}
                 </div>
-              </button>
+              </div>
             )
           })}
 
-          {/* Others — always-present catch-all for untagged sessions */}
+          {/* Untagged Active Sessions — catch-all for untagged sessions */}
           {(() => {
             const othersCount = sessions.filter((s: Session) => isVisibleSession(s) && !getTag(s.key).project).length
             const othersActive = sessions.filter((s: Session) => isVisibleSession(s) && !getTag(s.key).project && getStatus(s) === 'active').length
             const othersActivity = lastActivityForProject('others')
-            const othersProject = { id: 'others', name: 'Others', slug: 'others', emoji: '📂', color: '#6b7280', description: 'Sessions not assigned to a project', memory_file: '', position: 9999 }
+            const othersProject = { id: 'others', name: 'Untagged Active Sessions', slug: 'others', emoji: '📂', color: '#6b7280', description: 'Active sessions not assigned to any project', memory_file: '', position: 9999 }
             return (
               <button
                 key="others"
@@ -229,13 +337,44 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
                     </div>
                   )}
                 </div>
-                <div className="text-white font-semibold text-base mb-1 group-hover:text-[#a5b4fc] transition-colors">Others</div>
-                <div className="text-[#6b7280] text-xs mb-3 line-clamp-2">Sessions not assigned to a project</div>
+                <div className="text-white font-semibold text-base mb-1 group-hover:text-[#a5b4fc] transition-colors">Untagged Active Sessions</div>
+                <div className="text-[#6b7280] text-xs mb-3 line-clamp-2">Active sessions not assigned to any project</div>
                 <div className="flex items-center justify-between mt-3 pt-3 border-t border-[#2a3142]">
                   <span className="text-[#4b5563] text-xs">
                     {othersCount === 0 ? 'No sessions' : `${othersCount} session${othersCount !== 1 ? 's' : ''}`}
                   </span>
                   {othersActivity && <span className="text-[#4b5563] text-xs">{formatAgo(othersActivity)}</span>}
+                </div>
+              </button>
+            )
+          })()}
+
+          {/* Archived chats — hidden sessions ordered by last activity */}
+          {(() => {
+            const archivedCount = hiddenSessions.length
+            const archivedTs = hiddenSessions
+              .map((s: Session) => s.lastActivity ? new Date(s.lastActivity as string).getTime() : 0)
+              .filter(t => t > 0)
+            const archivedActivity = archivedTs.length ? new Date(Math.max(...archivedTs)) : null
+            const archivedProject = { id: 'archived', name: 'Archived', slug: 'archived', emoji: '🗂️', color: '#6b7280', description: 'Previously archived sessions', memory_file: '', position: 10000 }
+            return (
+              <button
+                key="archived"
+                onClick={() => onOpenProject(archivedProject)}
+                className="text-left bg-[#181c24]/70 hover:bg-[#1e2330] border border-[#2a3142]/70 hover:border-[#3a4152] rounded-2xl p-5 transition-all group opacity-80 hover:opacity-100"
+              >
+                <div className="flex items-start justify-between mb-3">
+                  <div className="w-12 h-12 rounded-2xl flex items-center justify-center text-2xl shrink-0 bg-[#6b728018] border border-[#6b728033]">
+                    🗂️
+                  </div>
+                </div>
+                <div className="text-[#9ca3af] font-semibold text-base mb-1 group-hover:text-[#a5b4fc] transition-colors">Archived</div>
+                <div className="text-[#6b7280] text-xs mb-3 line-clamp-2">Previously archived sessions</div>
+                <div className="flex items-center justify-between mt-3 pt-3 border-t border-[#2a3142]/70">
+                  <span className="text-[#4b5563] text-xs">
+                    {archivedCount === 0 ? 'No archived sessions' : `${archivedCount} session${archivedCount !== 1 ? 's' : ''}`}
+                  </span>
+                  {archivedActivity && <span className="text-[#4b5563] text-xs">{formatAgo(archivedActivity)}</span>}
                 </div>
               </button>
             )

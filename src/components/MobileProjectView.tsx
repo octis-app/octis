@@ -16,7 +16,14 @@ const API = (import.meta.env.VITE_API_URL as string) || ''
 
 export default function MobileProjectView({ project, onBack, onSwitchProject }: MobileProjectViewProps) {
   const { getToken } = useAuth()
-  const { sessions, hiddenSessions, getStatus, setSessions, setPendingProjectPrefix, setPendingProjectInit } = useSessionStore()
+  // Selective subscriptions: sessions and hiddenSessions only re-render this component
+  // when the session list itself changes, not on every streaming token or chat event.
+  const sessions = useSessionStore(s => s.sessions)
+  const hiddenSessions = useSessionStore(s => s.hiddenSessions)
+  const getStatus = useSessionStore(s => s.getStatus)
+  const setSessions = useSessionStore(s => s.setSessions)
+  const setPendingProjectPrefix = useSessionStore(s => s.setPendingProjectPrefix)
+  const setPendingProjectInit = useSessionStore(s => s.setPendingProjectInit)
   // Helper to read live sessions from store (avoids stale closure in async handlers)
   const getLiveSessions = () => useSessionStore.getState().sessions
   const { getTag, setTag, getProjectEmoji } = useProjectStore()

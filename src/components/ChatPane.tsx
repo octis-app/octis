@@ -1,6 +1,21 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { useGatewayStore, useSessionStore, useProjectStore, useLabelStore, useDraftStore, useHiddenStore, Session } from '../store/gatewayStore'
 import { authFetch } from '../lib/authFetch'
+import { useAuthStore } from '../store/authStore'
+
+// Quick Commands helpers
+const QUICK_COMMAND_DEFAULTS = {
+  brief: "Give me a 3-sentence status update: (1) what you last did, (2) what you're working on now, (3) what's next. No fluff.",
+  away: "I'm stepping away for a while. Please do the following:\n1. Summarize what you're currently working on (1-2 sentences).\n2. List anything you're blocked on or need from me before I go - be specific (credentials, a decision, a file, etc.).\n3. List everything you CAN do autonomously while I'm gone, in order.\n4. Estimate how long you can run without me.\nBe concise. I'll read this on my phone.",
+  save: "💾 checkpoint - save any key decisions, context, or tasks from this session to MEMORY.md and TODOS.md now. One-line ack only.",
+  archive_msg: "💾 Final save - write any remaining decisions, tasks, or context to MEMORY.md and TODOS.md. Reply with NO_REPLY only.",
+}
+
+function getQuickCommands() {
+  try {
+    return { ...QUICK_COMMAND_DEFAULTS, ...JSON.parse(localStorage.getItem('octis-quick-commands') || '{}') }
+  } catch { return { ...QUICK_COMMAND_DEFAULTS } }
+}
 
 // ─── Session cost/health badge (for panel header) ─────────────────────────────
 function SessionCostBadge({ sessionKey }: { sessionKey: string }) {
@@ -440,6 +455,12 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   useEffect(() => {
     if (sessionKey) clearUnread(sessionKey)
   }, [sessionKey, clearUnread])
+
+  // Claim session ownership when a session is opened
+  const { claimSession } = useAuthStore()
+  useEffect(() => {
+    if (sessionKey) claimSession(sessionKey)
+  }, [sessionKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Trigger a sessions.list refresh on mount so the cost badge populates immediately
   // (Sidebar polls every 30s - without this, a newly-opened pane can wait up to 30s)
@@ -882,7 +903,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     void fetch(`${API}/api/session-autoname`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: slim }),
+      body: JSON.stringify({ messages: slim, model: localStorage.getItem('octis-rename-model') || undefined }),
     }).then((r) => r.json()).then((data: { label?: string }) => {
       const label = data.label
       if (!label) return
@@ -1415,7 +1436,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
       const res = await fetch(`${API}/api/session-autoname`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: slim }),
+        body: JSON.stringify({ messages: slim, model: localStorage.getItem('octis-rename-model') || undefined }),
       })
       const data = await res.json() as { label?: string; error?: string }
       const label = data.label
@@ -1459,25 +1480,17 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     }
   }
 
-  const handleBriefMe    = () => sendQuickAction('Give me a 3-sentence status update: (1) what you last did, (2) what you\'re working on now, (3) what\'s next. No fluff.', 'brief')
+  const handleBriefMe    = () => sendQuickAction(getQuickCommands().brief, 'brief')
   const handlePause      = () => sendQuickAction('Pause. Summarize the current state in 3-5 bullet points so we can resume cleanly later: what was decided, what\'s in progress, what\'s next, any blockers. Then stop and wait for me.', 'pause')
   const handleContinue   = () => sendQuickAction('Continue from where we left off. Review the last state summary and resume the next action.', 'continue')
-  const handleSave       = () => sendQuickAction('💾 checkpoint - save any key decisions, context, or tasks from this session to MEMORY.md and TODOS.md now. One-line ack only.', 'save')
-  const handleSteppingAway = () => sendQuickAction(
-    "I'm stepping away for a while. Please do the following:\n" +
-    "1. Summarize what you're currently working on (1-2 sentences).\n" +
-    "2. List anything you're blocked on or need from me before I go - be specific (credentials, a decision, a file, etc.).\n" +
-    "3. List everything you CAN do autonomously while I'm gone, in order.\n" +
-    "4. Estimate how long you can run without me.\n" +
-    "Be concise. I'll read this on my phone.", 'away'
-  )
+  const handleSave       = () => sendQuickAction(getQuickCommands().save, 'save')
+  const handleSteppingAway = () => sendQuickAction(getQuickCommands().away, 'away')
 
   const handleArchive = () => {
     if (!sessionKey) return
     if (confirm('Save and archive this session?')) {
       // Send save instruction to agent (fire-and-forget - NO_REPLY expected)
-      const msg =
-        '💾 Final save - write any remaining decisions, tasks, or context to MEMORY.md and TODOS.md. Reply with NO_REPLY only.'
+      const msg = getQuickCommands().archive_msg
       const idempotencyKey = `octis-archive-${Date.now()}-${Math.random().toString(36).slice(2)}`
       sendChat({ sessionKey, message: msg, deliver: false, idempotencyKey })
       // Hide only — no gateway delete (sessions needed for productivity audits)

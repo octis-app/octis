@@ -6,8 +6,8 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
-      registerType: 'autoUpdate',
-      includeAssets: ['icons/*.png'],
+      registerType: 'autoUpdate', // Install new SW in background; skipWaiting=false defers activation to next launch
+      includeAssets: ['icons/*.png', 'apple-touch-icon.png', 'octis-logo.svg'],
       manifest: {
         name: 'Octis',
         short_name: 'Octis',
@@ -28,8 +28,8 @@ export default defineConfig({
       workbox: {
         navigateFallbackDenylist: [/^\/dev\//],
         importScripts: ['/sw-push.js'],
-        skipWaiting: true,
-        clientsClaim: true,
+        skipWaiting: false, // Don't force-reload mid-session; new SW activates on next app launch
+        clientsClaim: false,
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
         runtimeCaching: [
           {

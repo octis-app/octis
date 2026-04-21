@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import LoginPage from './components/LoginPage'
 import { useGatewayStore, useSessionStore, useLabelStore, useProjectStore, useHiddenStore, Session } from './store/gatewayStore'
+import { useAuthStore } from './store/authStore'
 import Sidebar from './components/Sidebar'
 import ChatPane from './components/ChatPane'
 import ConnectModal from './components/ConnectModal'
@@ -70,6 +71,7 @@ export default function App() {
 function AuthenticatedApp() {
   const getToken = async () => null
   const { connected, gatewayUrl, connect, setCredentials } = useGatewayStore()
+  const { setAuth, fetchOwnedSessions } = useAuthStore()
   const { activePanes, pinToPane, sessions, setSessions } = useSessionStore()
   const { labels, setLabel } = useLabelStore()
   const { hydrateFromServer: hydrateProjects } = useProjectStore()
@@ -125,6 +127,8 @@ function AuthenticatedApp() {
         if (!res.ok) throw new Error(`Config fetch failed: ${res.status}`)
         const data = (await res.json()) as { url?: string; token?: string; agentId?: string; role?: string; needsSetup?: boolean }
         setUserRole(data.role || null)
+        setAuth(data.role || null, null)
+        void fetchOwnedSessions()
         if (data.needsSetup) {
           setNeedsSetup(true)
           return
@@ -144,6 +148,8 @@ function AuthenticatedApp() {
             if (!r2.ok) { setShowConnect(true); return }
             const d2 = await r2.json() as { url?: string; token?: string; agentId?: string; role?: string; needsSetup?: boolean }
             setUserRole(d2.role || null)
+            setAuth(d2.role || null, null)
+            void fetchOwnedSessions()
             if (d2.needsSetup) { setNeedsSetup(true); return }
             setCredentials(d2.url!, d2.token!, d2.agentId)
             connect()
