@@ -1,6 +1,21 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
 import { useGatewayStore, useSessionStore, useProjectStore, useLabelStore, useDraftStore, Session } from '../store/gatewayStore'
 import { authFetch } from '../lib/authFetch'
+import { useAuthStore } from '../store/authStore'
+
+// Quick Commands helpers
+const QUICK_COMMAND_DEFAULTS = {
+  brief: "Give me a 3-sentence status update: (1) what you last did, (2) what you're working on now, (3) what's next. No fluff.",
+  away: "I'm stepping away for a while. Please do the following:\n1. Summarize what you're currently working on (1-2 sentences).\n2. List anything you're blocked on or need from me before I go - be specific (credentials, a decision, a file, etc.).\n3. List everything you CAN do autonomously while I'm gone, in order.\n4. Estimate how long you can run without me.\nBe concise. I'll read this on my phone.",
+  save: "💾 checkpoint - save any key decisions, context, or tasks from this session to MEMORY.md and TODOS.md now. One-line ack only.",
+  archive_msg: "💾 Final save - write any remaining decisions, tasks, or context to MEMORY.md and TODOS.md. Reply with NO_REPLY only.",
+}
+
+function getQuickCommands() {
+  try {
+    return { ...QUICK_COMMAND_DEFAULTS, ...JSON.parse(localStorage.getItem('octis-quick-commands') || '{}') }
+  } catch { return { ...QUICK_COMMAND_DEFAULTS } }
+}
 
 interface MobileFullChatProps {
   session: Session
@@ -327,6 +342,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
   const { send, sendChat, ws, connect, connected } = useGatewayStore()
   const { consumePendingProjectInit, getStatus } = useSessionStore()
   const { getLabel, setLabel } = useLabelStore()
+  const { claimSession } = useAuthStore()
   // Initialize from cache if available
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
     const cached = session?.key ? getMsgCache(session.key) : null
@@ -421,24 +437,28 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     const msgEl = () => scrollRef.current
 
     const onMove = (e: TouchEvent) => {
-      const sessions = recentSessionsRef.current
-      const switchFn = onSwitchRef.current
-      if (!sessions || !switchFn) return
       const dx = e.touches[0].clientX - startX
       const dy = e.touches[0].clientY - startY
       const adx = Math.abs(dx), ady = Math.abs(dy)
 
       if (locked === 'scroll') return
       if (locked === 'none') {
-        // Wait for at least 15px movement to get a reliable direction read
         if (adx < 15 && ady < 15) return
-        // Need 2.5:1 horizontal dominance — vertical scrolls never trigger swipe
         if (adx < ady * 2.5) { locked = 'scroll'; return }
         locked = 'swipe'
       }
 
       e.preventDefault()
       const m = msgEl(); if (!m) return
+
+      const sessions = recentSessionsRef.current
+      const switchFn = onSwitchRef.current
+
+      if (!sessions || !switchFn || sessions.length === 0) {
+        m.style.transform = `translateX(${dx * 0.15}px)`
+        return
+      }
+
       const idx = sessions.findIndex(s => s.key === sessionKeyRef.current)
       const wouldGoTo = dx < 0 ? idx + 1 : idx - 1
       const atEdge = wouldGoTo < 0 || wouldGoTo >= sessions.length
@@ -572,13 +592,21 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     return () => document.removeEventListener('visibilitychange', handleVisibility)
   }, [connect])
 
+  // Claim session ownership when session opens
+  useEffect(() => {
+    if (session?.key) claimSession(session.key)
+  }, [session?.key]) // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     if (!session?.key || !ws) return
 
     // Load draft for new session (no longer remounting on switch)
     setInput(getDraft(session.key))
-    // Reset sending state on reconnect / session switch so polls aren't permanently blocked
-    setSending(false)
+    // Only reset sending state on an actual session switch, NOT on WS reconnect.
+    // Resetting on reconnect kills the thinking indicator and stops the fast poll
+    // mid-response, causing replies to not appear without a hard refresh.
+    const isSessionSwitch = prevSessionKeyRef.current !== session.key
+    if (isSessionSwitch) setSending(false)
     // Reset scroll state on session switch
     userScrolledUpRef.current = false
     // Reset message count so scroll-to-bottom fires on cache load (stale count from previous session
@@ -630,14 +658,17 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
           const msgs = msg.payload?.messages || []
           if (msgs.length === 0) return
 
-          // Determine if server has confirmed our pending user message
+          // Content-match is the authoritative check for user-message confirmation.
+          // Count-only check (msgs.length > preSendCountRef) fires false positives when
+          // any background message (heartbeat, tool call) increments the count — causing
+          // the optimistic to be dropped and sending cleared against the OLD assistant reply.
           const pendingRaw = localStorage.getItem(`octis-pending-${session.key}`)
-          let serverHasUserMsg = msgs.length > preSendCountRef.current
-          if (!serverHasUserMsg && pendingRaw) {
+          let serverHasUserMsg = false
+          if (pendingRaw) {
             try {
               const { text } = JSON.parse(pendingRaw) as { text: string; timestamp: number }
               serverHasUserMsg = !!text && msgs.some(m => {
-                if (m.role !== 'user') return false
+                if (m.role !== 'user' || typeof m.id === 'number') return false
                 if (typeof m.content === 'string') return m.content.slice(0, 80) === text.slice(0, 80)
                 if (Array.isArray(m.content)) {
                   const textBlock = (m.content as Array<{type: string; text?: string}>).find(b => b.type === 'text')
@@ -646,19 +677,21 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
                 return false
               })
             } catch {}
+          } else {
+            // No pending entry — not in a send or already confirmed. Use count as fallback.
+            serverHasUserMsg = msgs.length > preSendCountRef.current
           }
 
           if (serverHasUserMsg) {
             localStorage.removeItem(`octis-pending-${session.key}`)
           }
 
-          // Always apply server messages — never block on pending state.
-          // If server hasn't confirmed our user message yet, preserve any optimistic
-          // messages (number IDs) so they don't flicker out mid-send.
+          // Always apply server messages. Preserve optimistic messages (number IDs) until
+          // the server content-confirms them — avoids visible flicker on every poll.
           setMessages((prev) => {
-            if (!serverHasUserMsg) {
-              const optimistics = prev.filter(m => typeof m.id === 'number')
-              if (optimistics.length > 0) return [...msgs, ...optimistics]
+            const optimistics = prev.filter(m => typeof m.id === 'number')
+            if (optimistics.length > 0 && !serverHasUserMsg) {
+              return [...msgs, ...optimistics]
             }
             return msgs
           })
@@ -666,14 +699,15 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
           // Update cache on every poll so next open shows fresh messages instantly
           if (msgs.length > 0) setMsgCache(session.key, msgs)
 
-          // Clear sending only when assistant has actually replied.
-          // Keeping sendingRef=true while model works lets follow-up messages queue.
-          const lastMsg = msgs[msgs.length - 1]
-          if (lastMsg?.role === 'assistant') {
-            const txt = typeof lastMsg.content === 'string' ? lastMsg.content.trim() : ''
-            if (txt && txt !== 'HEARTBEAT_OK') setSending(false)
+          // Clear sending only when server confirmed our user message AND assistant replied.
+          // This prevents clearing against the previous exchange’s assistant reply.
+          if (serverHasUserMsg) {
+            const lastMsg = msgs[msgs.length - 1]
+            if (lastMsg?.role === 'assistant') {
+              const txt = typeof lastMsg.content === 'string' ? lastMsg.content.trim() : ''
+              if (txt && txt !== 'HEARTBEAT_OK') setSending(false)
+            }
           }
-          // Don’t clear sending if last msg is user’s — model hasn’t replied yet
           return
         }
 
@@ -711,7 +745,9 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
               }
             } catch {}
           }
-          if (!pendingRaw) setSending(false)
+          // Don't clear sending here — the poll handler and streaming handler own that.
+          // Clearing on every history load (when pendingRaw is null) kills the thinking
+          // indicator and stops the fast poll mid-response.
           setMessages(finalMsgs)
           setLoadedKey(session.key)
           // Write to cache after receiving fresh history
@@ -771,13 +807,12 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     return () => ws.removeEventListener('message', handleMsg)
   }, [session?.key, ws, send])
 
-  // Re-fetch history when connection is established (handles the common case where
-  // the initial chat.history send was dropped because WS was still CONNECTING).
-  // Without this, user sees stale cached messages for up to 3s after reconnect.
+  // Re-fetch history whenever the connection (re-)establishes.
+  // IMPORTANT: do NOT gate this on loadedKey — that guard prevented re-fetches after
+  // app resume/reconnect, leaving the user looking at stale cached messages until
+  // they manually switched sessions. Every reconnect should pull fresh history.
   useEffect(() => {
     if (!connected || !session?.key || !ws) return
-    // Only re-fetch if we don't have fresh data for this session yet
-    if (loadedKey === session.key) return
     const reqId = `chat-history-reconnect-${session.key}-${Date.now()}`
     currentHistoryReqIdRef.current = reqId
     send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey: session.key, limit: 100 } })
@@ -1014,7 +1049,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     clearDraft(session.key)
     // Reset textarea height to 1 line after send
     if (inputRef.current) { inputRef.current.style.height = 'auto' }
-    preSendCountRef.current = messages.length  // capture count before optimistic is added
+    preSendCountRef.current = messages.filter(m => typeof m.id !== 'number').length  // server-only count; excludes any orphaned optimistics
     setSending(true)
     // Persist to localStorage so message survives a page refresh while model is working
     if (pendingFiles.length === 0 && msg) {
@@ -1138,7 +1173,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
       const res = await fetch(`${API}/api/session-autoname`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: slim }),
+        body: JSON.stringify({ messages: slim, model: localStorage.getItem('octis-rename-model') || undefined }),
       })
       const data = await res.json() as { label?: string }
       if (data.label) {
@@ -1218,11 +1253,14 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
 
       {/* Quick action buttons */}
       <div className="flex gap-1.5 px-4 py-1.5 bg-[#0f1117] border-b border-[#1e2330] shrink-0">
-        {([
-          { icon: '💬', label: 'Brief', msg: "Give me a 3-sentence status update: (1) what you last did, (2) what you're working on now, (3) what's next. No fluff." },
-          { icon: '🚪', label: 'Away', msg: "I'm stepping away for a while. Please do the following:\n1. Summarize what you're currently working on (1-2 sentences).\n2. List anything you're blocked on or need from me before I go - be specific (credentials, a decision, a file, etc.).\n3. List everything you CAN do autonomously while I'm gone, in order.\n4. Estimate how long you can run without me.\nBe concise. I'll read this on my phone." },
-          { icon: '💾', label: 'Save', msg: '💾 checkpoint - save any key decisions, context, or tasks from this session to MEMORY.md and TODOS.md now. One-line ack only.' },
-        ] as { icon: string; label: string; msg: string }[]).map(({ icon, label, msg }) => (
+        {(() => {
+          const qc = getQuickCommands()
+          const quickActions = [
+            { icon: '💬', label: 'Brief', msg: qc.brief },
+            { icon: '🚪', label: 'Away', msg: qc.away },
+            { icon: '💾', label: 'Save', msg: qc.save },
+          ]
+          return quickActions.map(({ icon, label, msg }) => (
           <button
             key={label}
             onClick={() => {
@@ -1245,7 +1283,8 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
           >
             <span>{icon}</span><span>{label}</span>
           </button>
-        ))}
+          ))
+        })()}
         <button
           onClick={() => onArchive?.()}
           className="flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap bg-[#1e2330] text-[#9ca3af] active:bg-[#6366f1] active:text-white transition-colors shrink-0 border border-[#2a3142]"
@@ -1304,6 +1343,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
       )}
       <div
         ref={scrollRef}
+        data-testid="chat-messages-scroll"
         className="h-full overflow-y-auto px-4 py-3 space-y-3 space-y-reverse flex flex-col-reverse" style={{ overflowAnchor: 'none' } as React.CSSProperties}
         // Touch handlers are on the DOM element via useEffect (non-passive, for preventDefault support)
         onScroll={() => {
@@ -1315,6 +1355,16 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
         }}
       >
         {/* Loading indicator when no messages and history not yet loaded */}
+        {/* Thinking dots — must be FIRST child in flex-col-reverse so they appear at visual bottom */}
+        {sending && (
+          <div className="flex justify-start">
+            <div className="bg-[#1e2330] px-4 py-3 rounded-2xl rounded-bl-sm flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-[#6b7280] inline-block" style={{ animation: 'typingBounce 1.2s infinite', animationDelay: '0ms' }} />
+              <span className="w-2 h-2 rounded-full bg-[#6b7280] inline-block" style={{ animation: 'typingBounce 1.2s infinite', animationDelay: '200ms' }} />
+              <span className="w-2 h-2 rounded-full bg-[#6b7280] inline-block" style={{ animation: 'typingBounce 1.2s infinite', animationDelay: '400ms' }} />
+            </div>
+          </div>
+        )}
         {loadedKey !== session?.key && messages.length === 0 && (
           <div className="flex flex-col items-center justify-center gap-3 py-16 text-[#4b5563]">
             <div className="w-6 h-6 border-2 border-[#4b5563] border-t-[#6366f1] rounded-full animate-spin" />
@@ -1426,15 +1476,6 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
             </div>
           ))
         })()}
-        {sending && (
-          <div className="flex justify-start">
-            <div className="bg-[#1e2330] px-4 py-3 rounded-2xl rounded-bl-sm flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-[#6b7280] inline-block" style={{ animation: 'typingBounce 1.2s infinite', animationDelay: '0ms' }} />
-              <span className="w-2 h-2 rounded-full bg-[#6b7280] inline-block" style={{ animation: 'typingBounce 1.2s infinite', animationDelay: '200ms' }} />
-              <span className="w-2 h-2 rounded-full bg-[#6b7280] inline-block" style={{ animation: 'typingBounce 1.2s infinite', animationDelay: '400ms' }} />
-            </div>
-          </div>
-        )}
 
       </div>
       </div>
@@ -1574,7 +1615,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
                 const idempotencyKey = `octis-archive-${Date.now()}-${Math.random().toString(36).slice(2)}`
                 sendChat({
                   sessionKey: session.key,
-                  message: '💾 Final save - write any remaining decisions, tasks, or context to MEMORY.md and TODOS.md. Reply with NO_REPLY only.',
+                  message: getQuickCommands().archive_msg,
                   deliver: false,
                   idempotencyKey,
                 })

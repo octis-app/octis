@@ -238,17 +238,24 @@ function urgencyScore(content: string): number {
 }
 
 // ─── Main panel ───────────────────────────────────────────────────────────────
+const MEM_CACHE_KEY = 'octis-memory-cache'
+const MEM_PROJ_CACHE_KEY = 'octis-memory-proj-cache'
+function getCachedMem<T>(key: string): T | null {
+  try { return JSON.parse(localStorage.getItem(key) || 'null') } catch { return null }
+}
+
 export default function MemoryPanel() {
-  const [memData, setMemData] = useState<MemData | null>(null)
-  const [projData, setProjData] = useState<ProjData | null>(null)
+  const cachedMem = getCachedMem<MemData>(MEM_CACHE_KEY)
+  const cachedProj = getCachedMem<ProjData>(MEM_PROJ_CACHE_KEY)
+  const [memData, setMemData] = useState<MemData | null>(cachedMem)
+  const [projData, setProjData] = useState<ProjData | null>(cachedProj)
   const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(!cachedMem) // skip spinner if cache available
   const [activeTab, setActiveTab] = useState('logs')
   const [projectSearch, setProjectSearch] = useState('')
   const [projectSort, setProjectSort] = useState('recency')
 
   const load = () => {
-    setLoading(true)
     Promise.all([
       fetch(`${API}/api/memory`).then(r => r.json()),
       fetch(`${API}/api/projects`).then(r => r.json()),
@@ -256,6 +263,8 @@ export default function MemoryPanel() {
       .then(([mem, proj]) => {
         setMemData(mem)
         setProjData(proj)
+        try { localStorage.setItem(MEM_CACHE_KEY, JSON.stringify(mem)) } catch {}
+        try { localStorage.setItem(MEM_PROJ_CACHE_KEY, JSON.stringify(proj)) } catch {}
         setLoading(false)
       })
       .catch(e => { setError(e.message); setLoading(false) })

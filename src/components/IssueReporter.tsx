@@ -46,8 +46,8 @@ export default function IssueReporter({ onClose, context = {} }: Props) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          credentials: 'include',
         },
+        credentials: 'include',
         body: JSON.stringify({ type, title: title.trim(), body: fullBody }),
       })
       const data = await res.json()

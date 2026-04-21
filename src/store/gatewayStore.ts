@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { authFetch } from '../lib/authFetch'
+import { useAuthStore } from './authStore'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -820,6 +821,14 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
       if (agentId) {
         const agentPrefixMatch = (s.key || '').match(/^agent:([^:]+):/)
         if (agentPrefixMatch && agentPrefixMatch[1] !== agentId) return false
+      }
+      // Ownership filter: non-owners only see sessions they have claimed.
+      // If ownedSessions is null (not yet loaded) or 'all', skip filter.
+      const { ownedSessions, isOwner } = useAuthStore.getState()
+      if (!isOwner() && ownedSessions instanceof Set) {
+        // Also accept short key forms (session-<ts>) that may appear before gateway normalises them
+        const shortKey = (s.key || '').match(/^agent:[^:]+:(session-\d+)$/)?.[1]
+        if (!ownedSessions.has(s.key) && !(shortKey && ownedSessions.has(shortKey))) return false
       }
       seen.add(s.key)
       // Also mark the short form (session-<ts>) as seen so the pendingLocal filter drops it

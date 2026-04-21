@@ -24,10 +24,18 @@ type FilterType = 'all' | 'active' | 'idle'
 
 export default function MobileApp() {
   const { getToken } = useAuth()
-  const { connected, gatewayUrl, connect } = useGatewayStore()
-  const { sessions, getStatus, getLastActivityMs } = useSessionStore()
+  // Selective Zustand subscriptions: only subscribe to fields this component actually renders.
+  // Without selectors, useStore() returns the full state and re-renders on ANY store change —
+  // including sessionActivity (every WS chat event) and sessionMeta (every streaming token).
+  // With selectors, MobileApp only re-renders when connected or sessions actually change.
+  const connected = useGatewayStore(s => s.connected)
+  const gatewayUrl = useGatewayStore(s => s.gatewayUrl)
+  const connect = useGatewayStore(s => s.connect)
+  const sessions = useSessionStore(s => s.sessions)           // re-renders only when session list changes (~30s)
+  const getStatus = useSessionStore(s => s.getStatus)         // stable function ref
+  const getLastActivityMs = useSessionStore(s => s.getLastActivityMs) // stable function ref
+  const setSessions = useSessionStore(s => s.setSessions)     // stable function ref
   const { hidden, isHidden, hide: hideSession, hydrateFromServer: hydrateHidden } = useHiddenStore()
-  const { setSessions } = useSessionStore()
   const { hydrateFromServer: hydrateProjects } = useProjectStore()
   const { labels, setLabel } = useLabelStore()
 
@@ -460,15 +468,7 @@ export default function MobileApp() {
         </div>
       </div>
 
-      {/* Floating bug report button */}
-      <button
-        onClick={() => setShowIssueReporter(true)}
-        className="fixed bottom-20 right-4 z-40 w-10 h-10 rounded-full bg-[#181c24] border border-[#2a3142] text-base shadow-lg flex items-center justify-center hover:bg-[#2a3142] transition-colors"
-        style={{ bottom: 'calc(4rem + max(0.5rem, env(safe-area-inset-bottom)) + 0.5rem)' }}
-        title="Report an issue"
-      >
-        🐛
-      </button>
+
 
       {showConnect && <ConnectModal onClose={() => setShowConnect(false)} />}
 

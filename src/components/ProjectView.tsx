@@ -13,7 +13,7 @@ const API = (import.meta.env.VITE_API_URL as string) || ''
 
 export default function ProjectView({ project, onBack }: ProjectViewProps) {
   const { getToken } = useAuth()
-  const { sessions, getStatus, setSessions, setPendingProjectPrefix, setPendingProjectInit } = useSessionStore()
+  const { sessions, hiddenSessions, getStatus, setSessions, setPendingProjectPrefix, setPendingProjectInit } = useSessionStore()
   const { getTag, setTag } = useProjectStore()
   const { getLabel, setLabel } = useLabelStore()
   const { isHidden } = useHiddenStore()
@@ -43,7 +43,8 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
     const token = await getToken()
     await fetch(`${API}/api/session-projects`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', credentials: 'include' },
+      headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
       body: JSON.stringify({ sessionKey: key, projectTag: project.slug }),
     })
     setTag(key, project.slug)
@@ -60,11 +61,20 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
 
   // Sessions belonging to this project (not hidden, not subagent)
   const isOthers = project.slug === 'others'
+  const isArchived = project.slug === 'archived'
 
-  const projectSessions = sessions.filter((s: Session) => {
-    if (isOthers) return !getTag(s.key).project && !isHidden(s.key) && !isHidden(s.id || '') && !isAgentSession(s)
-    return getTag(s.key).project === project.slug && !isHidden(s.key) && !isHidden(s.id || '') && !isHidden(s.sessionId || '') && !isAgentSession(s)
-  })
+  const projectSessions = (isArchived ? hiddenSessions : sessions)
+    .filter((s: Session) => {
+      if (isArchived) return true // all hidden sessions
+      if (isOthers) return !getTag(s.key).project && !isHidden(s.key) && !isHidden(s.id || '') && !isAgentSession(s)
+      return getTag(s.key).project === project.slug && !isHidden(s.key) && !isHidden(s.id || '') && !isHidden(s.sessionId || '') && !isAgentSession(s)
+    })
+    .sort((a, b) => {
+      if (!isArchived) return 0
+      const ta = a.lastActivity ? new Date(a.lastActivity as string).getTime() : 0
+      const tb = b.lastActivity ? new Date(b.lastActivity as string).getTime() : 0
+      return tb - ta
+    })
 
   // Default to most recent active session on mount / when project sessions first load
   useEffect(() => {
@@ -126,7 +136,8 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
     const token = await getToken()
     await fetch(`${API}/api/session-projects`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', credentials: 'include' },
+      headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
       body: JSON.stringify({ sessionKey: key, projectTag: project.slug }),
     })
     setTag(key, project.slug)
@@ -139,7 +150,8 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
     const token = await getToken()
     await fetch(`${API}/api/session-projects`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', credentials: 'include' },
+      headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
       body: JSON.stringify({ sessionKey, projectTag: project.slug }),
     })
     setTag(sessionKey, project.slug)
@@ -155,11 +167,12 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
         type: 'req',
         id: `sessions-patch-${Date.now()}`,
         method: 'sessions.patch',
-        params: { sessionKey: key, patch: { label: trimmed } },
+        params: { key: key, label: trimmed },
       })
       void fetch(`${API}/api/session-rename`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ sessionKey: key, label: trimmed }),
       })
     }
@@ -217,9 +230,9 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
             <button
               onClick={handleNewSession}
               title="New session in this project"
-              className="w-7 h-7 rounded-lg bg-[#6366f1] hover:bg-[#818cf8] text-white flex items-center justify-center text-sm transition-colors shrink-0"
+              className="w-7 h-7 rounded-lg bg-[#6366f1] hover:bg-[#818cf8] text-white flex items-center justify-center text-lg font-light transition-colors shrink-0"
             >
-              ✦
+              +
             </button>
           </div>
         </div>
@@ -288,16 +301,16 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
               })}
               <div className="px-4 pt-2 pb-1 flex items-center gap-3">
                 <button
-                  onClick={handleNewSession}
-                  className="text-[10px] text-[#6366f1] hover:text-[#818cf8] transition-colors"
-                >
-                  + New session
-                </button>
-                <button
                   onClick={() => setTagging('picker')}
                   className="text-[10px] text-[#4b5563] hover:text-[#6366f1] transition-colors"
                 >
                   + Add existing
+                </button>
+                <button
+                  onClick={handleNewSession}
+                  className="text-[10px] text-[#6366f1] hover:text-[#818cf8] transition-colors ml-auto"
+                >
+                  + New session
                 </button>
               </div>
             </>

@@ -65,17 +65,28 @@ function formatSessionKey(key: string): string {
   return k
 }
 
+const COSTS_CACHE_KEY = 'octis-costs-cache'
+function getCachedCosts(): CostsData | null {
+  try { return JSON.parse(localStorage.getItem(COSTS_CACHE_KEY) || 'null') } catch { return null }
+}
+function setCachedCosts(d: CostsData) {
+  try { localStorage.setItem(COSTS_CACHE_KEY, JSON.stringify(d)) } catch {}
+}
+
 export default function CostsPanel() {
   const { labels } = useLabelStore()
-  const [data, setData] = useState<CostsData | null>(null)
+  const cached = getCachedCosts()
+  const [data, setData] = useState<CostsData | null>(cached)
   const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(!cached) // skip spinner if cache available
 
   const load = async () => {
     try {
       const r = await fetch(`${API}/api/costs?days=30`, { credentials: 'include' })
       if (!r.ok) throw new Error(`HTTP ${r.status}`)
-      setData((await r.json()) as CostsData)
+      const fresh = await r.json() as CostsData
+      setData(fresh)
+      setCachedCosts(fresh)
       setError(null)
     } catch (e) {
       setError((e as Error).message)

@@ -54,6 +54,12 @@ CREATE TABLE IF NOT EXISTS octis_todos (
   UNIQUE(project, text)
 );
 
+CREATE TABLE IF NOT EXISTS octis_session_ownership (
+  session_key TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  claimed_at INTEGER DEFAULT (unixepoch())
+);
+
 CREATE TABLE IF NOT EXISTS push_subscriptions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
