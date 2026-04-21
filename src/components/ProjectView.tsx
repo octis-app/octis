@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { useAuth } from '@clerk/clerk-react'
+import { useAuth } from '../lib/auth'
 import { useSessionStore, useProjectStore, useLabelStore, useHiddenStore, useGatewayStore, Session } from '../store/gatewayStore'
 import ChatPane from './ChatPane'
 import type { Project } from './ProjectsGrid'
@@ -13,7 +13,7 @@ const API = (import.meta.env.VITE_API_URL as string) || ''
 
 export default function ProjectView({ project, onBack }: ProjectViewProps) {
   const { getToken } = useAuth()
-  const { sessions, getStatus, setSessions, setPendingProjectPrefix, setPendingProjectInit } = useSessionStore()
+  const { sessions, hiddenSessions, getStatus, setSessions, setPendingProjectPrefix, setPendingProjectInit } = useSessionStore()
   const { getTag, setTag } = useProjectStore()
   const { getLabel, setLabel } = useLabelStore()
   const { isHidden } = useHiddenStore()
@@ -32,31 +32,6 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
   const [editingSessionKey, setEditingSessionKey] = useState<string | null>(null)
   const [editingLabelValue, setEditingLabelValue] = useState('')
   const _editInputRef = useRef<HTMLInputElement | null>(null)
-  const [todos, setTodos] = useState<Array<{ id: number; text: string; owner: string | null }>>([])
-  const [todosOpen, setTodosOpen] = useState(false)
-
-  const refreshTodos = async () => {
-    try {
-      const token = await getToken()
-      const r = await fetch(`${API}/api/todos`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {}
-      })
-      if (!r.ok) return
-      const data: Record<string, { items: Array<{ id: number; text: string; owner: string | null }> }> = await r.json()
-      setTodos(data[project.slug]?.items || data[project.name]?.items || [])
-    } catch {}
-  }
-  useEffect(() => { refreshTodos() }, [project.slug])
-
-  const handleTodoComplete = async (id: number) => {
-    const token = await getToken()
-    await fetch(`${API}/api/todos/${id}/complete`, {
-      method: 'PATCH',
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    }).catch(() => {})
-    refreshTodos()
-  }
-
   const handleTodoNewSession = async (text: string) => {
     const key = `session-${Date.now()}`
     const newSession: Session = { key, label: text.slice(0, 40), sessionKey: key } as Session
@@ -68,7 +43,8 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
     const token = await getToken()
     await fetch(`${API}/api/session-projects`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
       body: JSON.stringify({ sessionKey: key, projectTag: project.slug }),
     })
     setTag(key, project.slug)
@@ -85,11 +61,20 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
 
   // Sessions belonging to this project (not hidden, not subagent)
   const isOthers = project.slug === 'others'
+  const isArchived = project.slug === 'archived'
 
-  const projectSessions = sessions.filter((s: Session) => {
-    if (isOthers) return !getTag(s.key).project && !isHidden(s.key) && !isHidden(s.id || '') && !isAgentSession(s)
-    return getTag(s.key).project === project.slug && !isHidden(s.key) && !isHidden(s.id || '') && !isHidden(s.sessionId || '') && !isAgentSession(s)
-  })
+  const projectSessions = (isArchived ? hiddenSessions : sessions)
+    .filter((s: Session) => {
+      if (isArchived) return true // all hidden sessions
+      if (isOthers) return !getTag(s.key).project && !isHidden(s.key) && !isHidden(s.id || '') && !isAgentSession(s)
+      return getTag(s.key).project === project.slug && !isHidden(s.key) && !isHidden(s.id || '') && !isHidden(s.sessionId || '') && !isAgentSession(s)
+    })
+    .sort((a, b) => {
+      if (!isArchived) return 0
+      const ta = a.lastActivity ? new Date(a.lastActivity as string).getTime() : 0
+      const tb = b.lastActivity ? new Date(b.lastActivity as string).getTime() : 0
+      return tb - ta
+    })
 
   // Default to most recent active session on mount / when project sessions first load
   useEffect(() => {
@@ -151,7 +136,8 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
     const token = await getToken()
     await fetch(`${API}/api/session-projects`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
       body: JSON.stringify({ sessionKey: key, projectTag: project.slug }),
     })
     setTag(key, project.slug)
@@ -164,7 +150,8 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
     const token = await getToken()
     await fetch(`${API}/api/session-projects`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
       body: JSON.stringify({ sessionKey, projectTag: project.slug }),
     })
     setTag(sessionKey, project.slug)
@@ -180,11 +167,12 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
         type: 'req',
         id: `sessions-patch-${Date.now()}`,
         method: 'sessions.patch',
-        params: { sessionKey: key, patch: { label: trimmed } },
+        params: { key: key, label: trimmed },
       })
       void fetch(`${API}/api/session-rename`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ sessionKey: key, label: trimmed }),
       })
     }
@@ -242,9 +230,9 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
             <button
               onClick={handleNewSession}
               title="New session in this project"
-              className="w-7 h-7 rounded-lg bg-[#6366f1] hover:bg-[#818cf8] text-white flex items-center justify-center text-sm transition-colors shrink-0"
+              className="w-7 h-7 rounded-lg bg-[#6366f1] hover:bg-[#818cf8] text-white flex items-center justify-center text-lg font-light transition-colors shrink-0"
             >
-              ✦
+              +
             </button>
           </div>
         </div>
@@ -313,16 +301,16 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
               })}
               <div className="px-4 pt-2 pb-1 flex items-center gap-3">
                 <button
-                  onClick={handleNewSession}
-                  className="text-[10px] text-[#6366f1] hover:text-[#818cf8] transition-colors"
-                >
-                  + New session
-                </button>
-                <button
                   onClick={() => setTagging('picker')}
                   className="text-[10px] text-[#4b5563] hover:text-[#6366f1] transition-colors"
                 >
                   + Add existing
+                </button>
+                <button
+                  onClick={handleNewSession}
+                  className="text-[10px] text-[#6366f1] hover:text-[#818cf8] transition-colors ml-auto"
+                >
+                  + New session
                 </button>
               </div>
             </>
@@ -357,49 +345,6 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
             >
               Cancel
             </button>
-          </div>
-        )}
-
-        {/* Todos */}
-        {todos.length > 0 && (
-          <div className="border-t border-[#1e2330] px-3 py-2">
-            <button
-              className="w-full flex items-center gap-2 py-1"
-              onClick={() => setTodosOpen(o => !o)}
-            >
-              <span className="text-[10px] font-medium text-[#6b7280] flex-1 text-left uppercase tracking-wider">Todos</span>
-              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-yellow-900/40 text-yellow-300 font-mono">{todos.length}</span>
-              <span className="text-[10px] text-[#4b5563]">{todosOpen ? '▲' : '▼'}</span>
-            </button>
-            {todosOpen && (
-              <div className="mt-1 space-y-1 max-h-48 overflow-y-auto">
-                {todos.map(todo => (
-                  <div
-                    key={todo.id}
-                    className="flex items-start gap-1.5 rounded-lg hover:bg-[#1e2330] px-1.5 py-1.5 group cursor-pointer"
-                    onClick={() => handleTodoNewSession(todo.text)}
-                    onContextMenu={e => {
-                      e.preventDefault()
-                      if (confirm(`Mark as done?\n\n"${todo.text}"`)) handleTodoComplete(todo.id)
-                    }}
-                  >
-                    {todo.owner && (
-                      <span className={`text-[9px] px-1 py-0.5 rounded font-bold shrink-0 mt-0.5 ${
-                        todo.owner === 'ME' ? 'bg-blue-900/50 text-blue-300' :
-                        todo.owner === 'YOU' ? 'bg-amber-900/50 text-amber-300' :
-                        todo.owner === 'BOTH' ? 'bg-green-900/50 text-green-300' :
-                        'bg-[#1e2330] text-[#6b7280]'
-                      }`}>{todo.owner}</span>
-                    )}
-                    <span className="text-[11px] text-[#9ca3af] leading-snug flex-1">{todo.text}</span>
-                    <span
-                      className="text-[9px] text-[#4b5563] opacity-0 group-hover:opacity-100 shrink-0 transition-opacity"
-                      title="Right-click to mark done"
-                    >✓</span>
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
         )}
 

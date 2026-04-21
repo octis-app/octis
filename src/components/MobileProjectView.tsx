@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
-import { useAuth } from '@clerk/clerk-react'
+import { useAuth } from '../lib/auth'
 import { useSessionStore, useProjectStore, useLabelStore, useHiddenStore, Session } from '../store/gatewayStore'
 import { useGatewayStore, useHiddenStore } from '../store/gatewayStore'
+import { authFetch } from '../lib/authFetch'
 import MobileFullChat from './MobileFullChat'
 import type { Project } from './ProjectsGrid'
 
@@ -15,12 +16,19 @@ const API = (import.meta.env.VITE_API_URL as string) || ''
 
 export default function MobileProjectView({ project, onBack, onSwitchProject }: MobileProjectViewProps) {
   const { getToken } = useAuth()
-  const { sessions, getStatus, setSessions, setPendingProjectPrefix, setPendingProjectInit } = useSessionStore()
+  // Selective subscriptions: sessions and hiddenSessions only re-render this component
+  // when the session list itself changes, not on every streaming token or chat event.
+  const sessions = useSessionStore(s => s.sessions)
+  const hiddenSessions = useSessionStore(s => s.hiddenSessions)
+  const getStatus = useSessionStore(s => s.getStatus)
+  const setSessions = useSessionStore(s => s.setSessions)
+  const setPendingProjectPrefix = useSessionStore(s => s.setPendingProjectPrefix)
+  const setPendingProjectInit = useSessionStore(s => s.setPendingProjectInit)
   // Helper to read live sessions from store (avoids stale closure in async handlers)
   const getLiveSessions = () => useSessionStore.getState().sessions
-  const { getTag, setTag } = useProjectStore()
+  const { getTag, setTag, getProjectEmoji } = useProjectStore()
   const { getLabel } = useLabelStore()
-  const { isHidden, hide: hideSession } = useHiddenStore()
+  const { isHidden, hide: hideSession, unhide: unhideSession } = useHiddenStore()
   const { send, agentId } = useGatewayStore()
 
   // Track session keys that existed before we created a new session,
@@ -40,16 +48,24 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
     if (!matched) return
     pendingTagRef.current = null
     setTag(matched.key, slug)
-    getToken().then(token => {
-      fetch(`${API}/api/session-projects`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-        body: JSON.stringify({ sessionKey: matched.key, projectTag: slug }),
-      }).catch(() => {})
-    })
-    setOpenSession(matched)
+    authFetch(`${API}/api/session-projects`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionKey: matched.key, projectTag: slug }),
+    }).catch(() => {})
+    // Update pendingNewSession to the real key so pill strip stays accurate
+    setPendingNewSession(matched)
+    // Only force-navigate to the new session if the user is still on the temp session
+    // or on the project list. If they've already switched to a different real session,
+    // don't interrupt — they can find the new session in the pill strip or project list.
+    setOpenSession(prev => (prev === null || prev.key === pendingKey) ? matched : prev)
   }, [sessions])
   const [openSession, setOpenSession] = useState<Session | null>(null)
+  // Track the most-recently created (pending) session so it stays pinned in the pill strip
+  // even after the user swipes to another session. Cleared when the real key arrives.
+  const [pendingNewSession, setPendingNewSession] = useState<Session | null>(null)
+  // Track keys just archived so they're excluded from the strip immediately (before isHidden propagates)
+  const [justArchivedKeys, setJustArchivedKeys] = useState<Set<string>>(new Set())
   const [renamingKey, setRenamingKey] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const { setLabel: saveLabelLocal } = useLabelStore()
@@ -66,44 +82,27 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
     setRenamingKey(null)
     if (!trimmed || trimmed === (getLabel(s.key) || s.label || s.key)) return
     saveLabelLocal(s.key, trimmed)
-    wsSend({ type: 'req', id: `sessions-patch-${Date.now()}`, method: 'sessions.patch', params: { sessionKey: s.key, patch: { label: trimmed } } })
-    const token = await getToken()
-    fetch(`${API}/api/session-rename`, {
+    wsSend({ type: 'req', id: `sessions-patch-${Date.now()}`, method: 'sessions.patch', params: { key: s.key, label: trimmed } })
+    authFetch(`${API}/api/session-rename`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionKey: s.key, label: trimmed }),
     }).catch(() => {})
   }
 
+  const [longPressSession, setLongPressSession] = useState<Session | null>(null)
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const longPressDetectedRef = useRef(false)
   const [showPicker, setShowPicker] = useState(false)
   const [showProjectSwitcher, setShowProjectSwitcher] = useState(false)
+  const [restoringSession, setRestoringSession] = useState<Session | null>(null)
   const [allProjects, setAllProjects] = useState<Project[]>([])
-  const [todos, setTodos] = useState<Array<{ id: number; text: string; owner: string | null }>>([]) 
-  const [todosOpen, setTodosOpen] = useState(false)
-
   useEffect(() => {
     fetch(`${API}/api/projects`)
       .then(r => r.json())
       .then(d => setAllProjects(d.projects || []))
       .catch(() => {})
   }, [])
-
-  const refreshTodos = async () => {
-    try {
-      const token = await getToken()
-      const r = await fetch(`${API}/api/todos`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {}
-      })
-      const data: Record<string, { items: Array<{ id: number; text: string; owner: string | null }> }> = await r.json()
-      setTodos(data[project.slug]?.items || data[project.name]?.items || [])
-    } catch {}
-  }
-  useEffect(() => { refreshTodos() }, [project.slug])
-
-  const handleTodoComplete = async (id: number) => {
-    await fetch(`${API}/api/todos/${id}/complete`, { method: 'PATCH' }).catch(() => {})
-    refreshTodos()
-  }
 
   const handleTodoNewSession = async (text: string) => {
     const key = `session-${Date.now()}`
@@ -120,13 +119,11 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
       send({ type: 'req', id: `sessions-list-${Date.now()}`, method: 'sessions.list', params: agentId ? { agentId } : {} })
     }, 800)
     // Also persist the tag to server async
-    getToken().then(token => {
-      fetch(`${API}/api/session-projects`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-        body: JSON.stringify({ sessionKey: key, projectTag: project.slug }),
-      }).catch(() => {})
-    })
+    authFetch(`${API}/api/session-projects`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionKey: key, projectTag: project.slug }),
+    }).catch(() => {})
   }
 
   const isAgentSession = (s: Session) => {
@@ -138,11 +135,20 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
   }
 
   const isOthers = project.slug === 'others'
+  const isArchived = project.slug === 'archived'
 
-  const projectSessions = sessions.filter((s: Session) => {
-    if (isOthers) return !getTag(s.key).project && !isHidden(s.key) && !isHidden(s.id || '') && !isAgentSession(s)
-    return getTag(s.key).project === project.slug && !isHidden(s.key) && !isHidden(s.id || '') && !isAgentSession(s)
-  })
+  const projectSessions = (isArchived ? hiddenSessions : sessions)
+    .filter((s: Session) => {
+      if (isArchived) return true
+      if (isOthers) return !getTag(s.key).project && !isHidden(s.key) && !isHidden(s.id || '') && !isAgentSession(s)
+      return getTag(s.key).project === project.slug && !isHidden(s.key) && !isHidden(s.id || '') && !isAgentSession(s)
+    })
+    .sort((a, b) => {
+      if (!isArchived) return 0
+      const ta = a.lastActivity ? new Date(a.lastActivity as string).getTime() : 0
+      const tb = b.lastActivity ? new Date(b.lastActivity as string).getTime() : 0
+      return tb - ta
+    })
 
   const untaggedSessions = sessions.filter((s: Session) =>
     !getTag(s.key).project && !isHidden(s.key) && !isHidden(s.id || '') && !isAgentSession(s)
@@ -158,28 +164,57 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
     setSessions([newSession, ...getLiveSessions()])
     setTag(key, project.slug)
     setShowPicker(false)
+    setPendingNewSession(newSession)
     setOpenSession(newSession)
     // Persist the tag to server async
-    getToken().then(token => {
-      fetch(`${API}/api/session-projects`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-        body: JSON.stringify({ sessionKey: key, projectTag: project.slug }),
-      }).catch(() => {})
-    })
+    authFetch(`${API}/api/session-projects`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionKey: key, projectTag: project.slug }),
+    }).catch(() => {})
     // Defer context injection until user actually sends a first message
     setPendingProjectInit(key, project.slug)
   }
 
-  const handleTag = async (sessionKey: string) => {
-    const token = await getToken()
-    await fetch(`${API}/api/session-projects`, {
+  const handleLongPressStart = (s: Session) => {
+    longPressDetectedRef.current = false
+    longPressTimerRef.current = setTimeout(() => {
+      longPressDetectedRef.current = true
+      setLongPressSession(s)
+    }, 500)
+  }
+
+  const handleLongPressEnd = () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current)
+      longPressTimerRef.current = null
+    }
+  }
+
+  const handleMoveTo = async (sessionKey: string, newSlug: string) => {
+    setTag(sessionKey, newSlug)
+    setLongPressSession(null)
+    // Close the open pane if the reassigned session was in it
+    if (openSession?.key === sessionKey) setOpenSession(null)
+    authFetch(`${API}/api/session-projects`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-      body: JSON.stringify({ sessionKey, projectTag: project.slug }),
-    })
-    setTag(sessionKey, project.slug)
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionKey, projectTag: newSlug }),
+    }).catch(() => {})
+  }
+
+  const handleTag = async (sessionKey: string, targetSlug?: string) => {
+    const slug = targetSlug ?? project.slug
+    // Optimistic: update UI immediately
+    setTag(sessionKey, slug)
     setShowPicker(false)
+    setRestoringSession(null)
+    // Persist async
+    authFetch(`${API}/api/session-projects`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionKey, projectTag: slug }),
+    }).catch(() => {})
   }
 
   const statusColors: Record<string, string> = {
@@ -203,12 +238,17 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
     // until the gateway fires sessions.list after the first message.
     const recentSessionsForChat = (() => {
       const filtered = sessions.filter((s: Session) =>
-        !isHidden(s.key) && !isAgentSession(s) && !/^session-\d+$/.test(s.key)
+        !isHidden(s.key) && !justArchivedKeys.has(s.key) && !isAgentSession(s) && !/^session-\d+$/.test(s.key)
       ).slice(0, 10)
-      if (!filtered.find(s => s.key === openSession.key)) {
-        return [openSession, ...filtered].slice(0, 10)
+      const result: Session[] = [...filtered]
+      // Include current openSession only if not archived
+      const currentArchived = justArchivedKeys.has(openSession.key) || isHidden(openSession.key)
+      if (!currentArchived && !result.find(s => s.key === openSession.key)) result.unshift(openSession)
+      // Pin pending new session in strip so temp key stays visible until real key arrives
+      if (pendingNewSession && !result.find(s => s.key === pendingNewSession.key)) {
+        result.unshift(pendingNewSession)
       }
-      return filtered
+      return result.slice(0, 10)
     })()
     return <MobileFullChat
       key={openSession.key}
@@ -217,15 +257,16 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
       recentSessions={recentSessionsForChat}
       onSwitch={(s) => setOpenSession(s)}
       onArchive={() => {
-        hideSession(openSession.key)
-        if (openSession.id) hideSession(openSession.id)
-        // Jump to next project session instead of returning to project list
-        const remaining = projectSessions.filter((s: Session) => s.key !== openSession.key)
-        if (remaining.length > 0) {
-          setOpenSession(remaining[0])
-        } else {
-          setOpenSession(null)
-        }
+        const keyToHide = openSession.key
+        const idToHide = openSession.id
+        // Mark as archived immediately so strip removes it this render
+        setJustArchivedKeys(prev => { const s = new Set(prev); s.add(keyToHide); if (idToHide) s.add(idToHide); return s })
+        hideSession(keyToHide)
+        if (idToHide) hideSession(idToHide)
+        if (pendingNewSession?.key === keyToHide) setPendingNewSession(null)
+        // Jump to next session in project, or go to list if none left
+        const remaining = projectSessions.filter((s: Session) => s.key !== keyToHide)
+        setOpenSession(remaining.length > 0 ? remaining[0] : null)
       }}
     />
   }
@@ -258,22 +299,22 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
             <span className="text-white font-semibold text-sm truncate">{project.name}</span>
             {onSwitchProject && <span className="text-[#4b5563] text-xs shrink-0">⌄</span>}
           </button>
-          {!isOthers && (
-            <button
-              onClick={handleNewSession}
-              className="text-xs text-[#6366f1] hover:text-[#818cf8] transition-colors px-2 py-1 font-medium"
-              title="New session in this project"
-            >
-              ✶ New
-            </button>
-          )}
-          {!isOthers && (
+          {!isOthers && !isArchived && (
             <button
               onClick={() => setShowPicker(true)}
               className="text-xs text-[#6b7280] hover:text-white transition-colors px-1 py-1"
-              title="Add existing session to this project"
+              title="Assign existing session to this project"
             >
-              + Add
+              Assign
+            </button>
+          )}
+          {!isOthers && !isArchived && (
+            <button
+              onClick={handleNewSession}
+              className="w-7 h-7 rounded-full bg-[#6366f1] text-white flex items-center justify-center text-lg font-light leading-none active:bg-[#818cf8] shrink-0"
+              title="New session in this project"
+            >
+              +
             </button>
           )}
         </div>
@@ -318,6 +359,7 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
               <div
                 key={s.key}
                 className="flex items-center bg-[#181c24] border border-[#2a3142] rounded-2xl overflow-hidden"
+                style={{ WebkitTouchCallout: 'none' } as React.CSSProperties}
               >
                 {renamingKey === s.key ? (
                   <input
@@ -331,8 +373,12 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
                   />
                 ) : (
                 <button
-                  onClick={() => setOpenSession(s)}
+                  onClick={() => { if (longPressDetectedRef.current) { longPressDetectedRef.current = false; return } setOpenSession(s) }}
+                  onTouchStart={(e) => { e.currentTarget.style.webkitTapHighlightColor = 'transparent'; handleLongPressStart(s) }}
+                  onTouchEnd={handleLongPressEnd}
+                  onTouchMove={handleLongPressEnd}
                   className="flex-1 min-w-0 text-left px-4 py-3.5 hover:bg-[#1e2330] transition-colors overflow-hidden"
+                  style={{ WebkitTapHighlightColor: 'transparent' }}
                 >
                   <div className="flex items-center gap-3">
                     <div
@@ -356,65 +402,34 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
                 >
                   ✏️
                 </button>
-                <button
-                  onClick={() => {
-                    if (window.confirm('Archive this session?')) {
+                {!isArchived ? (
+                  <button
+                    onClick={() => {
                       hideSession(s.key)
                       if (s.id) hideSession(s.id)
-                    }
-                  }}
-                  className="px-3 py-3.5 text-[#4b5563] hover:text-red-400 transition-colors border-l border-[#2a3142] shrink-0"
-                  title="Archive"
-                >
-                  🗑
-                </button>
+                    }}
+                    className="px-3 py-3.5 text-[#4b5563] hover:text-red-400 transition-colors border-l border-[#2a3142] shrink-0"
+                    title="Archive"
+                  >
+                    🗑
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => {
+                      unhideSession(s.key)
+                      if (s.id) unhideSession(s.id)
+                      setRestoringSession(s)
+                    }}
+                    className="px-3 py-3.5 text-[#4b5563] hover:text-[#6366f1] transition-colors border-l border-[#2a3142] shrink-0"
+                    title="Restore"
+                  >
+                    ↩
+                  </button>
+                )}
               </div>
             )
           })}
 
-          {/* Todos section */}
-          {todos.length > 0 && (
-            <div className="mt-3">
-              <button
-                onClick={() => setTodosOpen(o => !o)}
-                className="w-full flex items-center gap-2 px-2 py-2 rounded-xl hover:bg-[#1e2330] transition-colors"
-              >
-                <span className="text-sm font-medium text-[#6b7280] flex-1 text-left">Todos</span>
-                <span className="text-xs px-2 py-0.5 rounded-full bg-yellow-900/40 text-yellow-300 font-mono">{todos.length}</span>
-                <span className="text-xs text-[#4b5563]">{todosOpen ? '▲' : '▼'}</span>
-              </button>
-              {todosOpen && (
-                <div className="mt-1 space-y-1">
-                  {todos.map(todo => {
-                    let pressTimer: ReturnType<typeof setTimeout> | null = null
-                    return (
-                      <div
-                        key={todo.id}
-                        className="flex items-start gap-3 bg-[#181c24] border border-[#2a3142] rounded-xl px-4 py-3"
-                        onClick={() => handleTodoNewSession(todo.text)}
-                        onTouchStart={() => { pressTimer = setTimeout(() => {
-                          if (confirm(`Mark as done?\n\n"${todo.text}"`))
-                            handleTodoComplete(todo.id)
-                        }, 600) }}
-                        onTouchEnd={() => { if (pressTimer) clearTimeout(pressTimer) }}
-                        onTouchMove={() => { if (pressTimer) clearTimeout(pressTimer) }}
-                      >
-                        {todo.owner && (
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono shrink-0 mt-0.5 ${
-                            todo.owner === 'ME' ? 'bg-blue-900/50 text-blue-300' :
-                            todo.owner === 'YOU' ? 'bg-amber-900/50 text-amber-300' :
-                            todo.owner === 'BOTH' ? 'bg-green-900/50 text-green-300' :
-                            'bg-gray-800 text-gray-400'
-                          }`}>{todo.owner}</span>
-                        )}
-                        <span className="text-sm text-[#9ca3af] leading-snug flex-1">{todo.text}</span>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-            </div>
-          )}
           </div>
         )}
       </div>
@@ -457,6 +472,54 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
         </div>
       )}
 
+      {/* Move to project bottom sheet */}
+      {longPressSession && (
+        <div
+          className="absolute inset-0 z-50 flex flex-col justify-end"
+          style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+        >
+          <div className="absolute inset-0 bg-black/60" onClick={() => setLongPressSession(null)} />
+          <div className="relative bg-[#181c24] rounded-t-3xl border-t border-[#2a3142] px-4 pt-4 pb-6">
+            <div className="w-10 h-1 bg-[#2a3142] rounded-full mx-auto mb-4" />
+            <div className="text-[#6b7280] text-xs font-medium mb-1 px-1">Move to project</div>
+            <div className="text-white text-sm font-medium mb-3 px-1 truncate">
+              {getLabel(longPressSession.key) || longPressSession.label || longPressSession.key}
+            </div>
+            <div className="space-y-1 max-h-72 overflow-y-auto">
+              {allProjects
+                .filter(p => p.slug !== getTag(longPressSession.key).project)
+                .map(p => (
+                  <button
+                    key={p.id}
+                    onClick={() => handleMoveTo(longPressSession.key, p.slug)}
+                    className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left hover:bg-[#2a3142] transition-colors"
+                  >
+                    <div
+                      className="w-9 h-9 rounded-xl flex items-center justify-center text-lg shrink-0"
+                      style={{ background: p.color + '22', border: `1px solid ${p.color}44` }}
+                    >
+                      {p.emoji}
+                    </div>
+                    <span className="text-sm font-medium text-white">{p.name}</span>
+                  </button>
+                ))
+              }
+              {getTag(longPressSession.key).project && getTag(longPressSession.key).project !== 'others' && (
+                <button
+                  onClick={() => handleMoveTo(longPressSession.key, '')}
+                  className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left hover:bg-[#2a3142] transition-colors"
+                >
+                  <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg shrink-0 bg-gray-800 border border-gray-700">
+                    📂
+                  </div>
+                  <span className="text-sm font-medium text-[#6b7280]">Move to Others (unassign)</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Session picker overlay */}
       {showPicker && (
         <div className="absolute inset-0 bg-[#0f1117]/90 backdrop-blur-sm z-50 flex flex-col"
@@ -464,7 +527,7 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
         >
           <div className="bg-[#181c24] border-b border-[#2a3142] px-4 py-3 flex items-center gap-3">
             <button onClick={() => setShowPicker(false)} className="text-[#6366f1] font-semibold text-base w-8">←</button>
-            <span className="text-white font-semibold text-sm">Add to {project.name}</span>
+            <span className="text-white font-semibold text-sm">Assign to {project.name}</span>
           </div>
           <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
             {untaggedSessions.length === 0 ? (
@@ -483,6 +546,42 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
                 )
               })
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Restore session — project picker */}
+      {restoringSession && (
+        <div className="absolute inset-0 bg-[#0f1117]/90 backdrop-blur-sm z-50 flex flex-col"
+          style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}
+        >
+          <div className="bg-[#181c24] border-b border-[#2a3142] px-4 py-3 flex items-center gap-3">
+            <button onClick={() => setRestoringSession(null)} className="text-[#6366f1] font-semibold text-base w-8">←</button>
+            <span className="text-white font-semibold text-sm">Move to project</span>
+          </div>
+          <div className="px-4 pt-2 pb-1">
+            <p className="text-[#6b7280] text-xs py-2">
+              “{getLabel(restoringSession.key) || restoringSession.label || restoringSession.key}” was restored.
+              Choose a project, or skip to leave it untagged.
+            </p>
+          </div>
+          <div className="flex-1 overflow-y-auto px-4 py-2 space-y-2">
+            {allProjects.filter(p => p.slug !== 'others' && p.slug !== 'archived').map(p => (
+              <button
+                key={p.slug}
+                onClick={() => handleTag(restoringSession.key, p.slug)}
+                className="w-full text-left bg-[#1e2330] hover:bg-[#2a3142] rounded-xl px-4 py-3 text-sm text-white transition-colors flex items-center gap-3"
+              >
+                <span className="text-lg">{p.emoji || '📁'}</span>
+                <span>{p.name}</span>
+              </button>
+            ))}
+            <button
+              onClick={() => setRestoringSession(null)}
+              className="w-full text-center text-[#6b7280] py-3 text-sm"
+            >
+              Skip — leave untagged
+            </button>
           </div>
         </div>
       )}

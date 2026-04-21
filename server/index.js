@@ -1,65 +1,167 @@
 import express from 'express'
 import cors from 'cors'
-import pg from 'pg'
 import fs from 'fs/promises'
+import { readFileSync, mkdirSync } from 'fs'
 import path from 'path'
 import { createRequire } from 'module'
-import { verifyToken } from '@clerk/backend'
+import crypto from 'crypto'
+import Database from 'better-sqlite3'
+import bcrypt from 'bcrypt'
+import jwt from 'jsonwebtoken'
+import rateLimit from 'express-rate-limit'
+import helmet from 'helmet'
+import cookieParser from 'cookie-parser'
 import webpush from 'web-push'
 
 const _require = createRequire(import.meta.url)
 const WS = _require('/usr/lib/node_modules/openclaw/node_modules/ws')
 const pdfParse = _require('pdf-parse')
 
-// VAPID config for Web Push — all values must be set via env vars
+// ─── Config ──────────────────────────────────────────────────────────────────
+
+const HOME = process.env.HOME || '/root'
+const GATEWAY_URL = process.env.GATEWAY_URL
+const GATEWAY_TOKEN = process.env.GATEWAY_TOKEN
+const PORT = parseInt(process.env.OCTIS_API_PORT || process.env.PORT || '3747')
+const WORKSPACE = process.env.OCTIS_WORKSPACE || path.join(HOME, '.openclaw/workspace')
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD
+const COSTS_DB_URL = process.env.COSTS_DB_URL  // optional; enables /api/costs and /api/sessions/history
+const GITHUB_PAT = process.env.GITHUB_PAT || ''
+const GITHUB_REPO = 'octis-app/octis'
+
+const MEMORY_FILE = path.join(WORKSPACE, 'MEMORY.md')
+const TODOS_FILE = path.join(WORKSPACE, 'TODOS.md')
+const MEMORY_DIR = path.join(WORKSPACE, 'memory')
+
+if (!GATEWAY_TOKEN) {
+  console.error('[octis] GATEWAY_TOKEN env var is required')
+  process.exit(1)
+}
+
+// JWT secret derived from gateway token — no extra env var
+const JWT_SECRET = crypto.createHash('sha256').update(GATEWAY_TOKEN + ':octis-session').digest('hex')
+
+// Auto-auth: if no ADMIN_PASSWORD set, skip login entirely (single-user mode)
+const AUTO_AUTH = !ADMIN_PASSWORD
+if (AUTO_AUTH) console.warn('[octis] Auto-auth mode: no ADMIN_PASSWORD set. Anyone with network access controls your agent.')
+else console.log('[octis] Password auth enabled')
+
+// ─── VAPID ───────────────────────────────────────────────────────────────────
+
 const VAPID_PUBLIC = process.env.VAPID_PUBLIC_KEY || ''
 const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY || ''
 const VAPID_CONTACT = process.env.VAPID_CONTACT || 'mailto:admin@example.com'
 if (VAPID_PUBLIC && VAPID_PRIVATE) {
   webpush.setVapidDetails(VAPID_CONTACT, VAPID_PUBLIC, VAPID_PRIVATE)
+  console.log('[octis] Push notifications enabled')
 } else {
   console.warn('[octis] VAPID keys not set — push notifications disabled')
 }
 
+// ─── SQLite ───────────────────────────────────────────────────────────────────
+
+const DATA_DIR = path.join(HOME, '.octis')
+mkdirSync(DATA_DIR, { recursive: true })
+
+const db = new Database(path.join(DATA_DIR, 'octis.db'))
+db.pragma('journal_mode = WAL')
+db.pragma('foreign_keys = ON')
+
+const __serverDir = path.dirname(new URL(import.meta.url).pathname)
+const schema = readFileSync(path.join(__serverDir, '..', 'db', 'schema.sql'), 'utf8')
+db.exec(schema)
+
+// First-run: create admin account if users table empty
+const userCount = db.prepare('SELECT COUNT(*) as n FROM users').get()
+if (userCount.n === 0 && ADMIN_EMAIL) {
+  const hash = ADMIN_PASSWORD ? bcrypt.hashSync(ADMIN_PASSWORD, 10) : null
+  db.prepare('INSERT INTO users (email, password_hash, role) VALUES (?, ?, ?)').run(ADMIN_EMAIL, hash, 'admin')
+  console.log('[octis] Created admin account:', ADMIN_EMAIL)
+}
+
+// ─── Optional Postgres for costs (feature-flagged) ───────────────────────────
+
+let pgPool = null
+if (COSTS_DB_URL) {
+  try {
+    const pg = (await import('pg')).default
+    pgPool = new pg.Pool({ connectionString: COSTS_DB_URL, ssl: false })
+    console.log('[octis] Costs DB enabled')
+  } catch (e) {
+    console.warn('[octis] Failed to init costs DB:', e.message)
+  }
+}
+
+// ─── Express setup ───────────────────────────────────────────────────────────
+
 const app = express()
+app.use(helmet({ contentSecurityPolicy: false }))
 app.use(cors())
-app.use(express.json({ limit: '2mb' }))
+app.use(cookieParser())
+app.use(express.json({ limit: '10mb' }))
 
-// --- Config paths ---
-const HOME = process.env.HOME || '/root'
-const OPENCLAW_CONFIG = path.join(HOME, '.openclaw/openclaw.json')
-const WORKSPACE = process.env.OCTIS_WORKSPACE || path.join(HOME, '.openclaw/workspace')
-const MEMORY_FILE = path.join(WORKSPACE, 'MEMORY.md')
-const TODOS_FILE = path.join(WORKSPACE, 'TODOS.md')
-const MEMORY_DIR = path.join(WORKSPACE, 'memory')
-const LABELS_FILE = path.join(WORKSPACE, 'memory/octis-labels.json')
-const USER_GATEWAYS_FILE = path.join(WORKSPACE, 'memory/octis-user-gateways.json')
+// ─── Auth middleware ──────────────────────────────────────────────────────────
 
-// Per-user gateway config helpers
-async function readUserGateways() {
-  try { return JSON.parse(await fs.readFile(USER_GATEWAYS_FILE, 'utf8')) } catch { return {} }
-}
-async function writeUserGateways(data) {
-  await fs.writeFile(USER_GATEWAYS_FILE, JSON.stringify(data, null, 2))
+function requireAuth(req, res, next) {
+  if (AUTO_AUTH) {
+    req.user = db.prepare('SELECT * FROM users LIMIT 1').get()
+      || { id: 0, email: ADMIN_EMAIL || 'admin', role: 'owner' }
+    // Normalize role
+    if (req.user.role === 'admin') req.user.role = 'owner'
+    return next()
+  }
+  const token = req.cookies?.octis_token
+    || (req.headers.authorization || '').replace(/^Bearer\s+/i, '')
+  if (!token) return res.status(401).json({ error: 'Unauthorized' })
+  try {
+    req.user = jwt.verify(token, JWT_SECRET)
+    // Always read fresh role from DB (so role changes don't require re-login)
+    const freshUser = req.user.id ? db.prepare('SELECT role FROM users WHERE id = ?').get(req.user.id) : null
+    if (freshUser) req.user.role = freshUser.role
+    // Normalize: treat 'admin' as 'owner'
+    if (req.user.role === 'admin') req.user.role = 'owner'
+    next()
+  } catch {
+    res.status(401).json({ error: 'Unauthorized' })
+  }
 }
 
-// Persistent label helpers
-async function readLabels() {
-  try { return JSON.parse(await fs.readFile(LABELS_FILE, 'utf8')) } catch { return {} }
-}
-async function writeLabels(labels) {
-  await fs.writeFile(LABELS_FILE, JSON.stringify(labels, null, 2))
-}
+// ─── Auth routes ─────────────────────────────────────────────────────────────
 
-// --- Admin gateway WebSocket helper ---
-const GW_TOKEN = '8UJBwudjSyOifNfPltG0Nedqn1w5UcmTY9abYqGrAcY'
+const loginLimiter = rateLimit({ windowMs: 60_000, max: 10, message: { error: 'Too many attempts' } })
+
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  res.json({ id: req.user.id, email: req.user.email, role: req.user.role, autoAuth: AUTO_AUTH })
+})
+
+app.post('/api/auth/login', loginLimiter, async (req, res) => {
+  if (AUTO_AUTH) return res.json({ ok: true })
+  const { email, password } = req.body
+  if (!email || !password) return res.status(400).json({ error: 'Email and password required' })
+  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email)
+  if (!user || !user.password_hash) return res.status(401).json({ error: 'Invalid credentials' })
+  const ok = await bcrypt.compare(password, user.password_hash)
+  if (!ok) return res.status(401).json({ error: 'Invalid credentials' })
+  const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' })
+  res.cookie('octis_token', token, {
+    httpOnly: true, secure: true, sameSite: 'strict',
+    maxAge: 7 * 24 * 60 * 60 * 1000
+  })
+  res.json({ ok: true, user: { id: user.id, email: user.email, role: user.role } })
+})
+
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie('octis_token')
+  res.json({ ok: true })
+})
+
+// ─── Admin WebSocket helper ───────────────────────────────────────────────────
 
 function adminGwCall(calls) {
-  // calls = array of { method, params } to execute in sequence
-  // Returns promise that resolves to array of results
   return new Promise((resolve, reject) => {
     const ws = new WS('ws://localhost:18789/gateway', {
-      headers: { Authorization: `Bearer ${GW_TOKEN}`, Origin: 'http://localhost:18789' }
+      headers: { Authorization: `Bearer ${GATEWAY_TOKEN}`, Origin: 'http://localhost:18789' }
     })
     let reqId = 1
     const pending = new Map()
@@ -79,22 +181,18 @@ function adminGwCall(calls) {
     ws.on('message', async (raw) => {
       let msg
       try { msg = JSON.parse(raw.toString()) } catch { return }
-
       if (msg.type === 'event' && msg.event === 'connect.challenge') {
         try {
           await sendReq('connect', {
             minProtocol: 3, maxProtocol: 3,
             client: { id: 'openclaw-control-ui', version: '2026.4.10', platform: 'linux', mode: 'ui' },
-            caps: [], auth: { token: GW_TOKEN }, role: 'operator', scopes: ['operator.admin']
+            caps: [], auth: { token: GATEWAY_TOKEN }, role: 'operator', scopes: ['operator.admin']
           })
-          for (const call of calls) {
-            results.push(await sendReq(call.method, call.params))
-          }
+          for (const call of calls) results.push(await sendReq(call.method, call.params))
           ws.close()
           resolve(results)
         } catch (err) { ws.close(); reject(err) }
       }
-
       if (msg.type === 'res') {
         const p = pending.get(msg.id)
         if (p) { pending.delete(msg.id); if (msg.ok) p.resolve(msg.payload); else p.reject(new Error(msg.error?.message || 'RPC failed')) }
@@ -106,140 +204,8 @@ function adminGwCall(calls) {
   })
 }
 
-// --- Read gateway token directly from openclaw.json (single source of truth) ---
-async function getGatewayConfig() {
-  try {
-    const raw = await fs.readFile(OPENCLAW_CONFIG, 'utf8')
-    const config = JSON.parse(raw)
-    const token = config?.gateway?.auth?.token || ''
-    const url = process.env.GATEWAY_URL || 'wss://octis.duckdns.org/ws'
-    return { url, token }
-  } catch (e) {
-    console.error('[octis] Failed to read openclaw.json:', e.message)
-    return { url: 'wss://octis.duckdns.org/ws', token: '' }
-  }
-}
+// ─── Utilities ───────────────────────────────────────────────────────────────
 
-// --- Clerk auth ---
-const CLERK_SECRET_KEY = process.env.CLERK_SECRET_KEY
-if (!CLERK_SECRET_KEY) {
-  console.error('[octis] CLERK_SECRET_KEY env var is required')
-  process.exit(1)
-}
-
-// User config: loaded from config/users.json (not committed — copy from config/users.example.json)
-// Structure: { "clerk_user_id": { "role": "owner"|"member", "agentId": "main", "displayName": "Name" } }
-let USER_CONFIG = {}
-try {
-  const usersPath = new URL('./config/users.json', import.meta.url).pathname
-  USER_CONFIG = JSON.parse(await fs.readFile(usersPath, 'utf8'))
-  console.log(`[octis] Loaded ${Object.keys(USER_CONFIG).length} user(s) from config/users.json`)
-} catch {
-  console.warn('[octis] config/users.json not found — no users configured. Copy config/users.example.json to get started.')
-}
-
-async function requireAuth(req, res, next) {
-  try {
-    const authHeader = req.headers.authorization || ''
-    const token = authHeader.replace(/^Bearer\s+/i, '')
-    if (!token) return res.status(401).json({ error: 'Missing auth token' })
-    const payload = await verifyToken(token, { secretKey: CLERK_SECRET_KEY })
-    const userId = payload?.sub
-    if (!userId) return res.status(401).json({ error: 'Invalid token' })
-    req.clerkUserId = userId
-    next()
-  } catch (e) {
-    return res.status(401).json({ error: 'Auth failed', detail: e.message })
-  }
-}
-
-// --- Postgres ---
-const pool = new pg.Pool({
-  host: process.env.PG_HOST || 'localhost',
-  database: process.env.PG_DB || 'postgres',
-  user: process.env.PG_USER || 'postgres',
-  password: process.env.PG_PASSWORD || '',
-  port: parseInt(process.env.PG_PORT || '5432'),
-  ssl: false,
-})
-
-const PORT = process.env.OCTIS_API_PORT || 3747
-
-// --- Endpoints ---
-
-app.get('/api/health', (req, res) => res.json({ ok: true }))
-
-// Force-clear page: nukes SW cache + stale octis localStorage, redirects to fresh load
-app.get('/api/clear', (req, res) => {
-  res.setHeader('Content-Type', 'text/html')
-  res.send(`<!DOCTYPE html><html><head><title>Octis — Clearing cache…</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>body{background:#0f1117;color:#e8eaf0;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:12px}
-p{color:#6b7280;font-size:14px}</style></head><body>
-<div style="font-size:2rem">&#x1F9F9;</div>
-<div>Clearing Octis cache…</div>
-<p id="s">Unregistering service workers…</p>
-<script>
-async function clear() {
-  document.getElementById('s').textContent = 'Clearing caches…'
-  if ('caches' in window) {
-    const keys = await caches.keys()
-    await Promise.all(keys.map(k => caches.delete(k)))
-  }
-  document.getElementById('s').textContent = 'Unregistering service workers…'
-  if ('serviceWorker' in navigator) {
-    const regs = await navigator.serviceWorker.getRegistrations()
-    await Promise.all(regs.map(r => r.unregister()))
-  }
-  document.getElementById('s').textContent = 'Clearing local state…'
-  const keysToRemove = Object.keys(localStorage).filter(k =>
-    k.startsWith('octis-pending-') || k.startsWith('octis-msg-cache-')
-  )
-  keysToRemove.forEach(k => localStorage.removeItem(k))
-  document.getElementById('s').textContent = 'Done! Redirecting…'
-  setTimeout(() => location.replace('/'), 1000)
-}
-clear().catch(e => { document.getElementById('s').textContent = 'Error: ' + e; })
-<\/script></body></html>`)
-})
-
-// Gateway config
-app.get('/api/gateway-config', requireAuth, async (req, res) => {
-  const userConf = USER_CONFIG[req.clerkUserId]
-  if (userConf) {
-    // Owner: gateway config is server-managed (from openclaw.json)
-    const gateway = await getGatewayConfig()
-    return res.json({ url: gateway.url, token: gateway.token, agentId: userConf.agentId || '', role: userConf.role })
-  }
-  // Member: check saved user gateway
-  const gateways = await readUserGateways()
-  const saved = gateways[req.clerkUserId]
-  if (saved) return res.json({ url: saved.url, token: saved.token, agentId: '', role: 'member' })
-  // New user — needs setup
-  return res.json({ needsSetup: true, role: 'new' })
-})
-
-// Save gateway config for a non-owner user
-app.post('/api/gateway-config', requireAuth, async (req, res) => {
-  if (USER_CONFIG[req.clerkUserId]) return res.status(403).json({ error: 'Owner config is server-managed' })
-  const { url, token } = req.body
-  if (!url || !token) return res.status(400).json({ error: 'url and token required' })
-  const gateways = await readUserGateways()
-  gateways[req.clerkUserId] = { url, token, updatedAt: new Date().toISOString() }
-  await writeUserGateways(gateways)
-  res.json({ ok: true, role: 'member' })
-})
-
-app.get('/api/me', requireAuth, async (req, res) => {
-  const userConf = USER_CONFIG[req.clerkUserId]
-  if (userConf) return res.json({ userId: req.clerkUserId, role: userConf.role, agentId: userConf.agentId })
-  const gateways = await readUserGateways()
-  const saved = gateways[req.clerkUserId]
-  const role = saved ? 'member' : 'new'
-  res.json({ userId: req.clerkUserId, role, agentId: '' })
-})
-
-// Clean a raw first_message into a readable session label
 function cleanSessionLabel(raw, sessionId) {
   let label = (raw || '').trim()
   const slackDmMatch = label.match(/Slack DM from [^:]+:\s*(.+)/i)
@@ -263,98 +229,58 @@ function cleanSessionLabel(raw, sessionId) {
   return label || (sessionId ? sessionId.slice(0, 16) + '…' : 'Session')
 }
 
-// Session costs
-app.get('/api/costs', async (req, res) => {
-  try {
-    const days = Math.min(parseInt(req.query.days || '30'), 90)
+// ─── Health ───────────────────────────────────────────────────────────────────
 
-    const { rows: daily } = await pool.query(`
-      SELECT
-        cost_date AS date,
-        SUM(total_cost_usd) AS total_cost_usd,
-        SUM(input_tokens) AS input_tokens,
-        SUM(output_tokens) AS output_tokens,
-        SUM(session_count) AS session_count
-      FROM raw_nexus.claw_user_daily_costs
-      WHERE cost_date >= CURRENT_DATE - ($1 || ' days')::INTERVAL
-      GROUP BY cost_date
-      ORDER BY cost_date ASC
-    `, [days])
+app.get('/api/health', (req, res) => res.json({ ok: true }))
 
-    const { rows: sessions } = await pool.query(`
-      SELECT
-        cs.session_id AS session_key,
-        COALESCE(ol.label, cs.first_message) AS session_label,
-        cs.sender_name,
-        SUM(cs.total_cost_usd) AS cost,
-        MAX(cs.last_ts) AS last_activity,
-        SUM(cs.input_tokens) AS input_tokens,
-        SUM(cs.output_tokens) AS output_tokens
-      FROM raw_nexus.claw_session_costs cs
-      LEFT JOIN raw_nexus.octis_session_labels ol ON ol.session_key = cs.session_id
-      WHERE cs.session_date >= CURRENT_DATE - ($1 || ' days')::INTERVAL
-      GROUP BY cs.session_id, cs.first_message, cs.sender_name, ol.label
-      ORDER BY cost DESC
-      LIMIT 50
-    `, [days])
+// ─── Cache clear page ─────────────────────────────────────────────────────────
 
-    const { rows: todaySessions } = await pool.query(`
-      SELECT
-        cs.session_id AS session_key,
-        COALESCE(ol.label, cs.first_message) AS session_label,
-        cs.sender_name,
-        SUM(cs.total_cost_usd) AS cost,
-        SUM(cs.input_tokens) AS input_tokens,
-        SUM(cs.output_tokens) AS output_tokens
-      FROM raw_nexus.claw_session_costs cs
-      LEFT JOIN raw_nexus.octis_session_labels ol ON ol.session_key = cs.session_id
-      WHERE cs.session_date = CURRENT_DATE
-      GROUP BY cs.session_id, cs.first_message, cs.sender_name, ol.label
-      ORDER BY cost DESC
-      LIMIT 20
-    `)
-
-    const { rows: todayRow } = await pool.query(`
-      SELECT COALESCE(SUM(total_cost_usd), 0) AS today_cost
-      FROM raw_nexus.claw_user_daily_costs
-      WHERE cost_date = CURRENT_DATE
-    `)
-
-    // Apply label cleaning to sessions that didn't have a saved override
-    const cleanSessions = (rows) => rows.map(r => ({
-      ...r,
-      cost: parseFloat(r.cost),
-      session_label: r.session_label === r.session_key ? r.session_label : cleanSessionLabel(r.session_label, r.session_key)
-    }))
-
-    res.json({
-      today: parseFloat(todayRow[0]?.today_cost || 0),
-      daily: daily.map(r => ({ ...r, total_cost_usd: parseFloat(r.total_cost_usd), date: r.date instanceof Date ? r.date.toISOString().slice(0, 10) : String(r.date).slice(0, 10) })),
-      sessions: cleanSessions(sessions),
-      todaySessions: cleanSessions(todaySessions),
-    })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
+app.get('/api/clear', (req, res) => {
+  res.setHeader('Content-Type', 'text/html')
+  res.send(`<!DOCTYPE html><html><head><title>Octis — Clearing cache…</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{background:#0f1117;color:#e8eaf0;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:12px}
+p{color:#6b7280;font-size:14px}</style></head><body>
+<div style="font-size:2rem">&#x1F9F9;</div>
+<div>Clearing Octis cache…</div>
+<p id="s">Working…</p>
+<script>
+async function clear() {
+  document.getElementById('s').textContent = 'Clearing caches…'
+  if ('caches' in window) { const keys = await caches.keys(); await Promise.all(keys.map(k => caches.delete(k))) }
+  document.getElementById('s').textContent = 'Unregistering service workers…'
+  if ('serviceWorker' in navigator) { const regs = await navigator.serviceWorker.getRegistrations(); await Promise.all(regs.map(r => r.unregister())) }
+  document.getElementById('s').textContent = 'Clearing local state…'
+  Object.keys(localStorage).filter(k => k.startsWith('octis-pending-') || k.startsWith('octis-msg-cache-')).forEach(k => localStorage.removeItem(k))
+  document.getElementById('s').textContent = 'Done! Redirecting…'
+  setTimeout(() => location.replace('/'), 1000)
+}
+clear().catch(e => { document.getElementById('s').textContent = 'Error: ' + e })
+<\/script></body></html>`)
 })
 
-// Session autoname — call Claude Haiku to generate a curated topic title
+// ─── Gateway config ───────────────────────────────────────────────────────────
+
+app.get('/api/gateway-config', requireAuth, (req, res) => {
+  res.json({ url: GATEWAY_URL, token: GATEWAY_TOKEN, agentId: 'main', role: req.user.role })
+})
+
+app.get('/api/me', requireAuth, (req, res) => {
+  res.json({ userId: String(req.user.id), role: req.user.role, agentId: 'main', email: req.user.email })
+})
+
+// ─── Session autoname ─────────────────────────────────────────────────────────
+
 app.post('/api/session-autoname', async (req, res) => {
   try {
     const { messages } = req.body
     if (!Array.isArray(messages) || messages.length === 0)
       return res.status(400).json({ error: 'No messages provided' })
 
-    // Read Anthropic key from agent auth profiles
-    const authProfilePath = path.join(HOME, '.openclaw/agents/main/agent/auth-profiles.json')
-    let apiKey = ''
-    try {
-      const prof = JSON.parse(await fs.readFile(authProfilePath, 'utf8'))
-      apiKey = prof?.profiles?.['anthropic:default']?.key || ''
-    } catch {}
-    if (!apiKey) return res.status(500).json({ error: 'No Anthropic API key found' })
+    // Use OpenRouter for autoname — Gemini Flash is faster and cheaper for 30-token labels
+    const openrouterKey = process.env.OPENROUTER_API_KEY || ''
+    if (!openrouterKey) return res.status(500).json({ error: 'No OpenRouter API key found' })
 
-    // Build a short excerpt of the conversation for context
     const excerpt = messages
       .filter(m => m.role === 'user' || m.role === 'assistant')
       .slice(0, 6)
@@ -369,101 +295,47 @@ app.post('/api/session-autoname', async (req, res) => {
       .join('\n')
 
     if (!excerpt.trim() || excerpt.replace(/User:|Assistant:/g, '').trim().length < 10)
-      return res.status(400).json({ error: 'Not enough conversation content to generate a title' })
+      return res.status(400).json({ error: 'Not enough conversation content' })
 
-    const prompt = `Given this conversation excerpt, generate a short session title: 3–5 words. \nCapture the specific topic or task — be concrete, not generic. No filler words ("help with", "working on", "discussion about"). No quotes, no period.\nExamples: "Octis Sidebar Layout Fixes", "Sage GL Batch Push", "Centurion Deal Analysis", "Loan Schema Audit", "Email Triage Setup".\n\n${excerpt}\n\nTitle:`
+    const prompt = `Generate a 3-5 word session title for this conversation. Reply with ONLY the title — no quotes, no punctuation, no explanation.\nExamples: Octis Sidebar Layout Fixes | Sage GL Batch Push | Centurion Deal Analysis\n\n${excerpt}\n\nTitle:`
 
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
+    const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
-      headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5',
-        max_tokens: 30,
-        messages: [{ role: 'user', content: prompt }],
-      }),
+      headers: { 'Authorization': `Bearer ${openrouterKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: req.body.model || process.env.OCTIS_RENAME_MODEL || 'meta-llama/llama-3.2-3b-instruct', max_tokens: 20, messages: [{ role: 'user', content: prompt }] }),
+      signal: AbortSignal.timeout(8000),
     })
     const data = await r.json()
-    const label = (data?.content?.[0]?.text || '').trim().replace(/^[\'"]+|[\'"]+$/g, '').slice(0, 60)
-    if (!label) return res.status(500).json({ error: 'Empty label from Claude' })
+    // OpenRouter returns OpenAI-format: choices[0].message.content
+    const raw = (data?.choices?.[0]?.message?.content || '').trim()
+    const label = raw.split('\n')[0].replace(/^['"`*\-•]+|['"`*\-•]+$/g, '').trim().slice(0, 60)
+    if (!label) return res.status(500).json({ error: 'Empty label from model' })
     res.json({ label })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
 })
 
-// Session rename (Postgres)
-app.post('/api/session-rename', async (req, res) => {
-  try {
-    const { sessionKey, label } = req.body
-    if (!sessionKey || !label) return res.status(400).json({ error: 'Missing sessionKey or label' })
-    await pool.query(
-      `INSERT INTO raw_nexus.octis_session_labels (session_key, label, updated_at)
-       VALUES ($1, $2, NOW())
-       ON CONFLICT (session_key) DO UPDATE SET label = $2, updated_at = NOW()`,
-      [sessionKey, label]
-    )
-    res.json({ ok: true })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
+// ─── Session rename ───────────────────────────────────────────────────────────
+
+app.post('/api/session-rename', requireAuth, (req, res) => {
+  const { sessionKey, label } = req.body
+  if (!sessionKey || !label) return res.status(400).json({ error: 'Missing sessionKey or label' })
+  db.prepare('INSERT OR REPLACE INTO octis_session_labels (session_key, label) VALUES (?, ?)').run(sessionKey, label)
+  res.json({ ok: true })
 })
 
-// Session labels (Postgres — base from claw_session_costs, overrides from octis_session_labels)
-app.get('/api/session-labels', async (req, res) => {
-  try {
-    const { rows } = await pool.query(`
-      SELECT session_id, first_message, sender_name, session_date
-      FROM raw_nexus.claw_session_costs
-      ORDER BY session_date DESC
-    `)
-    const labels = {}
-    for (const row of rows) {
-      const raw = row.first_message || ''
-      let label = raw
-      // Strip [Thread history - for context] block and extract user message
-      const slackDmMatch = label.match(/Slack DM from [^:]+:\s*(.+)/i)
-      if (slackDmMatch) {
-        label = slackDmMatch[1]
-      } else {
-        label = label
-          .replace(/^\[Thread history[^\]]*\][\s\S]*?System:\s*\[[^\]]*\]\s*/i, '')
-          .replace(/^System: \[\d{4}-\d{2}-\d{2}[^\]]*\] Slack DM from [^:]+: /i, '')
-          .replace(/^System: \[[^\]]*\] /i, '')
-          .replace(/^New Assistant Thread\s*/i, '')
-          .replace(/^Nouveau fil de discussion assistant\s*/i, '')
-      }
-      label = label
-        .replace(/Conversation info \(untrusted metadata\):[\s\S]*/i, '')
-        .replace(/Sender \(untrusted metadata\):[\s\S]*/i, '')
-        .replace(/\n[\s\S]*/s, '')
-        .trim()
-        .slice(0, 70)
-      if (!label) label = row.session_id.slice(0, 20)
-      labels[row.session_id] = label
-    }
-    // Build a secondary index: slackThreadId → label (extracted from first_message)
-    // This allows matching gateway keys like agent:main:slack:direct:u08ml:1776100438.018119
-    const threadIdIndex = {}
-    for (const row of rows) {
-      const match = (row.first_message || '').match(/slack message id:\s*([\d.]+)/i)
-      if (match) threadIdIndex[match[1]] = labels[row.session_id]
-    }
-    // Merge Postgres overrides (renames) on top — stored by gateway key
-    const { rows: overrides } = await pool.query('SELECT session_key, label FROM raw_nexus.octis_session_labels')
-    for (const r of overrides) labels[r.session_key] = r.label
-    // Include thread ID index in response
-    Object.assign(labels, threadIdIndex)
-    res.json(labels)
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
+// ─── Session labels ───────────────────────────────────────────────────────────
+
+app.get('/api/session-labels', (req, res) => {
+  const rows = db.prepare('SELECT session_key, label FROM octis_session_labels').all()
+  const labels = {}
+  for (const r of rows) labels[r.session_key] = r.label
+  res.json(labels)
 })
 
-// Memory
+// ─── Memory ───────────────────────────────────────────────────────────────────
+
 app.get('/api/memory', async (req, res) => {
   try {
     const [memory, todos] = await Promise.all([
@@ -498,267 +370,178 @@ app.get('/api/memory', async (req, res) => {
   }
 })
 
-// Projects — Postgres-backed
-// Return memory file content for a project (used for session context injection)
+// ─── Projects ─────────────────────────────────────────────────────────────────
+
 app.get('/api/project-memory/:slug', async (req, res) => {
   try {
-    const { rows } = await pool.query(
-      'SELECT memory_file, description, name FROM raw_nexus.octis_projects WHERE slug=$1',
-      [req.params.slug]
-    )
-    const project = rows[0]
-    if (!project) return res.json({ content: '' })
-    // Try memory_file field first, then fall back to memory/<slug>.md
+    const project = db.prepare('SELECT memory_file, description FROM octis_projects WHERE slug = ?').get(req.params.slug)
     const candidates = [
-      project.memory_file ? path.join(WORKSPACE, project.memory_file) : null,
+      project?.memory_file ? path.join(WORKSPACE, project.memory_file) : null,
       path.join(MEMORY_DIR, `${req.params.slug}.md`),
     ].filter(Boolean)
     let content = ''
     for (const p of candidates) {
       try { content = await fs.readFile(p, 'utf8'); break } catch {}
     }
-    // Return first 800 chars (minimal context)
-    res.json({ content: content.slice(0, 800), description: project.description || '' })
-  } catch (err) {
+    res.json({ content: content.slice(0, 800), description: project?.description || '' })
+  } catch {
     res.json({ content: '' })
   }
 })
 
-app.get('/api/projects', async (req, res) => {
-  try {
-    const { rows } = await pool.query(
-      'SELECT id, name, slug, emoji, color, description, memory_file, position, created_at, updated_at FROM raw_nexus.octis_projects ORDER BY position, name'
-    )
-    res.json({ projects: rows })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
+app.get('/api/projects', (req, res) => {
+  const projects = db.prepare('SELECT * FROM octis_projects ORDER BY position, name').all()
+  res.json({ projects })
 })
 
-app.post('/api/projects', requireAuth, async (req, res) => {
-  try {
-    const { name, emoji = '📁', color = '#6366f1', description = '', memory_file = '' } = req.body
-    if (!name?.trim()) return res.status(400).json({ error: 'name required' })
-    const slug = name.trim()
-    const { rows } = await pool.query(
-      `INSERT INTO raw_nexus.octis_projects (name, slug, emoji, color, description, memory_file)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (slug) DO UPDATE SET name=EXCLUDED.name, emoji=EXCLUDED.emoji, color=EXCLUDED.color, description=EXCLUDED.description, memory_file=EXCLUDED.memory_file, updated_at=now()
-       RETURNING *`,
-      [slug, slug, emoji, color, description, memory_file]
-    )
-    res.json({ project: rows[0] })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
+app.post('/api/projects', requireAuth, (req, res) => {
+  const { name, emoji = '📁', color = '#6366f1', description = '', memory_file = '' } = req.body
+  if (!name?.trim()) return res.status(400).json({ error: 'name required' })
+  const slug = name.trim()
+  db.prepare(
+    `INSERT INTO octis_projects (name, slug, emoji, color, description, memory_file)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(slug) DO UPDATE SET name=excluded.name, emoji=excluded.emoji, color=excluded.color,
+     description=excluded.description, memory_file=excluded.memory_file, updated_at=unixepoch()`
+  ).run(slug, slug, emoji, color, description, memory_file)
+  const project = db.prepare('SELECT * FROM octis_projects WHERE slug = ?').get(slug)
+  res.json({ project })
 })
 
-app.patch('/api/projects/:id', requireAuth, async (req, res) => {
-  try {
-    const { id } = req.params
-    const { name, emoji, color, description, memory_file, position } = req.body
-    const sets = []
-    const vals = []
-    let i = 1
-    if (name !== undefined)        { sets.push(`name=$${i++}`);         vals.push(name) }
-    if (emoji !== undefined)       { sets.push(`emoji=$${i++}`);        vals.push(emoji) }
-    if (color !== undefined)       { sets.push(`color=$${i++}`);        vals.push(color) }
-    if (description !== undefined) { sets.push(`description=$${i++}`);  vals.push(description) }
-    if (memory_file !== undefined) { sets.push(`memory_file=$${i++}`);  vals.push(memory_file) }
-    if (position !== undefined)    { sets.push(`position=$${i++}`);     vals.push(position) }
-    if (!sets.length) return res.status(400).json({ error: 'nothing to update' })
-    sets.push(`updated_at=now()`)
-    vals.push(id)
-    const { rows } = await pool.query(
-      `UPDATE raw_nexus.octis_projects SET ${sets.join(', ')} WHERE id=$${i} RETURNING *`,
-      vals
-    )
-    res.json({ project: rows[0] })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
+app.patch('/api/projects/:id', requireAuth, (req, res) => {
+  const { id } = req.params
+  const { name, emoji, color, description, memory_file, position } = req.body
+  const sets = []
+  const vals = []
+  if (name !== undefined)        { sets.push('name=?');         vals.push(name) }
+  if (emoji !== undefined)       { sets.push('emoji=?');        vals.push(emoji) }
+  if (color !== undefined)       { sets.push('color=?');        vals.push(color) }
+  if (description !== undefined) { sets.push('description=?');  vals.push(description) }
+  if (memory_file !== undefined) { sets.push('memory_file=?');  vals.push(memory_file) }
+  if (position !== undefined)    { sets.push('position=?');     vals.push(position) }
+  if (!sets.length) return res.status(400).json({ error: 'nothing to update' })
+  sets.push('updated_at=unixepoch()')
+  vals.push(id)
+  db.prepare(`UPDATE octis_projects SET ${sets.join(', ')} WHERE id=?`).run(...vals)
+  const project = db.prepare('SELECT * FROM octis_projects WHERE id = ?').get(id)
+  res.json({ project })
 })
 
-app.delete('/api/projects/:id', requireAuth, async (req, res) => {
-  try {
-    await pool.query('DELETE FROM raw_nexus.octis_projects WHERE id=$1', [req.params.id])
-    res.json({ ok: true })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
+app.delete('/api/projects/:id', requireAuth, (req, res) => {
+  db.prepare('DELETE FROM octis_projects WHERE id = ?').run(req.params.id)
+  res.json({ ok: true })
 })
 
-// Hidden/archived sessions (server-persisted, cross-device)
-app.get('/api/hidden-sessions', requireAuth, async (req, res) => {
-  try {
-    const { rows } = await pool.query('SELECT session_key FROM raw_nexus.octis_hidden_sessions')
-    res.json(rows.map(r => r.session_key))
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
+// ─── Hidden sessions ──────────────────────────────────────────────────────────
+
+app.get('/api/hidden-sessions', requireAuth, (req, res) => {
+  res.json(db.prepare('SELECT session_key FROM octis_hidden_sessions').all().map(r => r.session_key))
 })
 
-app.post('/api/hidden-sessions/hide', requireAuth, async (req, res) => {
-  try {
-    const { sessionKey } = req.body
-    if (!sessionKey) return res.status(400).json({ error: 'sessionKey required' })
-    await pool.query(
-      'INSERT INTO raw_nexus.octis_hidden_sessions (session_key) VALUES ($1) ON CONFLICT DO NOTHING',
-      [sessionKey]
-    )
-    res.json({ ok: true })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
+app.post('/api/hidden-sessions/hide', requireAuth, (req, res) => {
+  const { sessionKey } = req.body
+  if (!sessionKey) return res.status(400).json({ error: 'sessionKey required' })
+  db.prepare('INSERT OR IGNORE INTO octis_hidden_sessions (session_key) VALUES (?)').run(sessionKey)
+  res.json({ ok: true })
 })
 
-app.post('/api/hidden-sessions/unhide', requireAuth, async (req, res) => {
-  try {
-    const { sessionKey } = req.body
-    if (!sessionKey) return res.status(400).json({ error: 'sessionKey required' })
-    await pool.query('DELETE FROM raw_nexus.octis_hidden_sessions WHERE session_key = $1', [sessionKey])
-    res.json({ ok: true })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
+app.post('/api/hidden-sessions/unhide', requireAuth, (req, res) => {
+  const { sessionKey } = req.body
+  if (!sessionKey) return res.status(400).json({ error: 'sessionKey required' })
+  db.prepare('DELETE FROM octis_hidden_sessions WHERE session_key = ?').run(sessionKey)
+  res.json({ ok: true })
 })
 
-// ─── Pinned sessions ─────────────────────────────────────────────────────────
-app.get('/api/pinned-sessions', requireAuth, async (req, res) => {
-  try {
-    const { rows } = await pool.query('SELECT session_key FROM raw_nexus.octis_pinned_sessions ORDER BY pinned_at ASC')
-    res.json(rows.map(r => r.session_key))
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
+// ─── Pinned sessions ──────────────────────────────────────────────────────────
+
+app.get('/api/pinned-sessions', requireAuth, (req, res) => {
+  res.json(db.prepare('SELECT session_key FROM octis_pinned_sessions ORDER BY pinned_at ASC').all().map(r => r.session_key))
 })
 
-app.post('/api/pinned-sessions/pin', requireAuth, async (req, res) => {
-  try {
-    const { sessionKey } = req.body
-    if (!sessionKey) return res.status(400).json({ error: 'sessionKey required' })
-    await pool.query(
-      'INSERT INTO raw_nexus.octis_pinned_sessions (session_key) VALUES ($1) ON CONFLICT DO NOTHING',
-      [sessionKey]
-    )
-    res.json({ ok: true })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
+app.post('/api/pinned-sessions/pin', requireAuth, (req, res) => {
+  const { sessionKey } = req.body
+  if (!sessionKey) return res.status(400).json({ error: 'sessionKey required' })
+  db.prepare('INSERT OR IGNORE INTO octis_pinned_sessions (session_key) VALUES (?)').run(sessionKey)
+  res.json({ ok: true })
 })
 
-app.post('/api/pinned-sessions/unpin', requireAuth, async (req, res) => {
-  try {
-    const { sessionKey } = req.body
-    if (!sessionKey) return res.status(400).json({ error: 'sessionKey required' })
-    await pool.query('DELETE FROM raw_nexus.octis_pinned_sessions WHERE session_key = $1', [sessionKey])
-    res.json({ ok: true })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
+app.post('/api/pinned-sessions/unpin', requireAuth, (req, res) => {
+  const { sessionKey } = req.body
+  if (!sessionKey) return res.status(400).json({ error: 'sessionKey required' })
+  db.prepare('DELETE FROM octis_pinned_sessions WHERE session_key = ?').run(sessionKey)
+  res.json({ ok: true })
 })
 
-// VAPID public key (for frontend to subscribe)
+// ─── Push notifications ───────────────────────────────────────────────────────
+
 app.get('/api/push/vapid-public-key', (req, res) => {
   res.json({ key: VAPID_PUBLIC })
 })
 
-// Register push subscription
-app.post('/api/push/subscribe', requireAuth, async (req, res) => {
-  try {
-    const { subscription, userAgent } = req.body
-    if (!subscription?.endpoint) return res.status(400).json({ error: 'Invalid subscription' })
-    await pool.query(
-      `INSERT INTO raw_nexus.octis_push_subscriptions (user_id, endpoint, subscription, user_agent)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (user_id, endpoint) DO UPDATE SET subscription = $3, user_agent = $4`,
-      [req.clerkUserId, subscription.endpoint, JSON.stringify(subscription), userAgent || '']
-    )
-    res.json({ ok: true })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
+app.post('/api/push/subscribe', requireAuth, (req, res) => {
+  const { subscription, userAgent } = req.body
+  if (!subscription?.endpoint) return res.status(400).json({ error: 'Invalid subscription' })
+  const { endpoint, keys } = subscription
+  const p256dh = keys?.p256dh || ''
+  const auth_key = keys?.auth || ''
+  db.prepare(
+    `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth_key, user_agent, subscription_json)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(endpoint) DO UPDATE SET p256dh=excluded.p256dh, auth_key=excluded.auth_key,
+     user_agent=excluded.user_agent, subscription_json=excluded.subscription_json`
+  ).run(req.user.id, endpoint, p256dh, auth_key, userAgent || '', JSON.stringify(subscription))
+  res.json({ ok: true })
 })
 
-// Unregister push subscription
-app.post('/api/push/unsubscribe', requireAuth, async (req, res) => {
-  try {
-    const { endpoint } = req.body
-    await pool.query(
-      'DELETE FROM raw_nexus.octis_push_subscriptions WHERE user_id = $1 AND endpoint = $2',
-      [req.clerkUserId, endpoint]
-    )
-    res.json({ ok: true })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
+app.post('/api/push/unsubscribe', requireAuth, (req, res) => {
+  const { endpoint } = req.body
+  db.prepare('DELETE FROM push_subscriptions WHERE user_id = ? AND endpoint = ?').run(req.user.id, endpoint)
+  res.json({ ok: true })
 })
 
-// Send push to all subscriptions for a user (internal use by gateway/cron)
 app.post('/api/push/send', async (req, res) => {
   try {
-    const { userId, title, body, data } = req.body
-    const target = userId || Object.keys(USER_CONFIG).find(k => USER_CONFIG[k].role === 'owner') || ''
-    const { rows } = await pool.query(
-      'SELECT subscription FROM raw_nexus.octis_push_subscriptions WHERE user_id = $1',
-      [target]
-    )
+    const { title, body, data } = req.body
+    const subs = db.prepare('SELECT subscription_json FROM push_subscriptions').all()
     const payload = JSON.stringify({ title: title || 'Octis', body: body || '', data: data || {} })
     const results = await Promise.allSettled(
-      rows.map(r => webpush.sendNotification(r.subscription, payload))
+      subs.map(r => webpush.sendNotification(JSON.parse(r.subscription_json), payload))
     )
-    const sent = results.filter(r => r.status === 'fulfilled').length
-    const failed = results.filter(r => r.status === 'rejected').length
-    res.json({ sent, failed })
+    res.json({ sent: results.filter(r => r.status === 'fulfilled').length, failed: results.filter(r => r.status === 'rejected').length })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
 })
 
-// Session project tags (server-persisted, cross-device)
-app.get('/api/session-projects', requireAuth, async (req, res) => {
-  try {
-    const { rows } = await pool.query(
-      'SELECT session_key, project_tag FROM raw_nexus.octis_session_projects ORDER BY updated_at DESC'
-    )
-    const map = {}
-    for (const r of rows) map[r.session_key] = r.project_tag
-    res.json(map)
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
+// ─── Session project tags ─────────────────────────────────────────────────────
+
+app.get('/api/session-projects', requireAuth, (req, res) => {
+  const rows = db.prepare('SELECT session_key, project FROM octis_session_projects ORDER BY updated_at DESC').all()
+  const map = {}
+  for (const r of rows) map[r.session_key] = r.project
+  res.json(map)
 })
 
-app.post('/api/session-projects', requireAuth, async (req, res) => {
-  try {
-    const { sessionKey, projectTag } = req.body
-    if (!sessionKey) return res.status(400).json({ error: 'sessionKey required' })
-    if (!projectTag) {
-      await pool.query('DELETE FROM raw_nexus.octis_session_projects WHERE session_key = $1', [sessionKey])
-    } else {
-      await pool.query(
-        `INSERT INTO raw_nexus.octis_session_projects (session_key, project_tag, updated_at)
-         VALUES ($1, $2, NOW())
-         ON CONFLICT (session_key) DO UPDATE SET project_tag = $2, updated_at = NOW()`,
-        [sessionKey, projectTag]
-      )
-    }
-    res.json({ ok: true })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
+app.post('/api/session-projects', requireAuth, (req, res) => {
+  const { sessionKey, projectTag } = req.body
+  if (!sessionKey) return res.status(400).json({ error: 'sessionKey required' })
+  if (!projectTag) {
+    db.prepare('DELETE FROM octis_session_projects WHERE session_key = ?').run(sessionKey)
+  } else {
+    db.prepare(
+      `INSERT OR REPLACE INTO octis_session_projects (session_key, project) VALUES (?, ?)`
+    ).run(sessionKey, projectTag)
   }
+  res.json({ ok: true })
 })
 
-// Session init — called after new session creation to inject project context
+// ─── Session init (project context injection) ─────────────────────────────────
+
 app.post('/api/session-init', requireAuth, async (req, res) => {
   try {
     const { sessionKey, projectSlug } = req.body
     if (!sessionKey || !projectSlug) return res.json({ error: 'sessionKey and projectSlug required' })
-    const { rows } = await pool.query(
-      'SELECT id, name, slug, emoji, description, memory_file FROM raw_nexus.octis_projects WHERE slug=$1',
-      [projectSlug]
-    )
-    const project = rows[0]
+    const project = db.prepare('SELECT * FROM octis_projects WHERE slug = ?').get(projectSlug)
     if (!project) return res.json({ error: 'Project not found' })
     const { name, emoji, description, memory_file } = project
     const contextNote = `📁 **${emoji} ${name}** — You are working in the ${name} project.${
@@ -775,29 +558,121 @@ app.post('/api/session-init', requireAuth, async (req, res) => {
   }
 })
 
-// Session history — past sessions from Postgres (incl. archived/deleted)
+// ─── HTTP fallback for sessions.list ────────────────────────────────────
+app.get('/api/sessions-list', requireAuth, async (req, res) => {
+  try {
+    const { agentId, limit = 50 } = req.query
+    const params = { limit: Math.min(Number(limit), 100) }
+    if (agentId) params.agentId = agentId
+    const [result] = await adminGwCall([{ method: 'sessions.list', params }])
+    res.json({ ok: true, sessions: result?.sessions || [] })
+  } catch (err) {
+    console.error('[octis] sessions-list HTTP error:', err.message)
+    res.status(502).json({ ok: false, error: err.message })
+  }
+})
+
+// ─── HTTP fallback for chat.history ─────────────────────────────────────
+app.get('/api/chat-history', requireAuth, async (req, res) => {
+  try {
+    const { sessionKey, limit = 50 } = req.query
+    if (!sessionKey) return res.status(400).json({ ok: false, error: 'sessionKey required' })
+    const [result] = await adminGwCall([{
+      method: 'chat.history',
+      params: { sessionKey, limit: Math.min(Number(limit), 100) }
+    }])
+    res.json({ ok: true, messages: result?.messages || [] })
+  } catch (err) {
+    console.error('[octis] chat-history HTTP error:', err.message)
+    res.status(502).json({ ok: false, error: err.message })
+  }
+})
+
+// ─── HTTP fallback for chat.send ────────────────────────────────────────────
+// Used when the client WS is dead (iOS zombie TCP). Server proxies the send
+// via its own persistent-ish admin WS connection to the gateway.
+app.post('/api/chat-send', requireAuth, async (req, res) => {
+  try {
+    const { sessionKey, message, idempotencyKey, deliver } = req.body
+    if (!sessionKey || !message) return res.status(400).json({ ok: false, error: 'sessionKey and message required' })
+    const [result] = await adminGwCall([{
+      method: 'chat.send',
+      params: { sessionKey, message, idempotencyKey, deliver: deliver !== false }
+    }])
+    res.json({ ok: true, runId: result?.runId })
+  } catch (err) {
+    console.error('[octis] chat-send HTTP error:', err.message)
+    res.status(502).json({ ok: false, error: err.message })
+  }
+})
+
+// ─── Costs (optional — requires COSTS_DB_URL) ────────────────────────────────
+
+app.get('/api/costs', requireAuth, async (req, res) => {
+  if (!pgPool) return res.json({ disabled: true, message: 'Set COSTS_DB_URL to enable cost tracking.' })
+  try {
+    const days = Math.min(parseInt(req.query.days || '30'), 90)
+    const { rows: daily } = await pgPool.query(`
+      SELECT cost_date AS date, SUM(total_cost_usd) AS total_cost_usd,
+        SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, SUM(session_count) AS session_count
+      FROM raw_nexus.claw_user_daily_costs
+      WHERE cost_date >= CURRENT_DATE - ($1 || ' days')::INTERVAL
+      GROUP BY cost_date ORDER BY cost_date ASC
+    `, [days])
+    const { rows: sessions } = await pgPool.query(`
+      SELECT cs.session_id AS session_key, COALESCE(ol.label, cs.first_message) AS session_label,
+        cs.sender_name, SUM(cs.total_cost_usd) AS cost, MAX(cs.last_ts) AS last_activity,
+        SUM(cs.input_tokens) AS input_tokens, SUM(cs.output_tokens) AS output_tokens
+      FROM raw_nexus.claw_session_costs cs
+      LEFT JOIN raw_nexus.octis_session_labels ol ON ol.session_key = cs.session_id
+      WHERE cs.session_date >= CURRENT_DATE - ($1 || ' days')::INTERVAL
+      GROUP BY cs.session_id, cs.first_message, cs.sender_name, ol.label
+      ORDER BY cost DESC LIMIT 50
+    `, [days])
+    // Use rolling 24h window for "today" so it matches Montreal timezone and doesn't reset at midnight UTC
+    const { rows: todayRow } = await pgPool.query(`SELECT COALESCE(SUM(total_cost_usd),0) AS today_cost FROM raw_nexus.claw_user_daily_costs WHERE cost_date >= (NOW() - INTERVAL '24 hours')::date`)
+    const { rows: todaySessionRows } = await pgPool.query(`
+      SELECT cs.session_id AS session_key, COALESCE(ol.label, cs.first_message) AS session_label,
+        cs.sender_name, SUM(cs.total_cost_usd) AS cost, MAX(cs.last_ts) AS last_activity,
+        SUM(cs.input_tokens) AS input_tokens, SUM(cs.output_tokens) AS output_tokens
+      FROM raw_nexus.claw_session_costs cs
+      LEFT JOIN raw_nexus.octis_session_labels ol ON ol.session_key = cs.session_id
+      WHERE cs.last_ts >= NOW() - INTERVAL '24 hours'
+      GROUP BY cs.session_id, cs.first_message, cs.sender_name, ol.label
+      ORDER BY cost DESC LIMIT 20
+    `)
+    res.json({
+      today: parseFloat(todayRow[0]?.today_cost || 0),
+      daily: daily.map(r => ({ ...r, total_cost_usd: parseFloat(r.total_cost_usd), date: String(r.date).slice(0, 10) })),
+      sessions: sessions.map(r => ({ ...r, cost: parseFloat(r.cost), session_label: cleanSessionLabel(r.session_label, r.session_key) })),
+      todaySessions: todaySessionRows.map(r => ({ ...r, cost: parseFloat(r.cost), session_label: cleanSessionLabel(r.session_label, r.session_key) })),
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// ─── Session history (optional — requires COSTS_DB_URL) ──────────────────────
+
 app.get('/api/sessions/history', async (req, res) => {
+  if (!pgPool) return res.json([])
   try {
     const days = parseInt(req.query.days) || 30
-    const labels = await readLabels()
-    const { rows } = await pool.query(`
-      SELECT
-        session_id AS session_key,
-        first_message AS session_label,
-        sender_name,
-        SUM(total_cost_usd) AS cost,
-        MIN(session_date) AS first_date,
-        MAX(last_ts) AS last_activity,
-        SUM(turn_count) AS turn_count
+    const { rows } = await pgPool.query(`
+      SELECT session_id AS session_key, first_message AS session_label, sender_name,
+        SUM(total_cost_usd) AS cost, MIN(session_date) AS first_date,
+        MAX(last_ts) AS last_activity, SUM(turn_count) AS turn_count
       FROM raw_nexus.claw_session_costs
       WHERE session_date >= CURRENT_DATE - INTERVAL '${days} days'
       GROUP BY session_id, first_message, sender_name
-      ORDER BY MAX(last_ts) DESC
-      LIMIT 200
+      ORDER BY MAX(last_ts) DESC LIMIT 200
     `)
+    const savedLabels = db.prepare('SELECT session_key, label FROM octis_session_labels').all()
+    const labelMap = {}
+    for (const r of savedLabels) labelMap[r.session_key] = r.label
     res.json(rows.map(r => ({
       session_key: r.session_key,
-      label: labels[r.session_key] || r.session_label || r.session_key,
+      label: labelMap[r.session_key] || cleanSessionLabel(r.session_label, r.session_key),
       sender_name: r.sender_name,
       cost: parseFloat(r.cost),
       first_date: r.first_date,
@@ -809,22 +684,13 @@ app.get('/api/sessions/history', async (req, res) => {
   }
 })
 
-// ─── Todo system ──────────────────────────────────────────────────────────────
+// ─── Todos ────────────────────────────────────────────────────────────────────
 
 const SECTION_TO_PROJECT = {
-  'Octis': 'Octis',
-  'Quantum Engine': 'Quantum',
-  'Beatimo Portal': 'Beatimo',
-  'Ops Firm': 'Ops',
-  'Prospection Pipeline': 'Centurion',
-  'CRM Decision': 'Beatimo',
-  'Sage': 'Infra',
-  'Building Stack': 'Infra',
-  'Monday.com': 'Beatimo',
-  'Billing Generator': 'Beatimo',
-  'Casin Personal': 'Personal',
-  'This Week': 'Personal',
-  'Backlog': 'Personal',
+  'Octis': 'Octis', 'Quantum Engine': 'Quantum', 'Beatimo Portal': 'Beatimo',
+  'Ops Firm': 'Ops', 'Prospection Pipeline': 'Centurion', 'CRM Decision': 'Beatimo',
+  'Sage': 'Infra', 'Building Stack': 'Infra', 'Monday.com': 'Beatimo',
+  'Billing Generator': 'Beatimo', 'Casin Personal': 'Personal', 'This Week': 'Personal', 'Backlog': 'Personal',
 }
 
 function parseTodosFile(content) {
@@ -837,11 +703,9 @@ function parseTodosFile(content) {
     const todoMatch = line.match(/^-\s+\[ \]\s+(.+)/)
     if (!todoMatch) continue
     let text = todoMatch[1].trim()
-    // Parse owner token
     const ownerMatch = text.match(/^\[(ME|YOU|BOTH|WAIT(?:→[^\]]+)?|UNLOCK(?:→[^\]]+)?)\]\s*/)
     let owner = null
     if (ownerMatch) { owner = ownerMatch[1].replace(/→.*/, ''); text = text.slice(ownerMatch[0].length).trim() }
-    // Map section → project
     let project = 'Personal'
     for (const [key, val] of Object.entries(SECTION_TO_PROJECT)) {
       if (currentSection.startsWith(key)) { project = val; break }
@@ -851,100 +715,57 @@ function parseTodosFile(content) {
   return items
 }
 
-async function ensureTodosTable() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS octis_todos (
-      id SERIAL PRIMARY KEY,
-      project TEXT NOT NULL,
-      text TEXT NOT NULL,
-      owner TEXT,
-      status TEXT NOT NULL DEFAULT 'open',
-      source_section TEXT,
-      created_at TIMESTAMPTZ DEFAULT NOW(),
-      completed_at TIMESTAMPTZ,
-      session_key TEXT,
-      UNIQUE(project, text)
+function syncTodosFromFile() {
+  try {
+    const content = readFileSync(TODOS_FILE, 'utf8')
+    const items = parseTodosFile(content)
+    const upsert = db.prepare(
+      `INSERT INTO octis_todos (project, text, owner, source_section) VALUES (?, ?, ?, ?)
+       ON CONFLICT(project, text) DO UPDATE SET owner=excluded.owner, source_section=excluded.source_section
+       WHERE octis_todos.status != 'done'`
     )
-  `)
+    const run = db.transaction((items) => { for (const i of items) upsert.run(i.project, i.text, i.owner, i.source_section) })
+    run(items)
+  } catch (e) {
+    console.error('[todos] sync error:', e.message)
+  }
 }
 
-async function syncTodosFromFile() {
-  await ensureTodosTable()
-  const content = await fs.readFile(TODOS_FILE, 'utf8').catch(() => '')
-  const items = parseTodosFile(content)
-  let upserted = 0
-  for (const item of items) {
-    const res = await pool.query(
-      `INSERT INTO octis_todos (project, text, owner, source_section)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT ON CONSTRAINT octis_todos_project_text_uniq DO UPDATE SET
-         owner = EXCLUDED.owner,
-         source_section = EXCLUDED.source_section
-       WHERE octis_todos.status != 'done'
-       RETURNING id`,
-      [item.project, item.text, item.owner, item.source_section]
-    )
-    if (res.rowCount > 0) upserted++
-  }
-  return upserted
-}
+// Auto-sync on startup
+setImmediate(syncTodosFromFile)
 
-// Auto-sync on startup (non-blocking)
-setImmediate(() => syncTodosFromFile().catch(e => console.error('[todos] sync error:', e)))
-
-// GET /api/todos — open todos grouped by project (auth required)
-app.get('/api/todos', requireAuth, async (req, res) => {
-  try {
-    await ensureTodosTable()
-    const result = await pool.query(`SELECT * FROM octis_todos WHERE status='open' ORDER BY project, id`)
-    const grouped = {}
-    for (const row of result.rows) {
-      if (!grouped[row.project]) grouped[row.project] = { count: 0, items: [] }
-      grouped[row.project].count++
-      grouped[row.project].items.push(row)
-    }
-    res.json(grouped)
-  } catch (err) {
-    res.status(500).json({ error: err.message })
+app.get('/api/todos', requireAuth, (req, res) => {
+  const rows = db.prepare(`SELECT * FROM octis_todos WHERE status='open' ORDER BY project, id`).all()
+  const grouped = {}
+  for (const row of rows) {
+    if (!grouped[row.project]) grouped[row.project] = { count: 0, items: [] }
+    grouped[row.project].count++
+    grouped[row.project].items.push(row)
   }
+  res.json(grouped)
 })
 
-// GET /api/todos/count — open counts by project (no auth — used for badges)
-app.get('/api/todos/count', async (req, res) => {
-  try {
-    await ensureTodosTable()
-    const result = await pool.query(`SELECT project, COUNT(*) as count FROM octis_todos WHERE status='open' GROUP BY project`)
-    const counts = {}
-    for (const row of result.rows) counts[row.project] = parseInt(row.count)
-    res.json(counts)
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
+app.get('/api/todos/count', (req, res) => {
+  const rows = db.prepare(`SELECT project, COUNT(*) as count FROM octis_todos WHERE status='open' GROUP BY project`).all()
+  const counts = {}
+  for (const r of rows) counts[r.project] = Number(r.count)
+  res.json(counts)
 })
 
-// POST /api/todos/sync — re-parse TODOS.md and upsert (auth required)
-app.post('/api/todos/sync', requireAuth, async (req, res) => {
-  try {
-    const count = await syncTodosFromFile()
-    res.json({ ok: true, upserted: count })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
+app.post('/api/todos/sync', requireAuth, (req, res) => {
+  syncTodosFromFile()
+  res.json({ ok: true })
 })
 
-// PATCH /api/todos/:id/complete — mark done + remove from TODOS.md
 app.patch('/api/todos/:id/complete', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
-    const row = await pool.query(`UPDATE octis_todos SET status='done', completed_at=NOW() WHERE id=$1 AND status='open' RETURNING text`, [id])
-    if (row.rowCount === 0) return res.status(404).json({ error: 'Not found or already done' })
-    const text = row.rows[0].text
-    // Remove matching line from TODOS.md
+    const row = db.prepare(`UPDATE octis_todos SET status='done', completed_at=unixepoch() WHERE id=? AND status='open' RETURNING text`).get(id)
+    if (!row) return res.status(404).json({ error: 'Not found or already done' })
+    const text = row.text
     const content = await fs.readFile(TODOS_FILE, 'utf8').catch(() => '')
-    const lines = content.split('\n')
-    const filtered = lines.filter(line => {
+    const filtered = content.split('\n').filter(line => {
       if (!line.match(/^-\s+\[ \]/)) return true
-      // Strip prefix tokens and compare
       const stripped = line.replace(/^-\s+\[ \]\s+/, '').replace(/^\[[A-Z→a-z]+\]\s*/, '').trim()
       return stripped !== text
     })
@@ -955,24 +776,20 @@ app.patch('/api/todos/:id/complete', requireAuth, async (req, res) => {
   }
 })
 
-// Serve media files from OpenClaw inbound media store
-// GET /api/uploads/:filename — serve files from workspace/uploads/ (no auth — same as /api/media)
+// ─── Media / uploads ──────────────────────────────────────────────────────────
+
 app.get('/api/uploads/:filename', async (req, res) => {
   try {
     const filename = path.basename(req.params.filename)
-    const filePath = path.join(WORKSPACE, 'uploads', filename)
-    const data = await fs.readFile(filePath)
+    const data = await fs.readFile(path.join(WORKSPACE, 'uploads', filename))
     const ext = path.extname(filename).toLowerCase()
-    const mimeMap = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.pdf': 'application/pdf' }
-    res.set('Content-Type', mimeMap[ext] || 'application/octet-stream')
+    const mime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.pdf': 'application/pdf' }
+    res.set('Content-Type', mime[ext] || 'application/octet-stream')
     res.set('Cache-Control', 'private, max-age=86400')
     res.send(data)
-  } catch {
-    res.status(404).json({ error: 'File not found' })
-  }
+  } catch { res.status(404).json({ error: 'File not found' }) }
 })
 
-// POST /api/upload — save a file to workspace/uploads/ from base64 dataUrl
 app.post('/api/upload', requireAuth, async (req, res) => {
   try {
     const { filename, data } = req.body
@@ -980,104 +797,66 @@ app.post('/api/upload', requireAuth, async (req, res) => {
     const safeName = path.basename(filename).replace(/[^a-zA-Z0-9._-]/g, '_')
     const uploadsDir = path.join(WORKSPACE, 'uploads')
     await fs.mkdir(uploadsDir, { recursive: true })
-    const filePath = path.join(uploadsDir, safeName)
-    await fs.writeFile(filePath, Buffer.from(data, 'base64'))
-    res.json({ ok: true, path: filePath, filename: safeName })
-  } catch (e) {
-    res.status(500).json({ error: e.message })
-  }
+    await fs.writeFile(path.join(uploadsDir, safeName), Buffer.from(data, 'base64'))
+    res.json({ ok: true, filename: safeName })
+  } catch (e) { res.status(500).json({ error: e.message }) }
 })
 
 app.get('/api/media/:filename', async (req, res) => {
   try {
-    const filename = path.basename(req.params.filename) // sanitize: strip any path traversal
-    const filePath = path.join(HOME, '.openclaw/media/inbound', filename)
-    const data = await fs.readFile(filePath)
+    const filename = path.basename(req.params.filename)
+    const data = await fs.readFile(path.join(HOME, '.openclaw/media/inbound', filename))
     const ext = path.extname(filename).toLowerCase()
-    const mimeMap = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.pdf': 'application/pdf' }
-    res.set('Content-Type', mimeMap[ext] || 'application/octet-stream')
+    const mime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.pdf': 'application/pdf' }
+    res.set('Content-Type', mime[ext] || 'application/octet-stream')
     res.set('Cache-Control', 'private, max-age=86400')
     res.send(data)
-  } catch {
-    res.status(404).json({ error: 'Media file not found' })
-  }
+  } catch { res.status(404).json({ error: 'Media file not found' }) }
 })
 
-// POST /api/issues — create GitHub issue on octis-app/octis
-const GITHUB_PAT = process.env.GITHUB_PAT || ''
-const GITHUB_REPO = 'octis-app/octis'
-
-// Ensure required labels exist (best-effort, ignores errors)
-async function ensureGitHubLabel(name, color, description = '') {
-  await fetch(`https://api.github.com/repos/${GITHUB_REPO}/labels`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${GITHUB_PAT}`,
-      'Content-Type': 'application/json',
-      Accept: 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
-    },
-    body: JSON.stringify({ name, color, description }),
-  }).catch(() => {})
-}
+// ─── GitHub issues ────────────────────────────────────────────────────────────
 
 app.post('/api/issues', requireAuth, async (req, res) => {
   const { type, title, body } = req.body
   if (!title?.trim()) return res.status(400).json({ error: 'Title required' })
-
-  // Map type → GitHub label (create if missing)
+  if (!GITHUB_PAT) return res.status(503).json({ error: 'GITHUB_PAT not configured' })
   const labelMap = { bug: 'bug', feature: 'enhancement', ux: 'ux' }
-  const labelColors = { bug: 'd73a4a', enhancement: 'a2eeef', ux: 'bfd4f2' }
   const label = labelMap[type] || 'bug'
-  if (label === 'ux') await ensureGitHubLabel('ux', 'bfd4f2', 'UX / Design issue')
-
   try {
     const ghRes = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/issues`, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${GITHUB_PAT}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-      },
+      headers: { Authorization: `Bearer ${GITHUB_PAT}`, 'Content-Type': 'application/json', Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
       body: JSON.stringify({ title: title.trim(), body: body || '', labels: [label] }),
     })
     const data = await ghRes.json()
     if (!ghRes.ok) return res.status(500).json({ error: data.message || 'GitHub API error' })
-    console.log(`[octis] Issue #${data.number} created: ${data.html_url}`)
     res.json({ number: data.number, url: data.html_url })
-  } catch (e) {
-    console.error('[octis] Issue create error:', e.message)
-    res.status(500).json({ error: e.message })
-  }
+  } catch (e) { res.status(500).json({ error: e.message }) }
 })
 
-// POST /api/extract-pdf — extract text from a base64-encoded PDF
+// ─── PDF extraction ───────────────────────────────────────────────────────────
+
 app.post('/api/extract-pdf', requireAuth, async (req, res) => {
   try {
-    const { data } = req.body // base64 string (no data: prefix)
+    const { data } = req.body
     if (!data) return res.status(400).json({ error: 'data required' })
-    const buffer = Buffer.from(data, 'base64')
-    const result = await pdfParse(buffer)
-    const text = result.text?.trim() || ''
-    const pages = result.numpages || 1
-    res.json({ text, pages })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
+    const result = await pdfParse(Buffer.from(data, 'base64'))
+    res.json({ text: result.text?.trim() || '', pages: result.numpages || 1 })
+  } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
-// Serve static frontend
+// ─── Static frontend ──────────────────────────────────────────────────────────
+
 if (process.env.NODE_ENV === 'production') {
-  const __dirname = path.dirname(new URL(import.meta.url).pathname)
-  const distPath = path.join(__dirname, '..', 'dist')
+  const distPath = path.join(__serverDir, '..', 'dist')
   app.use(express.static(distPath))
   app.use((req, res) => res.sendFile(path.join(distPath, 'index.html')))
 }
 
+// ─── Start ────────────────────────────────────────────────────────────────────
+
 app.listen(PORT, () => {
   console.log(`[octis] API server on http://localhost:${PORT}`)
-  getGatewayConfig().then(gw => {
-    console.log(`[octis] Gateway: ${gw.url} | token: ${gw.token ? gw.token.slice(0,8) + '...' : 'MISSING'}`)
-  })
+  console.log(`[octis] Gateway: ${GATEWAY_URL} | token: ${GATEWAY_TOKEN.slice(0, 8)}...`)
+  console.log(`[octis] Data: ${path.join(DATA_DIR, 'octis.db')}`)
 })

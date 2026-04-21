@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useSessionStore, useGatewayStore, useProjectStore, useLabelStore, useHiddenStore, Session, SessionStatus } from '../store/gatewayStore'
+import { authFetch } from '../lib/authFetch'
 
 // ─── Health Circle ─────────────────────────────────────────────────────────────
 function HealthCircle({ session }: { session: Session }) {
@@ -152,7 +153,7 @@ function SessionItem({ session, isPinned, onPin, onRename, onArchive, onContinue
   isDragOver?: boolean
 }) {
   const { getStatus, getLastActivityMs, getUnreadCount } = useSessionStore()
-  const { getTag } = useProjectStore()
+  const { getTag, getProjectEmoji } = useProjectStore()
   const { getLabel, setLabel: saveLabel } = useLabelStore()
   const lastMs = getLastActivityMs(session)
   const lastSeen = lastMs ? timeAgo(lastMs) : null
@@ -234,11 +235,14 @@ function SessionItem({ session, isPinned, onPin, onRename, onArchive, onContinue
           />
         ) : (
           <span
-            className="text-[13px] text-white truncate flex-1 cursor-pointer leading-snug"
+            className="text-[13px] text-white truncate flex-1 cursor-pointer leading-snug flex items-baseline gap-1"
             onClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) onPin() }}
             onDoubleClick={() => setEditing(true)}
             title={displayLabel}
           >
+            {tag.project && getProjectEmoji(tag.project) && (
+              <span className="text-[11px] shrink-0 opacity-80">{getProjectEmoji(tag.project)}</span>
+            )}
             {displayLabel}
           </span>
         )}
@@ -324,8 +328,6 @@ function SessionItem({ session, isPinned, onPin, onRename, onArchive, onContinue
 }
 
 // ─── Project group ────────────────────────────────────────────────────────────
-interface TodoItem { id: number; project: string; text: string; owner: string | null; status: string }
-
 function OwnerBadge({ owner }: { owner: string | null }) {
   if (!owner) return null
   const styles: Record<string, string> = {
@@ -342,7 +344,7 @@ function OwnerBadge({ owner }: { owner: string | null }) {
   )
 }
 
-function ProjectGroup({ name, sessions, activePanes, paneCount, onPin, onRename, onArchive, onContinue, selected, onSelect, todoCount, todos, onTodoComplete, onTodoNewSession }: {
+function ProjectGroup({ name, sessions, activePanes, paneCount, onPin, onRename, onArchive, onContinue, selected, onSelect }: {
   name: string; sessions: Session[]; activePanes: (string | null)[]; paneCount: number
   onPin: (key: string) => void
   onRename: (key: string, label: string) => void
@@ -350,14 +352,9 @@ function ProjectGroup({ name, sessions, activePanes, paneCount, onPin, onRename,
   onContinue: (session: Session) => void
   selected: Set<string>
   onSelect: (key: string, e: React.MouseEvent) => void
-  todoCount?: number
-  todos?: TodoItem[]
-  onTodoComplete?: (id: number) => void
-  onTodoNewSession?: (text: string, project: string) => void
 }) {
   const { getStatus } = useSessionStore()
   const [open, setOpen] = useState(true)
-  const [todosOpen, setTodosOpen] = useState(false)
 
   // Bubble up highest-urgency status
   const order: SessionStatus[] = ['working', 'stuck', 'active', 'quiet']
@@ -377,9 +374,6 @@ function ProjectGroup({ name, sessions, activePanes, paneCount, onPin, onRename,
       >
         <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: st.color }} />
         <span className="text-xs font-semibold text-[#a5b4fc] flex-1">{name}</span>
-        {todoCount ? (
-          <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-yellow-900/40 text-yellow-300 font-mono">{todoCount}</span>
-        ) : null}
         <span className="text-[10px] text-[#4b5563]">{sessions.length}</span>
         <span className="text-[#4b5563] text-[10px]">{open ? '▲' : '▼'}</span>
       </button>
@@ -399,41 +393,6 @@ function ProjectGroup({ name, sessions, activePanes, paneCount, onPin, onRename,
 
             />
           ))}
-          {/* Todos section */}
-          {todos && todos.length > 0 && (
-            <div className="mt-1 mx-1">
-              <button
-                onClick={() => setTodosOpen(o => !o)}
-                className="w-full flex items-center gap-1.5 px-2 py-1 rounded hover:bg-[#1e2330] transition-colors text-left"
-              >
-                <span className="text-[10px] text-[#6b7280] flex-1">Todos ({todos.length})</span>
-                <span className="text-[9px] text-[#4b5563]">{todosOpen ? '▲' : '▼'}</span>
-              </button>
-              {todosOpen && (
-                <div className="mt-0.5 space-y-0.5">
-                  {todos.map(todo => {
-                    let pressTimer: ReturnType<typeof setTimeout> | null = null
-                    return (
-                      <div
-                        key={todo.id}
-                        className="flex items-start gap-2 px-2 py-1.5 rounded-lg hover:bg-[#1e2330] cursor-pointer group"
-                        onClick={() => onTodoNewSession?.(todo.text, name)}
-                        onMouseDown={() => { pressTimer = setTimeout(() => {
-                          if (confirm(`Mark as done?\n\n"${todo.text}"`))
-                            onTodoComplete?.(todo.id)
-                        }, 600) }}
-                        onMouseUp={() => { if (pressTimer) clearTimeout(pressTimer) }}
-                        onMouseLeave={() => { if (pressTimer) clearTimeout(pressTimer) }}
-                      >
-                        <OwnerBadge owner={todo.owner} />
-                        <span className="text-[11px] text-[#9ca3af] leading-snug flex-1">{todo.text}</span>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-            </div>
-          )}
         </div>
       )}
     </div>
@@ -459,26 +418,10 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const lastSelectedRef = useRef<string | null>(null)
   const [dragKey, setDragKey] = useState<string | null>(null)
-  const [todoCounts, setTodoCounts] = useState<Record<string, number>>({})
-  const [todoItems, setTodoItems] = useState<Record<string, TodoItem[]>>({})
   const [showNewSessionPicker, setShowNewSessionPicker] = useState(false)
   const [pickerProjects, setPickerProjects] = useState<{ id: string; name: string; slug: string; emoji: string }[]>([])
   const newSessionPickerRef = useRef<HTMLDivElement>(null)
 
-  // Fetch todo counts + items for project badges
-  const refreshTodos = () => {
-    fetch(`${API}/api/todos/count`).then(r => r.json()).then(setTodoCounts).catch(() => {})
-    fetch(`${API}/api/todos`).then(r => r.json()).then((data: Record<string, { count: number; items: TodoItem[] }>) => {
-      const items: Record<string, TodoItem[]> = {}
-      for (const [proj, val] of Object.entries(data)) items[proj] = val.items
-      setTodoItems(items)
-    }).catch(() => {})
-  }
-  useEffect(() => {
-    refreshTodos()
-    const t = setInterval(refreshTodos, 60_000)
-    return () => clearInterval(t)
-  }, [])
   const [dragOverKey, setDragOverKey] = useState<string | null>(null)
   const [archiveRows, setArchiveRows] = useState<ArchiveRow[]>([])
   const [archiveLoading, setArchiveLoading] = useState(false)
@@ -487,7 +430,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
   const loadArchives = useCallback(async () => {
     setArchiveLoading(true)
     try {
-      const r = await fetch(`${API}/api/sessions/history?days=${archiveDays}`)
+      const r = await authFetch(`${API}/api/sessions/history?days=${archiveDays}`)
       if (r.ok) setArchiveRows(await r.json() as ArchiveRow[])
     } catch {}
     setArchiveLoading(false)
@@ -588,10 +531,10 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
   }
 
   const handleRename = (sessionKey: string, newLabel: string) => {
-    send({ type: 'req', id: `sessions-patch-${Date.now()}`, method: 'sessions.patch', params: { sessionKey, patch: { label: newLabel } } })
+    send({ type: 'req', id: `sessions-patch-${Date.now()}`, method: 'sessions.patch', params: { key: sessionKey, label: newLabel } })
     setSessions(sessions.map(s => s.key === sessionKey ? { ...s, label: newLabel } : s))
     // Persist to server so renames survive page refresh
-    void fetch(`${API}/api/session-rename`, {
+    void authFetch(`${API}/api/session-rename`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionKey, label: newLabel }),
@@ -634,11 +577,6 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     // Open in pane
     const emptyPane = activePanes.findIndex((p, i) => i < paneCount && !p)
     pinToPane(emptyPane >= 0 ? emptyPane : paneCount - 1, newKey)
-  }
-
-  const handleTodoComplete = async (id: number) => {
-    await fetch(`${API}/api/todos/${id}/complete`, { method: 'PATCH' }).catch(() => {})
-    refreshTodos()
   }
 
   const handleTodoNewSession = (text: string, project: string) => {
@@ -876,10 +814,6 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
                   onContinue={handleContinue}
                   selected={selected}
                   onSelect={(k, e) => handleSelect(k, e, projectSessions)}
-                  todoCount={todoCounts[name]}
-                  todos={todoItems[name]}
-                  onTodoComplete={handleTodoComplete}
-                  onTodoNewSession={handleTodoNewSession}
                 />
               )
             })}
@@ -992,7 +926,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
                   const key = `session-${Date.now()}`
                   setSessions([{ key, label: 'New session', sessionKey: key }, ...sessions])
                   useProjectStore.getState().setTag(key, p.slug)
-                  fetch(`${API}/api/session-projects`, {
+                  authFetch(`${API}/api/session-projects`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ sessionKey: key, projectTag: p.slug }),

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
-import { useAuth } from '@clerk/clerk-react'
+import { useAuth } from '../lib/auth'
+import { authFetch } from '../lib/authFetch'
 import { useGatewayStore, useSessionStore, useHiddenStore, useProjectStore, useLabelStore, Session } from '../store/gatewayStore'
 
 const API = ''  // same-origin
@@ -23,10 +24,18 @@ type FilterType = 'all' | 'active' | 'idle'
 
 export default function MobileApp() {
   const { getToken } = useAuth()
-  const { connected, gatewayUrl } = useGatewayStore()
-  const { sessions, getStatus, getLastActivityMs } = useSessionStore()
-  const { isHidden, hide: hideSession, hydrateFromServer: hydrateHidden } = useHiddenStore()
-  const { setSessions } = useSessionStore()
+  // Selective Zustand subscriptions: only subscribe to fields this component actually renders.
+  // Without selectors, useStore() returns the full state and re-renders on ANY store change —
+  // including sessionActivity (every WS chat event) and sessionMeta (every streaming token).
+  // With selectors, MobileApp only re-renders when connected or sessions actually change.
+  const connected = useGatewayStore(s => s.connected)
+  const gatewayUrl = useGatewayStore(s => s.gatewayUrl)
+  const connect = useGatewayStore(s => s.connect)
+  const sessions = useSessionStore(s => s.sessions)           // re-renders only when session list changes (~30s)
+  const getStatus = useSessionStore(s => s.getStatus)         // stable function ref
+  const getLastActivityMs = useSessionStore(s => s.getLastActivityMs) // stable function ref
+  const setSessions = useSessionStore(s => s.setSessions)     // stable function ref
+  const { hidden, isHidden, hide: hideSession, hydrateFromServer: hydrateHidden } = useHiddenStore()
   const { hydrateFromServer: hydrateProjects } = useProjectStore()
   const { labels, setLabel } = useLabelStore()
 
@@ -37,8 +46,8 @@ export default function MobileApp() {
       hydrateProjects(token),
     ])
     // Fetch server-side session labels
-    const authHeader = token ? { Authorization: `Bearer ${token}` } : {}
-    fetch('/api/session-labels', { headers: authHeader })
+    const authHeader = {}
+    fetch('/api/session-labels', { credentials: 'include' })
       .then(r => r.json())
       .then((data: Record<string, string>) => {
         if (typeof data === 'object' && !('error' in data)) {
@@ -60,12 +69,88 @@ export default function MobileApp() {
 
   useEffect(() => { void hydrateAll() }, [hydrateAll])
 
+    // Track last received WS message time — used to detect zombie connections.
+  const lastRxRef = useRef<number>(Date.now())
+  useEffect(() => {
+    const unsub = useGatewayStore.getState().subscribe(() => { lastRxRef.current = Date.now() })
+    return unsub
+  }, [])
+
+  // Watchdog: fire every 30s. If connected but 60s of silence — zombie TCP, force reconnect.
+  // Keepalive ping fires every 45s, so 60s of silence means the ping response never came.
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (!useGatewayStore.getState().connected) return
+      if (document.visibilityState !== 'visible') return
+      if (Date.now() - lastRxRef.current > 60_000) {
+        console.log('[octis] Watchdog: 60s silence — zombie TCP, reconnecting')
+        useGatewayStore.setState({ _reconnectAttempts: 0 })
+        useGatewayStore.getState().forceReconnect()
+      }
+    }, 30_000)
+    return () => clearInterval(t)
+  }, [])
+
+  // Visibility handler: reconnect on return from background.
+  // Handles both disconnected state AND zombie (connected=true but WS is dead).
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState !== 'visible') return
+      setTimeout(() => {
+        if (document.visibilityState !== 'visible') return
+        const { connected } = useGatewayStore.getState()
+        useGatewayStore.setState({ _reconnectAttempts: 0 })
+        if (!connected) {
+          console.log('[octis] Visible + disconnected — reconnecting')
+          useGatewayStore.getState().connect()
+        } else {
+          // Zombie check: if connected but silent for >20s, the WS is likely dead.
+          // iOS kills the TCP connection when backgrounded but onclose may not fire.
+          const silentMs = Date.now() - lastRxRef.current
+          if (silentMs > 20_000) {
+            console.log(`[octis] Visible + zombie (${silentMs}ms silent) — force reconnecting`)
+            useGatewayStore.getState().forceReconnect()
+          }
+        }
+      }, 600)
+    }
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => document.removeEventListener('visibilitychange', handleVisibility)
+  }, [])
+
+  // HTTP sessions fallback — fetches sessions when WS is dead or on first load.
+  // Runs every 20s so the session list stays fresh even without WS.
+  useEffect(() => {
+    const fetchSessions = async () => {
+      const { connected: c, agentId } = useGatewayStore.getState()
+      if (c) return // WS is fine, no need
+      try {
+        const url = `${API}/api/sessions-list${agentId ? `?agentId=${encodeURIComponent(agentId)}` : ''}`
+        const r = await authFetch(url)
+        if (!r.ok) return
+        const data = await r.json() as { ok: boolean; sessions?: Session[] }
+        if (data.ok && data.sessions?.length) {
+          useSessionStore.getState().setSessions(data.sessions)
+        }
+      } catch { /* best-effort */ }
+    }
+    // Fetch immediately on mount (covers the window before WS connects after hard refresh)
+    void fetchSessions()
+    const t = setInterval(fetchSessions, 20000)
+    return () => clearInterval(t)
+  }, [])
+
   // Fetch projects list for new-session picker
   useEffect(() => {
     fetch(`${API}/api/projects`)
       .then(r => r.json())
-      .then((data: Array<{id: string; name: string; slug: string; emoji?: string; color?: string}>) => {
-        if (Array.isArray(data)) setAvailableProjects(data.filter(p => p.slug !== 'others'))
+      .then((data: {projects?: Array<{id: string; name: string; slug: string; emoji?: string; color?: string}>} | Array<{id: string; name: string; slug: string; emoji?: string; color?: string}>) => {
+        const list = Array.isArray(data) ? data : (data.projects || [])
+        setAvailableProjects(list.filter(p => p.slug !== 'others'))
+        // Publish to global store so emoji prefixes work everywhere
+        const meta: Record<string, { emoji: string; name: string; color: string }> = {}
+        for (const p of list) meta[p.slug] = { emoji: p.emoji || '📁', name: p.name, color: p.color || '#6366f1' }
+        useProjectStore.getState().setProjectMeta(meta)
       })
       .catch(() => {})
   }, [])
@@ -80,6 +165,37 @@ export default function MobileApp() {
   const [showNewSessionSheet, setShowNewSessionSheet] = useState(false)
   const [availableProjects, setAvailableProjects] = useState<Array<{id: string; name: string; slug: string; emoji?: string; color?: string}>>([])
   const [archiveToast, setArchiveToast] = useState<string | null>(null)
+  const [longPressSessionKey, setLongPressSessionKey] = useState<string | null>(null)
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const longPressDetectedRef = useRef(false)
+  const [showMoveSheet, setShowMoveSheet] = useState(false)
+
+  const handleSessionLongPressStart = (s: Session) => {
+    longPressDetectedRef.current = false
+    longPressTimerRef.current = setTimeout(() => {
+      longPressDetectedRef.current = true
+      setLongPressSessionKey(s.key)
+      setShowMoveSheet(true)
+    }, 500)
+  }
+
+  const handleSessionLongPressEnd = () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current)
+      longPressTimerRef.current = null
+    }
+  }
+
+  const handleMoveSessionTo = async (sessionKey: string, projectSlug: string) => {
+    useProjectStore.getState().setTag(sessionKey, projectSlug)
+    setShowMoveSheet(false)
+    setLongPressSessionKey(null)
+    authFetch(`${API}/api/session-projects`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionKey, projectTag: projectSlug }),
+    }).catch(() => {})
+  }
 
   const handleArchive = (session: Session) => {
     const lbl = labels[session.key] || session.label || 'Session'
@@ -142,7 +258,7 @@ export default function MobileApp() {
     if ((hideHeartbeat || hideCron) && isHeartbeatOrCron(s)) return false
     return true
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [sessionFingerprint, hideAgentSessions, hideHeartbeat, hideCron])
+  }), [sessionFingerprint, hideAgentSessions, hideHeartbeat, hideCron, hidden])
 
   const filtered = useMemo(() => visibleSessions.filter((s: Session) => {
     const st = getStatus(s)
@@ -165,29 +281,8 @@ export default function MobileApp() {
   const fullChatSessionRef = useRef(fullChatSession)
   fullChatSessionRef.current = fullChatSession
 
-  if (fullChatSession) {
-    return <MobileFullChat
-      session={fullChatSession}
-      onBack={() => setFullChatSession(null)}
-      recentSessions={recentSessions}
-      onSwitch={(s) => setFullChatSession(s)}
-      onArchive={() => {
-        const current = fullChatSessionRef.current
-        if (!current) return
-        const archivedKey = current.key
-        hideSession(archivedKey)
-        if (current.id) hideSession(current.id)
-        const next = visibleSessions.find(s => s.key !== archivedKey)
-        setFullChatSession(next || null)
-      }}
-    />
-  }
-
-  if (activeProject) {
-    return <MobileProjectView project={activeProject} onBack={() => setActiveProject(null)} onSwitchProject={(p) => setActiveProject(p)} />
-  }
-
   return (
+    <>
     <div
       className="flex flex-col bg-[#0f1117] overflow-hidden"
       style={{ height: '100dvh' }}
@@ -214,11 +309,13 @@ export default function MobileApp() {
 
       {/* Content */}
       <div className="flex-1 overflow-hidden flex flex-col">
-        {tab === 'projects' && (
+        {/* ProjectsGrid kept mounted — re-fetches on every unmount/mount causing "loading" flash */}
+        <div className={tab === 'projects' ? 'flex-1 min-h-0 flex flex-col' : 'hidden'}>
           <ProjectsGrid onOpenProject={(p) => setActiveProject(p)} />
-        )}
+        </div>
 
-        {tab === 'sessions' && (
+        <div className={tab === 'sessions' ? 'flex-1 overflow-hidden flex flex-col' : 'hidden'}>
+        {true && (
           <>
             {/* Filter pills + New Session */}
             <div className="flex gap-2 px-4 pt-3 pb-2 shrink-0 items-center">
@@ -273,6 +370,7 @@ export default function MobileApp() {
               <div className="flex-1 overflow-y-auto overflow-x-hidden" style={{ WebkitOverflowScrolling: 'touch', touchAction: 'pan-y' }}>
                 {filtered.map((s: Session) => {
                   const st = getStatus(s)
+                  const projEmoji = useProjectStore.getState().getProjectEmoji(useProjectStore.getState().getTag(s.key).project || '')
                   const lbl = labels[s.key] || s.label || s.key
                   const actMs = getLastActivityMs(s)
                   const ago = actMs ? (() => {
@@ -301,14 +399,19 @@ export default function MobileApp() {
                       className="flex items-center border-b border-[#1e2330]"
                     >
                       <button
-                        onClick={() => setFullChatSession(s)}
+                        onClick={() => { if (longPressDetectedRef.current) { longPressDetectedRef.current = false; return } setFullChatSession(s) }}
+                        onTouchStart={() => handleSessionLongPressStart(s)}
+                        onTouchEnd={handleSessionLongPressEnd}
+                        onTouchMove={handleSessionLongPressEnd}
                         className="flex-1 flex items-center gap-3 px-4 py-3.5 active:bg-[#1e2330] text-left min-w-0"
                       >
                         <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: statusColor }} />
+                        {projEmoji && <span className="text-sm shrink-0">{projEmoji}</span>}
                         <span className="flex-1 text-sm text-white truncate min-w-0">{lbl}</span>
                         <span className="text-xs shrink-0 font-medium" style={{ color: statusColor }}>{statusLabel}</span>
-                        {ago && <span className="text-xs text-[#4b5563] shrink-0 ml-1.5">{ago}</span>}
-                        <span className="text-[#4b5563] shrink-0 ml-1">›</span>
+                        {ago && <span className="text-xs text-[#4b5563] shrink-0">{ago}</span>}
+                        {(() => { const cost = useSessionStore.getState().sessionMeta[s.key]?.lastExchangeCost; return cost != null ? <span className="text-[10px] text-[#4b5563] shrink-0 font-mono">${(cost * 100).toFixed(1)}¢</span> : null })()}
+                        <span className="text-[#4b5563] shrink-0">›</span>
                       </button>
                       <button
                         onClick={() => {
@@ -326,24 +429,22 @@ export default function MobileApp() {
             )}
           </>
         )}
+        </div>
 
-        {tab === 'costs' && (
-          <div className="flex-1 overflow-hidden flex flex-col">
-            <div className="px-4 py-3 border-b border-[#2a3142] bg-[#181c24] shrink-0">
-              <h1 className="text-white font-semibold text-sm">💰 Costs</h1>
-            </div>
-            <CostsPanel />
+        {/* Costs + Memory kept mounted so they don't re-fetch every tab switch */}
+        <div className={`flex-1 overflow-hidden flex flex-col ${tab === 'costs' ? '' : 'hidden'}`}>
+          <div className="px-4 py-3 border-b border-[#2a3142] bg-[#181c24] shrink-0">
+            <h1 className="text-white font-semibold text-sm">💰 Costs</h1>
           </div>
-        )}
+          <CostsPanel />
+        </div>
 
-        {tab === 'memory' && (
-          <div className="flex-1 overflow-hidden flex flex-col">
-            <div className="px-4 py-3 border-b border-[#2a3142] bg-[#181c24] shrink-0">
-              <h1 className="text-white font-semibold text-sm">🧠 Memory</h1>
-            </div>
-            <MemoryPanel />
+        <div className={`flex-1 overflow-hidden flex flex-col ${tab === 'memory' ? '' : 'hidden'}`}>
+          <div className="px-4 py-3 border-b border-[#2a3142] bg-[#181c24] shrink-0">
+            <h1 className="text-white font-semibold text-sm">🧠 Memory</h1>
           </div>
-        )}
+          <MemoryPanel />
+        </div>
       </div>
 
       {/* Bottom tab bar */}
@@ -367,15 +468,7 @@ export default function MobileApp() {
         </div>
       </div>
 
-      {/* Floating bug report button */}
-      <button
-        onClick={() => setShowIssueReporter(true)}
-        className="fixed bottom-20 right-4 z-40 w-10 h-10 rounded-full bg-[#181c24] border border-[#2a3142] text-base shadow-lg flex items-center justify-center hover:bg-[#2a3142] transition-colors"
-        style={{ bottom: 'calc(4rem + max(0.5rem, env(safe-area-inset-bottom)) + 0.5rem)' }}
-        title="Report an issue"
-      >
-        🐛
-      </button>
+
 
       {showConnect && <ConnectModal onClose={() => setShowConnect(false)} />}
 
@@ -425,6 +518,55 @@ export default function MobileApp() {
         <IssueReporter onClose={() => setShowIssueReporter(false)} context={{ view: tab }} />
       )}
 
+      {/* Move to project bottom sheet */}
+      {showMoveSheet && longPressSessionKey && (
+        <div
+          className="fixed inset-0 z-50 flex flex-col justify-end"
+          style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+          onClick={() => { setShowMoveSheet(false); setLongPressSessionKey(null) }}
+        >
+          <div className="absolute inset-0 bg-black/60" />
+          <div
+            className="relative bg-[#181c24] rounded-t-3xl border-t border-[#2a3142] px-4 pt-4 pb-6"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="w-10 h-1 bg-[#2a3142] rounded-full mx-auto mb-4" />
+            <div className="text-[#6b7280] text-xs font-medium mb-1 px-1">Move to project</div>
+            <div className="text-white text-sm font-medium mb-3 px-1 truncate">
+              {labels[longPressSessionKey] || sessions.find(s => s.key === longPressSessionKey)?.label || longPressSessionKey}
+            </div>
+            <div className="space-y-1 max-h-72 overflow-y-auto">
+              {availableProjects.map(p => (
+                <button
+                  key={p.slug}
+                  onClick={() => handleMoveSessionTo(longPressSessionKey, p.slug)}
+                  className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left hover:bg-[#2a3142] transition-colors active:bg-[#2a3142]"
+                >
+                  <div
+                    className="w-9 h-9 rounded-xl flex items-center justify-center text-lg shrink-0"
+                    style={{ background: (p.color || '#6366f1') + '22', border: `1px solid ${(p.color || '#6366f1')}44` }}
+                  >
+                    {p.emoji || '📁'}
+                  </div>
+                  <span className="text-sm font-medium text-white">{p.name}</span>
+                </button>
+              ))}
+              {useProjectStore.getState().getTag(longPressSessionKey).project && (
+                <button
+                  onClick={() => handleMoveSessionTo(longPressSessionKey, '')}
+                  className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left hover:bg-[#2a3142] transition-colors active:bg-[#2a3142]"
+                >
+                  <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg shrink-0 bg-gray-800 border border-gray-700">
+                    📂
+                  </div>
+                  <span className="text-sm font-medium text-[#6b7280]">Move to Others (unassign)</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Archive toast */}
       {archiveToast && (
         <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 bg-[#1e2330] border border-[#2a3142] text-white text-xs font-medium px-4 py-2.5 rounded-xl shadow-lg pointer-events-none whitespace-nowrap">
@@ -432,5 +574,39 @@ export default function MobileApp() {
         </div>
       )}
     </div>
+
+    {/* Project view overlay */}
+    {activeProject && (
+      <div className="fixed inset-0 z-20 bg-[#0f1117]">
+        <MobileProjectView
+          project={activeProject}
+          onBack={() => setActiveProject(null)}
+          onSwitchProject={(p) => setActiveProject(p)}
+        />
+      </div>
+    )}
+
+    {/* Full chat from sessions list — overlay so ProjectsGrid/Costs/Memory stay mounted */}
+    {fullChatSession && (
+      <div className="fixed inset-0 z-20 bg-[#0f1117]">
+        <MobileFullChat
+          session={fullChatSession}
+          onBack={() => setFullChatSession(null)}
+          recentSessions={recentSessions}
+          onSwitch={(s) => setFullChatSession(s)}
+          onArchive={() => {
+            const current = fullChatSessionRef.current
+            if (!current) return
+            const archivedKey = current.key
+            hideSession(archivedKey)
+            if (current.id) hideSession(current.id)
+            const next = visibleSessions.find(s => s.key !== archivedKey)
+            setFullChatSession(next || null)
+          }}
+          onNewSession={() => handleNewSession()}
+        />
+      </div>
+    )}
+    </>
   )
 }

@@ -1,191 +1,190 @@
-# Octis 🐙
+# 🐙 Octis
 
-> One brain. Many arms.
+**Your AI command center.** Octis is a self-hosted web UI for [OpenClaw](https://openclaw.ai) that turns a wall of chat sessions into something you can actually manage.
 
-**Octis** is an open-source AI command center built for people who run multiple AI agent sessions daily. You work on *projects* — sessions are invisible plumbing.
-
-Built for [OpenClaw](https://github.com/openclaw/openclaw). Protocol-agnostic by design.
+> Built for people running AI agents all day — the kind who have 10+ active sessions, lose track of which one is blocked, and waste 20 minutes re-orienting before they can reply.
 
 ---
 
-## The problem
+## What it does
 
-If you run AI agents heavily, you know the pain:
+AI sessions are powerful but invisible. You open a thread, the agent goes to work, and then... you lose it. Which session was handling the loan system? Is that build still running or did it die? What did we decide last Tuesday?
 
-- 10+ sessions open across multiple projects
-- No idea which ones are active, waiting, or silently dead
-- Every context switch costs 2–5 minutes of re-orientation
-- Costs are invisible until the bill arrives
+Octis fixes that.
 
-Octis fixes all of this.
+**For desktop:** Multi-pane layout so you can watch 2–8 sessions side by side. Labels, project tags, status indicators — you see everything at a glance. Drag panes to rearrange. Hotkeys to jump between them. Archive the noise.
+
+**For mobile:** Swipe between sessions like cards. Full chat in a tap. Reply from anywhere. Push notifications when your agent needs you. Installable as a PWA — no App Store required.
+
+**For context:** Sessions are grouped into Projects. Open "Octis" → see only Octis sessions. Open "Infra" → only infra work. Todo lists sync from your workspace files. Memory panel shows what your agent has committed to long-term memory. Costs panel shows what you're spending.
 
 ---
 
 ## Features
 
-### Session management
-- Multi-pane desktop layout — up to 8 sessions visible simultaneously
-- Project grouping — tag sessions to projects, auto-sorted by urgency
-- Status indicators — active / needs-you / idle, color-coded and sorted
-- Auto-labeling — Haiku names each session from context (keyboard shortcut: `R`)
-- Archive with undo toast (`E`), drag-to-reorder panes (`⠿` grip)
-
-### Chat
-- Full streaming chat in every pane
-- PDF attachment — extracts text server-side, sends as context
-- Status bar — purple (working) / amber pulse (queued) / green (done) / tool name shown mid-call
-- Message cache — instant session switching, silent background reload
-- Project context injection — Byte receives project context on first message automatically
-
-### Mobile (PWA)
-- Installable to home screen — no App Store needed
-- Swipeable session list per project
-- Full chat with iOS keyboard handling
-- Push notifications — "needs your input" alerts even when tab is closed
-- Auto-reconnect on background/foreground
-
-### Costs
-- 30-day daily spend chart with 7-day moving average
-- Today vs yesterday delta (↑ / ↓ with %)
-- Sessions-per-day + avg cost per session
-- Top sessions by cost (today + rolling 30 days)
-
-### Memory & todos
-- Read-only view of `MEMORY.md`, `TODOS.md`, `memory/*.md`
-- Todo count badges per project
-- Tap todo → opens new session pre-loaded with that task
-
----
-
-## Tech stack
-
-| Layer | Tech |
-|-------|------|
-| Frontend | React 18 + Vite + TypeScript + Tailwind CSS |
-| State | Zustand |
-| API server | Express (Node.js) |
-| Auth | Clerk |
-| Database | PostgreSQL |
-| Push | Web Push (VAPID) |
-| PWA | vite-plugin-pwa + Workbox |
-| Gateway | OpenClaw WebSocket API |
+- 🗂️ **Projects** — group sessions by topic; virtual "Others" catch-all for untagged sessions
+- 💬 **Multi-pane chat** — up to 8 concurrent sessions on desktop, drag to reorder
+- 📱 **Mobile PWA** — installable, swipeable, push notifications, draft persistence
+- 🏷️ **Session labels** — auto-named by AI, manually renameable, synced across devices
+- 🗄️ **Archive** — hide sessions without losing them; undo toast
+- 📋 **Todos** — synced from your workspace `TODOS.md`, mark done from the UI
+- 🧠 **Memory panel** — view what's been committed to long-term agent memory
+- 💰 **Costs panel** — daily spend, per-session breakdown (optional, requires DB)
+- 🔔 **Push notifications** — get pinged when the agent needs input
+- 🔒 **Local auth** — email + password login, httpOnly cookie, bcrypt hashed; or auto-auth for single-user setups
+- 🗃️ **SQLite storage** — zero-dependency persistence; no Postgres, no Redis, nothing to manage
+- 📎 **Attachments** — images, PDFs (text extracted), video (frame extracted)
+- ⌨️ **Hotkeys** — `R` to AI-rename, `⌘K` to jump sessions, `⌘Z` to undo archive
 
 ---
 
 ## Quick start
 
-### Prerequisites
-- Node.js 18+
-- An [OpenClaw](https://github.com/openclaw/openclaw) gateway
-- PostgreSQL with OpenClaw tables (`raw_nexus.*`)
-- A [Clerk](https://clerk.com) app
-
-### Install
-
 ```bash
-git clone https://github.com/octis-app/octis
+git clone https://github.com/octis-app/octis.git
 cd octis
 npm install
-```
 
-### Configure
-
-```bash
-# Environment variables for the API server
+# Copy and fill in your config
 cp .env.example .env
-# Edit .env — see Environment variables below
+# Edit .env — at minimum set GATEWAY_URL and GATEWAY_TOKEN
 
-# User config (who can log in and what they see)
-cp server/config/users.example.json server/config/users.json
-# Edit users.json — add Clerk user IDs and their roles
+npm run build
+npm start
 ```
 
-### Run (development)
-
-```bash
-npm run dev       # Frontend on http://localhost:5173
-npm run server    # API server on http://localhost:3747
-```
-
-### Build & deploy
-
-```bash
-npm run build     # Outputs to dist/
-# Serve dist/ with nginx, proxy /api → 3747, /ws → OpenClaw gateway port
-```
-
-See [`docs/deploy.md`](docs/deploy.md) for a full nginx + systemd setup.
+Then open `http://localhost:3747`.
 
 ---
 
-## Environment variables
+## Configuration
 
-### API server
+All config lives in environment variables. Create a `.env` file (see `.env.example`):
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `CLERK_SECRET_KEY` | ✅ | Clerk secret key — from your Clerk dashboard |
-| `PG_HOST` | ✅ | Postgres host |
-| `PG_DB` | ✅ | Database name |
-| `PG_USER` | ✅ | Postgres user |
-| `PG_PASSWORD` | ✅ | Postgres password |
-| `PG_PORT` | | Postgres port (default: 5432) |
-| `VAPID_PUBLIC_KEY` | | Web Push public key (required for push notifications) |
-| `VAPID_PRIVATE_KEY` | | Web Push private key |
-| `VAPID_CONTACT` | | Push contact email, e.g. `mailto:you@example.com` |
-| `OCTIS_WORKSPACE` | | Path to OpenClaw workspace (default: `~/.openclaw/workspace`) |
-| `OCTIS_API_PORT` | | API server port (default: 3747) |
-| `GATEWAY_URL` | | Override gateway WebSocket URL |
+```env
+# Required — your OpenClaw gateway
+GATEWAY_URL=wss://your-openclaw-instance/ws
+GATEWAY_TOKEN=your_gateway_token_here
 
-Generate VAPID keys: `npx web-push generate-vapid-keys`
+# Auth — omit for auto-auth (single-user, no login screen)
+# With auto-auth, anyone who can reach the server can use it
+ADMIN_EMAIL=you@example.com
+ADMIN_PASSWORD=a_strong_password
 
-### User config (`server/config/users.json`)
+# Optional
+PORT=3747
+OCTIS_WORKSPACE=/path/to/.openclaw/workspace  # for memory/todos panels
 
-Maps Clerk user IDs to roles and agent visibility:
+# Costs panel (optional — needs a Postgres DB with OpenClaw cost tables)
+COSTS_DB_URL=postgresql://user:pass@host/db
+```
+
+### Finding your gateway token
+
+In your OpenClaw config (`~/.openclaw/openclaw.json`):
 
 ```json
 {
-  "clerk_user_id": {
-    "role": "owner",
-    "agentId": "main",
-    "displayName": "Your Name"
+  "gateway": {
+    "auth": {
+      "token": "your_token_here"
+    }
   }
 }
 ```
 
-- `role: "owner"` — full access
-- `role: "member"` — sees only their assigned agent's sessions
-- `agentId` — which OpenClaw agent's sessions this user sees
+### Auto-auth mode
 
-This file is gitignored. Copy from `server/config/users.example.json`.
+If you leave `ADMIN_PASSWORD` unset, Octis skips the login screen entirely. Anyone who can reach the server gets in. Good for local-only or VPN-protected setups. **Not recommended if the server is exposed to the internet.**
 
 ---
 
-## Docs
+## Adding users
 
-- [`docs/architecture.md`](docs/architecture.md) — system design, data flow, state management
-- [`docs/components.md`](docs/components.md) — component reference
-- [`docs/deploy.md`](docs/deploy.md) — nginx, systemd, QA system
-- [`docs/gotchas.md`](docs/gotchas.md) — known sharp edges and root causes
+Octis ships with a single admin account (set via `ADMIN_EMAIL` + `ADMIN_PASSWORD`). Multi-user support is on the roadmap. For now, share your credentials with trusted collaborators or run separate instances.
+
+---
+
+## Data
+
+Everything is stored in `~/.octis/octis.db` (SQLite, WAL mode). This includes:
+
+- Session labels and project tags
+- Hidden/archived sessions
+- Pinned sessions
+- Projects
+- Todo sync state
+- Push notification subscriptions
+
+The file is small, portable, and safe to back up or delete (non-destructive — nothing in the gateway or OpenClaw itself is touched).
+
+---
+
+## Self-hosting tips
+
+- **Run behind a reverse proxy** (nginx, Caddy) with TLS. Octis has no built-in HTTPS.
+- **Use Tailscale or a VPN** if you don't want the UI exposed publicly.
+- **Systemd service:** see `octis.service.example` for a ready-to-use unit file.
+- **Docker:** `docker build -t octis . && docker run -p 3747:3747 --env-file .env octis`
+
+---
+
+## Development
+
+```bash
+# Run API in dev mode
+node server/index.js
+
+# Run frontend with HMR
+npm run dev
+
+# Build for production
+npm run build
+```
+
+The API server runs on port 3747. The frontend dev server proxies `/api/` and `/ws` to it.
+
+---
+
+## Architecture
+
+```
+Browser (React + Vite PWA)
+    │
+    ├── /api/*       → Express API (Node.js, port 3747)
+    │                   ├── Auth: local JWT + bcrypt (SQLite)
+    │                   ├── Data: SQLite (better-sqlite3)
+    │                   └── Costs: Postgres (optional, read-only)
+    │
+    └── /ws          → OpenClaw Gateway (WebSocket)
+                        └── Sessions, chat, agent control
+```
+
+Octis talks to your OpenClaw gateway over WebSocket. It never stores message content — only labels, tags, and UI state. The gateway is the source of truth for sessions and messages.
 
 ---
 
 ## Roadmap
 
-- [ ] Project-first session orchestration (auto-spawn/prune/handoff sessions per project)
-- [ ] Model router (classify task → pick right model automatically)
-- [ ] Workspace sharing — invite members, per-agent visibility controls
-- [ ] Session templates — pre-loaded briefs for recurring project types
+- [ ] Multi-user accounts (admin can add users from Settings)
+- [ ] Per-user session visibility (viewer role)
+- [ ] Session search across history
 - [ ] Export session transcript
+- [ ] Keyboard command palette
+- [ ] Plugin slots for custom panels
 
 ---
 
-## Contributing
+## OpenClaw
 
-Early stage. Core ideas are still being shaped. Issues and discussions welcome.
+Octis is built for [OpenClaw](https://openclaw.ai) — a personal AI gateway that connects your agents to Slack, Discord, Signal, Telegram, and more. If you're not running OpenClaw yet, start there.
 
 ---
 
 ## License
 
-MIT
+MIT — do whatever you want with it.
+
+---
+
+*Made with 🦞 by the OpenClaw community.*
