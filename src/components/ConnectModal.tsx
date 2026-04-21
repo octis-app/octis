@@ -8,7 +8,7 @@ interface ConnectModalProps {
 export default function ConnectModal({ onClose }: ConnectModalProps) {
   const { gatewayUrl, gatewayToken, setCredentials, connect, connected } = useGatewayStore()
   const [url, setUrl] = useState(
-    gatewayUrl || (import.meta.env.VITE_GATEWAY_URL as string) || 'wss://octis.duckdns.org/ws'
+    gatewayUrl || (import.meta.env.VITE_GATEWAY_URL as string) || 'wss://your-openclaw-host/ws'
   )
   const [token, setToken] = useState(
     gatewayToken || (import.meta.env.VITE_GATEWAY_TOKEN as string) || ''
@@ -70,7 +70,7 @@ export default function ConnectModal({ onClose }: ConnectModalProps) {
           className="w-full bg-[#0f1117] border border-[#2a3142] rounded-lg px-3 py-2 text-sm text-white mb-4 outline-none focus:border-[#6366f1]"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
-          placeholder="wss://octis.duckdns.org/ws"
+          placeholder="wss://your-openclaw-host/ws"
           disabled={status === 'connecting'}
         />
 
