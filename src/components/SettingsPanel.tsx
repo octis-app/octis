@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { useAuth } from '../lib/auth'
 import { useLabelStore, useSessionStore } from '../store/gatewayStore'
 import { usePushNotifications } from '../hooks/usePushNotifications'
+import { useAuthStore } from '../store/authStore'
+import { authFetch } from '../lib/authFetch'
 
 const API = import.meta.env.VITE_API_URL || ''
 
@@ -72,6 +74,57 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [renameStatus, setRenameStatus] = useState('')
 
   const save = (key: string, val: boolean) => localStorage.setItem(key, String(val))
+
+  // User management (owner only)
+  const { role: authRole } = useAuthStore()
+  const isOwner = authRole === 'owner' || authRole === 'admin'
+  type OctisUser = { id: number; email: string; role: string; agent_id: string; created_at: number }
+  const [users, setUsers] = useState<OctisUser[]>([])
+  const [usersLoading, setUsersLoading] = useState(false)
+  const [newEmail, setNewEmail] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [newRole, setNewRole] = useState('viewer')
+  const [addingUser, setAddingUser] = useState(false)
+  const [userMsg, setUserMsg] = useState('')
+
+  useEffect(() => {
+    if (!isOwner) return
+    setUsersLoading(true)
+    authFetch(`${API}/api/users`)
+      .then(r => r.json())
+      .then(d => { if (d.ok) setUsers(d.users) })
+      .catch(() => {})
+      .finally(() => setUsersLoading(false))
+  }, [isOwner])
+
+  const handleAddUser = async () => {
+    if (!newEmail || !newPassword) { setUserMsg('Email and password required'); return }
+    setAddingUser(true); setUserMsg('')
+    try {
+      const res = await authFetch(`${API}/api/users`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: newEmail, password: newPassword, role: newRole, agentId: 'main' }),
+      })
+      const d = await res.json()
+      if (!res.ok) { setUserMsg(`❌ ${d.error}`); return }
+      setUsers(prev => [...prev, d.user])
+      setNewEmail(''); setNewPassword(''); setNewRole('viewer')
+      setUserMsg(`✅ Added ${d.user.email}`)
+    } catch { setUserMsg('❌ Network error') }
+    finally { setAddingUser(false) }
+  }
+
+  const handleDeleteUser = async (u: OctisUser) => {
+    if (!confirm(`Remove ${u.email}? They will lose access immediately.`)) return
+    try {
+      const res = await authFetch(`${API}/api/users/${u.id}`, { method: 'DELETE' })
+      const d = await res.json()
+      if (!res.ok) { setUserMsg(`❌ ${d.error}`); return }
+      setUsers(prev => prev.filter(x => x.id !== u.id))
+      setUserMsg(`Removed ${u.email}`)
+    } catch { setUserMsg('❌ Network error') }
+  }
 
   const handleRenameAll = async () => {
     setRenaming(true)
@@ -246,6 +299,80 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
           <div className="bg-[#0f1117] rounded-lg px-3 py-2 text-xs text-[#6b7280] font-mono">
             {localStorage.getItem('octis-gateway') ? JSON.parse(localStorage.getItem('octis-gateway') || '{}').gatewayUrl : 'Not configured'}
           </div>
+
+          {/* Users — owner only */}
+          {isOwner && (
+            <>
+              <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-3 mt-5">Users</div>
+
+              {/* Existing users list */}
+              {usersLoading ? (
+                <div className="text-xs text-[#6b7280] py-2">Loading…</div>
+              ) : (
+                <div className="space-y-1.5 mb-4">
+                  {users.map(u => (
+                    <div key={u.id} className="flex items-center justify-between bg-[#0f1117] rounded-lg px-3 py-2">
+                      <div className="min-w-0">
+                        <div className="text-sm text-white truncate">{u.email}</div>
+                        <div className="text-[10px] text-[#6b7280] mt-0.5">
+                          <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium mr-1.5 ${
+                            u.role === 'owner' || u.role === 'admin' ? 'bg-[#312e81] text-[#a5b4fc]' : 'bg-[#1f2937] text-[#9ca3af]'
+                          }`}>{u.role}</span>
+                          agent: {u.agent_id || 'main'}
+                        </div>
+                      </div>
+                      {(u.role !== 'owner' && u.role !== 'admin') && (
+                        <button
+                          onClick={() => handleDeleteUser(u)}
+                          className="ml-3 shrink-0 text-[#6b7280] hover:text-red-400 transition-colors text-sm px-1.5"
+                          title="Remove user"
+                        >✕</button>
+                      )}
+                    </div>
+                  ))}
+                  {users.length === 0 && <div className="text-xs text-[#4b5563]">No other users yet.</div>}
+                </div>
+              )}
+
+              {/* Add user form */}
+              <div className="bg-[#0f1117] rounded-lg px-3 py-3 space-y-2">
+                <div className="text-xs text-[#6b7280] font-medium mb-2">Add user</div>
+                <input
+                  type="email"
+                  placeholder="Email address"
+                  value={newEmail}
+                  onChange={e => setNewEmail(e.target.value)}
+                  className="w-full bg-[#181c24] border border-[#2a3142] rounded-lg px-3 py-1.5 text-sm text-white placeholder-[#4b5563] focus:outline-none focus:border-[#6366f1]"
+                />
+                <input
+                  type="password"
+                  placeholder="Password"
+                  value={newPassword}
+                  onChange={e => setNewPassword(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && handleAddUser()}
+                  className="w-full bg-[#181c24] border border-[#2a3142] rounded-lg px-3 py-1.5 text-sm text-white placeholder-[#4b5563] focus:outline-none focus:border-[#6366f1]"
+                />
+                <div className="flex items-center gap-2">
+                  <select
+                    value={newRole}
+                    onChange={e => setNewRole(e.target.value)}
+                    className="flex-1 bg-[#181c24] border border-[#2a3142] rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-[#6366f1]"
+                  >
+                    <option value="viewer">Viewer (read + reply)</option>
+                    <option value="admin">Admin (full access)</option>
+                  </select>
+                  <button
+                    onClick={handleAddUser}
+                    disabled={addingUser}
+                    className="shrink-0 px-3 py-1.5 bg-[#6366f1] hover:bg-[#818cf8] disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
+                  >
+                    {addingUser ? '…' : 'Add'}
+                  </button>
+                </div>
+                {userMsg && <div className="text-xs text-[#6b7280] pt-1">{userMsg}</div>}
+              </div>
+            </>
+          )}
 
           {/* About */}
           <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-3 mt-5">About</div>

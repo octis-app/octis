@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
-import LoginPage from './components/LoginPage'
+import { useAuth, SignedIn, SignedOut, UserButton } from '@clerk/clerk-react'
 import { useGatewayStore, useSessionStore, useLabelStore, useProjectStore, useHiddenStore, Session } from './store/gatewayStore'
-import { useAuthStore } from './store/authStore'
 import Sidebar from './components/Sidebar'
 import ChatPane from './components/ChatPane'
 import ConnectModal from './components/ConnectModal'
@@ -40,38 +39,22 @@ const NAV_ALL = [
 const API = (import.meta.env.VITE_API_URL as string) || ''
 
 export default function App() {
-  const [authState, setAuthState] = useState<'loading' | 'authed' | 'login'>('loading')
+  const { isSignedIn, isLoaded, getToken } = useAuth()
 
-  useEffect(() => {
-    fetch(API + '/api/auth/me', { credentials: 'include' })
-      .then(r => r.ok ? r.json() : null)
-      .then(user => setAuthState(user ? 'authed' : 'login'))
-      .catch(() => setAuthState('login'))
-  }, [])
-
-  // Global 401 interceptor — any authFetch() that gets a 401 fires this event
-  useEffect(() => {
-    const handle = () => setAuthState('login')
-    window.addEventListener('octis-unauthorized', handle)
-    return () => window.removeEventListener('octis-unauthorized', handle)
-  }, [])
-
-  if (authState === 'loading') {
+  if (!isLoaded) {
     return (
       <div className="flex h-screen items-center justify-center bg-[#0f1117]">
-        <div className="w-8 h-8 border-2 border-[#6366f1] border-t-transparent rounded-full animate-spin" />
+        <span className="text-[#6b7280] text-sm">Loading…</span>
       </div>
     )
   }
-  if (authState === 'login') return <LoginPage API={API} onLogin={() => setAuthState('authed')} />
+  if (!isSignedIn) return <AuthGate />
 
-  return <AuthenticatedApp />
+  return <AuthenticatedApp getToken={getToken} />
 }
 
-function AuthenticatedApp() {
-  const getToken = async () => null
+function AuthenticatedApp({ getToken }: { getToken: () => Promise<string | null> }) {
   const { connected, gatewayUrl, connect, setCredentials } = useGatewayStore()
-  const { setAuth, fetchOwnedSessions } = useAuthStore()
   const { activePanes, pinToPane, sessions, setSessions } = useSessionStore()
   const { labels, setLabel } = useLabelStore()
   const { hydrateFromServer: hydrateProjects } = useProjectStore()
@@ -99,87 +82,60 @@ function AuthenticatedApp() {
 
   const NAV = NAV_ALL.filter(n => !n.ownerOnly || userRole === 'owner')
 
-  // Reconnect when app returns from background — desktop only.
-  // MobileApp has its own visibilitychange handler; running both causes double-connect
-  // (gateway sees rapid open/close → code=1006 disconnect).
+  // Reconnect when app returns from background — but only if the WS is actually dead.
+  // Unconditional reconnect creates a new ws object → triggers ChatPane history reload → blank screen.
   useEffect(() => {
-    if (isMobile) return // MobileApp handles its own reconnect
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
         const { ws } = useGatewayStore.getState()
         if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-          useGatewayStore.setState({ _reconnectAttempts: 0 })
           connect()
         }
       }
     }
     document.addEventListener('visibilitychange', handleVisibility)
     return () => document.removeEventListener('visibilitychange', handleVisibility)
-  }, [connect, isMobile])
+  }, [connect])
 
   // Fetch fresh gateway config from server on every sign-in
   useEffect(() => {
     const fetchConfig = async () => {
       try {
+        const token = await getToken()
         const res = await fetch(`${API}/api/gateway-config`, {
-          credentials: 'include',
+          headers: { Authorization: `Bearer ${token}` },
         })
         if (!res.ok) throw new Error(`Config fetch failed: ${res.status}`)
         const data = (await res.json()) as { url?: string; token?: string; agentId?: string; role?: string; needsSetup?: boolean }
         setUserRole(data.role || null)
-        setAuth(data.role || null, null)
-        void fetchOwnedSessions()
         if (data.needsSetup) {
           setNeedsSetup(true)
           return
         }
         setCredentials(data.url!, data.token!, data.agentId)
         connect()
-        
-        void hydrateProjects()
-        void hydrateHidden()
+        const t = token || undefined
+        void hydrateProjects(t)
+        void hydrateHidden(t)
       } catch (e) {
         console.error('[octis] Failed to fetch gateway config:', e)
-        // Retry once after 3s before showing the connect modal.
-        // Covers the case where the API server is mid-restart (race on app load).
-        setTimeout(async () => {
-          try {
-            const r2 = await fetch(`${API}/api/gateway-config`, { credentials: 'include' })
-            if (!r2.ok) { setShowConnect(true); return }
-            const d2 = await r2.json() as { url?: string; token?: string; agentId?: string; role?: string; needsSetup?: boolean }
-            setUserRole(d2.role || null)
-            if (d2.needsSetup) { setNeedsSetup(true); return }
-            setCredentials(d2.url!, d2.token!, d2.agentId)
-            connect()
-            void hydrateProjects()
-            void hydrateHidden()
-          } catch { setShowConnect(true) }
-        }, 3000)
+        setShowConnect(true)
       }
     }
     void fetchConfig()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Re-hydrate project tags + hidden sessions when user returns to tab — desktop only
-  // (MobileApp calls hydrateAll on mount; running both causes redundant re-fetches)
+  // Re-hydrate project tags + hidden sessions when user returns to tab (picks up mobile changes)
   useEffect(() => {
-    if (isMobile) return
-    let hydrateTimer: ReturnType<typeof setTimeout> | null = null
     const onVisible = () => {
       if (document.visibilityState === 'visible') {
-        if (hydrateTimer) clearTimeout(hydrateTimer)
-        hydrateTimer = setTimeout(() => {
-          void hydrateProjects()
-          void hydrateHidden()
-        }, 2000)
+        void hydrateProjects()
+        void hydrateHidden()
       }
     }
     document.addEventListener('visibilitychange', onVisible)
-    return () => {
-      document.removeEventListener('visibilitychange', onVisible)
-      if (hydrateTimer) clearTimeout(hydrateTimer)
-    }
+    return () => document.removeEventListener('visibilitychange', onVisible)
   }, [hydrateProjects, hydrateHidden])
 
   // Seed session labels from DB on mount
@@ -411,16 +367,17 @@ function AuthenticatedApp() {
           {connected ? '🟢' : '🔴'}
         </button>
         <div className="mt-2 mb-1">
-          <button
-            onClick={async () => {
-              await fetch(API + '/api/auth/logout', { method: 'POST', credentials: 'include' })
-              window.location.reload()
+          <UserButton
+            appearance={{
+              elements: {
+                avatarBox: 'w-8 h-8',
+                userButtonPopoverCard: 'bg-[#181c24] border border-[#2a3142]',
+                userButtonPopoverActionButton: 'text-[#e8eaf0] hover:bg-[#2a3142]',
+                userButtonPopoverActionButtonText: 'text-[#e8eaf0]',
+                userButtonPopoverFooter: 'hidden',
+              },
             }}
-            className="w-9 h-9 rounded-lg text-sm text-[#6b7280] hover:bg-[#2a3142] hover:text-white transition-colors flex items-center justify-center"
-            title="Sign out"
-          >
-            ⏻
-          </button>
+          />
         </div>
       </div>
 
@@ -482,20 +439,23 @@ function AuthenticatedApp() {
         </>
       )}
 
-      {/* Costs + Memory kept mounted (hidden) so they don't re-fetch on every tab switch */}
-      <div className={`flex flex-col flex-1 overflow-hidden ${activeNav === 'costs' ? '' : 'hidden'}`}>
-        <div className="px-6 py-4 border-b border-[#2a3142] bg-[#181c24] shrink-0">
-          <h1 className="text-white font-semibold">💰 Costs</h1>
+      {activeNav === 'costs' && (
+        <div className="flex flex-col flex-1 overflow-hidden">
+          <div className="px-6 py-4 border-b border-[#2a3142] bg-[#181c24] shrink-0">
+            <h1 className="text-white font-semibold">💰 Costs</h1>
+          </div>
+          <CostsPanel />
         </div>
-        <CostsPanel />
-      </div>
+      )}
 
-      <div className={`flex flex-col flex-1 overflow-hidden ${activeNav === 'memory' ? '' : 'hidden'}`}>
-        <div className="px-6 py-4 border-b border-[#2a3142] bg-[#181c24] shrink-0">
-          <h1 className="text-white font-semibold">🧠 Memory</h1>
+      {activeNav === 'memory' && (
+        <div className="flex flex-col flex-1 overflow-hidden">
+          <div className="px-6 py-4 border-b border-[#2a3142] bg-[#181c24] shrink-0">
+            <h1 className="text-white font-semibold">🧠 Memory</h1>
+          </div>
+          <MemoryPanel />
         </div>
-        <MemoryPanel />
-      </div>
+      )}
 
       {showConnect && <ConnectModal onClose={() => setShowConnect(false)} />}
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
@@ -592,3 +552,6 @@ function SidebarWrapper({ onSettingsClick }: { onSettingsClick: () => void }) {
   )
 }
 
+// Keep TS happy — SignedIn/SignedOut are imported but may be used in future
+void SignedIn
+void SignedOut

@@ -551,6 +551,7 @@ app.post('/api/session-init', requireAuth, async (req, res) => {
       { method: 'sessions.patch', params: { key: sessionKey, label: `${emoji} ${name}`.trim() } },
       { method: 'chat.inject', params: { sessionKey, message: contextNote, label: '📁 Project' } },
     ])
+    claimSessionOwnership(sessionKey, req.user.id)
     res.json({ ok: true })
   } catch (err) {
     console.error('[octis] session-init error:', err.message)

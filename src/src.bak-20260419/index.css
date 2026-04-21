@@ -1,0 +1,39 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-base: #0f1117;
+  --bg-panel: #181c24;
+  --bg-card: #1e2330;
+  --border: #2a3142;
+  --text-primary: #e8eaf0;
+  --text-muted: #6b7280;
+  --accent: #6366f1;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: 'Inter', system-ui, sans-serif;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  /* Prevent iOS bounce scroll */
+  overscroll-behavior: none;
+}
+
+/* Safe area utilities */
+.pt-safe { padding-top: env(safe-area-inset-top); }
+.pb-safe { padding-bottom: env(safe-area-inset-bottom); }
+
+/* Prevent text size adjustment on iOS */
+html { -webkit-text-size-adjust: 100%; }
+
+/* Smooth scrolling */
+.overflow-y-auto { -webkit-overflow-scrolling: touch; }
+
+/* Typing indicator bounce */
+@keyframes typingBounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-5px); opacity: 1; }
+}
