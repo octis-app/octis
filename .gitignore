@@ -1,8 +1,11 @@
 node_modules
 dist
+dist.bak
+src.bak*
 .env
 *.local
 .env.production
+*.db
 server/config/users.json
 src/src.bak-*/
 src-backup-*/

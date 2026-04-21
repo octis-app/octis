@@ -20,7 +20,7 @@ Octis fixes that.
 
 ---
 
-## Features
+## Requirements
 
 - 🗂️ **Projects** — group sessions by topic; virtual "Others" catch-all for untagged sessions
 - 💬 **Multi-pane chat** — up to 8 concurrent sessions on desktop, drag to reorder

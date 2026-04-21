@@ -1,25 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { useGatewayStore, useSessionStore, useProjectStore, useLabelStore, useDraftStore, useHiddenStore, Session } from '../store/gatewayStore'
-import { authFetch } from '../lib/authFetch'
-
-// Quick Commands helpers
-const QUICK_COMMAND_DEFAULTS = {
-  brief: "Give me a 3-sentence status update: (1) what you last did, (2) what you're working on now, (3) what's next. No fluff.",
-  away: "I'm stepping away for a while. Please do the following:\n1. Summarize what you're currently working on (1-2 sentences).\n2. List anything you're blocked on or need from me before I go - be specific (credentials, a decision, a file, etc.).\n3. List everything you CAN do autonomously while I'm gone, in order.\n4. Estimate how long you can run without me.\nBe concise. I'll read this on my phone.",
-  save: "💾 checkpoint - save any key decisions, context, or tasks from this session to MEMORY.md and TODOS.md now. One-line ack only.",
-  archive_msg: "💾 Final save - write any remaining decisions, tasks, or context to MEMORY.md and TODOS.md. Reply with NO_REPLY only.",
-}
-
-function getQuickCommands() {
-  try {
-    return { ...QUICK_COMMAND_DEFAULTS, ...JSON.parse(localStorage.getItem('octis-quick-commands') || '{}') }
-  } catch { return { ...QUICK_COMMAND_DEFAULTS } }
-}
 
 // ─── Session cost/health badge (for panel header) ─────────────────────────────
 function SessionCostBadge({ sessionKey }: { sessionKey: string }) {
   const { sessions, sessionMeta } = useSessionStore()
-  const { send, sendChat } = useGatewayStore()
+  const { send } = useGatewayStore()
   const [expanded, setExpanded] = useState(false)
 
   const session = sessions.find((s: Session) => s.key === sessionKey)
@@ -41,7 +26,7 @@ function SessionCostBadge({ sessionKey }: { sessionKey: string }) {
 
   const sendCompact = (e: React.MouseEvent) => {
     e.stopPropagation()
-    void sendChat({ sessionKey, message: '/compact' })
+    send({ type: 'req', id: `compact-${Date.now()}`, method: 'chat.send', params: { sessionKey, message: '/compact' } })
     setExpanded(false)
   }
 
@@ -381,7 +366,7 @@ function isNoiseMsg(msg: ChatMessage): boolean {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, onFocus, isFocused, onDragStart, onDragOver, onDrop, onDragEnd, isDragOver, renameRequested }: ChatPaneProps) {
-  const { send, sendChat, ws, connected, agentId } = useGatewayStore()
+  const { send, ws, connected, agentId } = useGatewayStore()
   const { setSessions, sessions, setLastRole, markStreaming: markSessionStreaming, incrementUnread, clearUnread, sessionMeta, consumePendingProjectPrefix, consumePendingProjectInit, setLastExchangeCost } = useSessionStore()
   const { setCard } = useProjectStore()
   const { setLabel: saveLabelLocal, getLabel } = useLabelStore()
@@ -415,7 +400,6 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   const pendingOptimisticIdRef = useRef<number | null>(null) // id of current optimistic message
   const loadedSessionRef = useRef<string | null>(null) // session key for which history is currently loaded
   const workingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null) // fallback: clear working after 90s
-  const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Show thinking indicator if: local state says working, OR the global session store says this
   // session is streaming (e.g. driven from another pane or another surface like Slack)
   const globalStreaming = sessionKey ? (sessionMeta[sessionKey]?.isStreaming ?? false) : false
@@ -454,12 +438,6 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   useEffect(() => {
     if (sessionKey) clearUnread(sessionKey)
   }, [sessionKey, clearUnread])
-
-  // Claim session ownership when a session is opened
-  const { claimSession } = useAuthStore()
-  useEffect(() => {
-    if (sessionKey) claimSession(sessionKey)
-  }, [sessionKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Trigger a sessions.list refresh on mount so the cost badge populates immediately
   // (Sidebar polls every 30s - without this, a newly-opened pane can wait up to 30s)
@@ -591,29 +569,13 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               pendingOptimisticIdRef.current = null
               return msgs
             }
-            // Check for orphaned optimistic messages (number IDs) whose tracking ref was
-            // cleared prematurely (e.g. by a flush streaming event). Preserve them until
-            // the server confirms receipt — avoids the "disappeared then came back later" bug.
-            const orphans = prev.filter((m) => typeof m.id === 'number')
-            if (orphans.length > 0) {
-              const serverHasOrphans = orphans.every((o) => {
-                const oText = extractText(o.content).substring(0, 80).trim()
-                return !!oText && msgs.some(
-                  (m) => m.role === 'user' && typeof m.id !== 'number' &&
-                         extractText(m.content).substring(0, 80).trim() === oText
-                )
-              })
-              if (!serverHasOrphans) {
-                return [...msgs, ...orphans] // keep orphans visible until server confirms
-              }
-              return msgs // server confirmed all orphans — drop them cleanly
-            }
             // Always apply server list - this is the authoritative source.
             // Skip only if count AND last ID both match (prevents skipping when duplicates
             // inflated prev.length beyond what the server returned).
             const lastNew = msgs[msgs.length - 1]
             const lastInPrev = prev[prev.length - 1]
-            if (msgs.length === prev.length && lastNew?.id !== undefined && lastNew?.id !== null && lastNew.id === lastInPrev?.id) {
+            const hasOrphans = prev.some((m) => typeof m.id === 'number')
+            if (!hasOrphans && msgs.length === prev.length && lastNew?.id !== undefined && lastNew?.id !== null && lastNew.id === lastInPrev?.id) {
               return prev // same count + same last ID = nothing new, safe to skip
             }
             return msgs
@@ -659,26 +621,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
           }
           // Cache so next visit to this session is instant
           if (msgs.length > 0) messageCacheRef.current.set(sessionKey, msgs)
-          setMessages((prev) => {
-            if (msgs.length === 0) return prev
-            const pendingOid = pendingOptimisticIdRef.current
-            if (pendingOid !== null) {
-              const optimisticMsg = prev.find(m => m.id === pendingOid)
-              if (optimisticMsg) {
-                const optimisticText = extractText(optimisticMsg.content).substring(0, 80).trim()
-                const serverHasIt = !!optimisticText && msgs.some(
-                  m => m.role === 'user' && typeof m.id !== 'number' &&
-                       extractText(m.content).substring(0, 80).trim() === optimisticText
-                )
-                if (!serverHasIt) {
-                  return [...msgs, optimisticMsg]
-                }
-                confirmedOptimisticRef.current = pendingOid
-                pendingOptimisticIdRef.current = null
-              }
-            }
-            return msgs
-          })
+          setMessages(msgs)
           setLoadedKey(sessionKey)
           const card = msgs.find((m) => m.role === 'assistant')
           if (card) setSessionCard(extractText(card.content).slice(0, 300))
@@ -778,23 +721,18 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               return next
             }
             if (chatMsg.role === 'user') {
-              // Replace the specific pending optimistic if it exists.
-              // Guard: only replace when the echo has real content — empty/flush echoes
-              // would blank the optimistic and cause a visible "disappear then reappear" flicker.
-              const hasContent = !!extractText(chatMsg.content).trim()
-              if (hasContent) {
-                const oid = pendingOptimisticIdRef.current
-                if (oid !== null) {
-                  const optimisticIdx = prev.findIndex((m) => m.id === oid)
-                  if (optimisticIdx >= 0) {
-                    const next = [...prev]
-                    next[optimisticIdx] = chatMsg
-                    pendingOptimisticIdRef.current = null
-                    return next
-                  }
+              // Replace the specific pending optimistic if it exists
+              const oid = pendingOptimisticIdRef.current
+              if (oid !== null) {
+                const optimisticIdx = prev.findIndex((m) => m.id === oid)
+                if (optimisticIdx >= 0) {
+                  const next = [...prev]
+                  next[optimisticIdx] = chatMsg
+                  pendingOptimisticIdRef.current = null
+                  return next
                 }
               }
-              // No pending optimistic or empty echo - poll handles confirmation
+              // No pending optimistic - don't append (poll handles it)
               return prev
             }
             // New messages from streaming events are intentionally NOT appended here.
@@ -850,31 +788,20 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     return () => ws.removeEventListener('message', handleMsg)
   }, [sessionKey, ws, send, setCard])
 
-  // Polling fallback — two-tier: fast only while waiting for reply, slow otherwise.
-  // Was 2s unconditional per pane: 3 open panes = 90 WS requests/min.
-  // Idle: 10s, small payload. Active (isWorking/awaitingRender): 2s, larger payload.
+  // Polling fallback
   useEffect(() => {
     if (!sessionKey || !ws || !connected) return
     const interval = setInterval(() => {
-      if (document.visibilityState !== 'visible') return
-      if (isWorking || awaitingRender) return // fast-poll handles this
       const pollId = `chat-poll-${sessionKey}-${Date.now()}`
-      send({ type: 'req', id: pollId, method: 'chat.history', params: { sessionKey, limit: 30 } })
-    }, 10000)
+      send({
+        type: 'req',
+        id: pollId,
+        method: 'chat.history',
+        params: { sessionKey, limit: 100 },
+      })
+    }, 1000)
     return () => clearInterval(interval)
-  }, [sessionKey, ws, connected, send, isWorking, awaitingRender])
-
-  // Fast poll (2s) — only while actively waiting for a reply.
-  useEffect(() => {
-    if (!sessionKey || !ws || !connected) return
-    if (!isWorking && !awaitingRender) return
-    const interval = setInterval(() => {
-      if (document.visibilityState !== 'visible') return
-      const pollId = `chat-poll-${sessionKey}-${Date.now()}`
-      send({ type: 'req', id: pollId, method: 'chat.history', params: { sessionKey, limit: 100 } })
-    }, 2000)
-    return () => clearInterval(interval)
-  }, [sessionKey, ws, connected, send, isWorking, awaitingRender])
+  }, [sessionKey, ws, connected, send])
 
   // Auto-rename: derive name from first user message
   const sessionsRef = useRef(sessions)
@@ -902,7 +829,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     void fetch(`${API}/api/session-autoname`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: slim, model: localStorage.getItem('octis-rename-model') || undefined }),
+      body: JSON.stringify({ messages: slim }),
     }).then((r) => r.json()).then((data: { label?: string }) => {
       const label = data.label
       if (!label) return
@@ -910,7 +837,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
         type: 'req',
         id: `sessions-patch-${Date.now()}`,
         method: 'sessions.patch',
-        params: { key: sessionKey, label },
+        params: { sessionKey, patch: { label } },
       })
       setSessions(
         sessionsRef.current.map((s: Session) =>
@@ -918,7 +845,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
         )
       )
       saveLabelLocal(sessionKey, label)
-      void authFetch(`${API}/api/session-rename`, {
+      void fetch(`${API}/api/session-rename`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionKey, label }),
@@ -1189,10 +1116,10 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     // Fire project-context injection on first send (lazy - skips sessions that get archived without messaging)
     const pendingInit = consumePendingProjectInit(sessionKey)
     if (pendingInit) {
-      Promise.resolve(null).then((token: string | null) => {
-        authFetch(`${API}/api/session-init`, {
+      window.Clerk?.session?.getToken().then((token: string | null) => {
+        fetch(`${API}/api/session-init`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
           body: JSON.stringify({ sessionKey, projectSlug: pendingInit }),
         }).catch(() => {})
       })
@@ -1205,10 +1132,10 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     // If saveToWorkspace is enabled for any file, upload and append paths
     for (const pf of pendingFiles.filter(f => f.saveToWorkspace)) {
       try {
-        const token = null
-        const res = await authFetch(`${API}/api/upload`, {
+        const token = await window.Clerk?.session?.getToken()
+        const res = await fetch(`${API}/api/upload`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
           body: JSON.stringify({ filename: pf.name, data: pf.dataUrl.split(',')[1] }),
         })
         const json = await res.json()
@@ -1237,8 +1164,23 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     const attachments = imageFiles.length > 0
       ? imageFiles.map(f => ({ type: 'image', mimeType: f.mimeType, content: f.dataUrl.split(',')[1] }))
       : undefined
-    // sendChat: WS-first, HTTP fallback if WS is dead/zombie
-    void sendChat({ sessionKey, message: msg, idempotencyKey, deliver: false })
+    const ok = send({
+      type: 'req',
+      id: reqId,
+      method: 'chat.send',
+      params: { sessionKey, message: msg, attachments, deliver: false, idempotencyKey },
+    })
+    if (!ok) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: '⚠️ Not connected to gateway. Check your connection.',
+          id: `err-${Date.now()}`,
+        },
+      ])
+      return
+    }
     // Use structured content for optimistic message so files render immediately
     const optimisticContent: MessageContent = pendingFiles.length > 0
       ? [
@@ -1367,9 +1309,9 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
         setPendingFiles(prev => [...prev, { dataUrl, mimeType: file.type, name: file.name, kind: 'document', saveToWorkspace: false, extracting: true, _key: key }])
         try {
           const b64 = dataUrl.split(',')[1]
-          const r = await authFetch(`${API}/api/extract-pdf`, {
+          const r = await fetch(`${API}/api/extract-pdf`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', ...(await getAuthHeader()) },
             body: JSON.stringify({ data: b64 }),
           })
           const json = await r.json()
@@ -1388,8 +1330,8 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   const getAuthHeader = async (): Promise<Record<string, string>> => {
     try {
       // @ts-ignore
-      const token = null
-      return {}
+      const token = await window.Clerk?.session?.getToken()
+      return token ? { Authorization: `Bearer ${token}` } : {}
     } catch { return {} }
   }
 
@@ -1413,9 +1355,9 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
       type: 'req',
       id: `sessions-patch-${Date.now()}`,
       method: 'sessions.patch',
-      params: { key: sessionKey, label: trimmed },
+      params: { sessionKey, patch: { label: trimmed } },
     })
-    void authFetch(`${API}/api/session-rename`, {
+    void fetch(`${API}/api/session-rename`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionKey, label: trimmed }),
@@ -1435,7 +1377,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
       const res = await fetch(`${API}/api/session-autoname`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: slim, model: localStorage.getItem('octis-rename-model') || undefined }),
+        body: JSON.stringify({ messages: slim }),
       })
       const data = await res.json() as { label?: string; error?: string }
       const label = data.label
@@ -1444,11 +1386,11 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
         type: 'req',
         id: `sessions-patch-${Date.now()}`,
         method: 'sessions.patch',
-        params: { key: sessionKey, label },
+        params: { sessionKey, patch: { label } },
       })
       setSessions(sessions.map((s: Session) => s.key === sessionKey ? { ...s, label } : s))
       saveLabelLocal(sessionKey, label)
-      void authFetch(`${API}/api/session-rename`, {
+      void fetch(`${API}/api/session-rename`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionKey, label }),
@@ -1464,8 +1406,12 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   // The poll will surface the message naturally. The thinking indicator confirms it was sent.
   const sendQuickAction = (msg: string, prefix: string) => {
     if (!sessionKey) return
-    sendChat({ sessionKey, message: msg, deliver: false, idempotencyKey: `octis-${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}` })
-    const ok = true // sendChat handles WS + HTTP fallback
+    const ok = send({
+      type: 'req',
+      id: `chat-send-${Date.now()}`,
+      method: 'chat.send',
+      params: { sessionKey, message: msg, deliver: false, idempotencyKey: `octis-${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}` },
+    })
     if (ok) {
       setIsWorking(true)
       setWorkingTool(null)
@@ -1479,19 +1425,32 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     }
   }
 
-  const handleBriefMe    = () => sendQuickAction(getQuickCommands().brief, 'brief')
+  const handleBriefMe    = () => sendQuickAction('Give me a 3-sentence status update: (1) what you last did, (2) what you\'re working on now, (3) what\'s next. No fluff.', 'brief')
   const handlePause      = () => sendQuickAction('Pause. Summarize the current state in 3-5 bullet points so we can resume cleanly later: what was decided, what\'s in progress, what\'s next, any blockers. Then stop and wait for me.', 'pause')
   const handleContinue   = () => sendQuickAction('Continue from where we left off. Review the last state summary and resume the next action.', 'continue')
-  const handleSave       = () => sendQuickAction(getQuickCommands().save, 'save')
-  const handleSteppingAway = () => sendQuickAction(getQuickCommands().away, 'away')
+  const handleSave       = () => sendQuickAction('💾 checkpoint - save any key decisions, context, or tasks from this session to MEMORY.md and TODOS.md now. One-line ack only.', 'save')
+  const handleSteppingAway = () => sendQuickAction(
+    "I'm stepping away for a while. Please do the following:\n" +
+    "1. Summarize what you're currently working on (1-2 sentences).\n" +
+    "2. List anything you're blocked on or need from me before I go - be specific (credentials, a decision, a file, etc.).\n" +
+    "3. List everything you CAN do autonomously while I'm gone, in order.\n" +
+    "4. Estimate how long you can run without me.\n" +
+    "Be concise. I'll read this on my phone.", 'away'
+  )
 
   const handleArchive = () => {
     if (!sessionKey) return
     if (confirm('Save and archive this session?')) {
       // Send save instruction to agent (fire-and-forget - NO_REPLY expected)
-      const msg = getQuickCommands().archive_msg
+      const msg =
+        '💾 Final save - write any remaining decisions, tasks, or context to MEMORY.md and TODOS.md. Reply with NO_REPLY only.'
       const idempotencyKey = `octis-archive-${Date.now()}-${Math.random().toString(36).slice(2)}`
-      sendChat({ sessionKey, message: msg, deliver: false, idempotencyKey })
+      send({
+        type: 'req',
+        id: `chat-send-${Date.now()}`,
+        method: 'chat.send',
+        params: { sessionKey, message: msg, deliver: false, idempotencyKey },
+      })
       // Hide only — no gateway delete (sessions needed for productivity audits)
       // Permanently hide from sidebar so gateway sessions.list can't re-surface it
       useHiddenStore.getState().hide(sessionKey)
@@ -1942,17 +1901,11 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               value={input}
               rows={1}
               onChange={(e) => {
-                const val = e.target.value
-                setInput(val)
-                // Debounce draft — avoids Zustand re-render on every keystroke
-                if (draftTimerRef.current) clearTimeout(draftTimerRef.current)
-                draftTimerRef.current = setTimeout(() => { if (sessionKey) setDraft(sessionKey, val) }, 300)
-                // Height via rAF — avoids forced layout reflow on every keystroke
+                setInput(e.target.value)
+                if (sessionKey) setDraft(sessionKey, e.target.value)
                 const ta = e.target
-                requestAnimationFrame(() => {
-                  ta.style.height = 'auto'
-                  ta.style.height = Math.min(ta.scrollHeight, 150) + 'px'
-                })
+                ta.style.height = 'auto'
+                ta.style.height = Math.min(ta.scrollHeight, 150) + 'px'
               }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
