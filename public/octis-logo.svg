@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <!-- Body -->
+  <ellipse cx="50" cy="42" rx="24" ry="22" fill="#6366f1"/>
+  <!-- Head dome -->
+  <ellipse cx="50" cy="34" rx="20" ry="16" fill="#818cf8"/>
+  <!-- Eyes -->
+  <circle cx="43" cy="36" r="4" fill="#fff"/>
+  <circle cx="57" cy="36" r="4" fill="#fff"/>
+  <circle cx="44" cy="37" r="2" fill="#1e1b4b"/>
+  <circle cx="58" cy="37" r="2" fill="#1e1b4b"/>
+  <!-- Eye shine -->
+  <circle cx="44.8" cy="36.2" r="0.7" fill="#fff"/>
+  <circle cx="58.8" cy="36.2" r="0.7" fill="#fff"/>
+  <!-- Tentacles - 8 of them, curling outward -->
+  <!-- Left outer -->
+  <path d="M30 56 Q20 66 18 78 Q17 84 22 83 Q26 82 27 76 Q28 68 36 62" stroke="#6366f1" stroke-width="5" stroke-linecap="round" fill="none"/>
+  <!-- Left mid-outer -->
+  <path d="M36 60 Q28 72 30 84 Q31 90 36 88 Q40 86 39 80 Q38 72 44 64" stroke="#6366f1" stroke-width="5" stroke-linecap="round" fill="none"/>
+  <!-- Left mid -->
+  <path d="M42 62 Q38 74 42 86 Q44 92 49 90 Q53 88 51 82 Q49 74 50 65" stroke="#6366f1" stroke-width="5.5" stroke-linecap="round" fill="none"/>
+  <!-- Left center -->
+  <path d="M47 63 Q44 76 48 88 Q50 94 55 92 Q59 90 57 84 Q55 76 56 66" stroke="#6366f1" stroke-width="5.5" stroke-linecap="round" fill="none"/>
+  <!-- Right center -->
+  <path d="M53 63 Q56 76 54 88 Q52 94 47 92 Q43 90 45 84 Q47 76 46 66" stroke="#6366f1" stroke-width="5.5" stroke-linecap="round" fill="none"/>
+  <!-- Right mid -->
+  <path d="M58 62 Q64 74 60 86 Q58 92 53 90 Q49 88 51 82 Q53 74 52 65" stroke="#6366f1" stroke-width="5.5" stroke-linecap="round" fill="none"/>
+  <!-- Right mid-outer -->
+  <path d="M64 60 Q72 72 70 84 Q69 90 64 88 Q60 86 61 80 Q62 72 56 64" stroke="#6366f1" stroke-width="5" stroke-linecap="round" fill="none"/>
+  <!-- Right outer -->
+  <path d="M70 56 Q80 66 82 78 Q83 84 78 83 Q74 82 73 76 Q72 68 64 62" stroke="#6366f1" stroke-width="5" stroke-linecap="round" fill="none"/>
+  <!-- Sucker dots on tentacles (decorative) -->
+  <circle cx="22" cy="78" r="1.5" fill="#818cf8" opacity="0.7"/>
+  <circle cx="32" cy="83" r="1.5" fill="#818cf8" opacity="0.7"/>
+  <circle cx="42" cy="87" r="1.5" fill="#818cf8" opacity="0.7"/>
+  <circle cx="49" cy="89" r="1.5" fill="#818cf8" opacity="0.7"/>
+  <circle cx="51" cy="92" r="1.5" fill="#818cf8" opacity="0.7"/>
+  <circle cx="58" cy="89" r="1.5" fill="#818cf8" opacity="0.7"/>
+  <circle cx="68" cy="87" r="1.5" fill="#818cf8" opacity="0.7"/>
+  <circle cx="78" cy="78" r="1.5" fill="#818cf8" opacity="0.7"/>
+  <!-- Blush marks -->
+  <ellipse cx="38" cy="42" rx="4" ry="2.5" fill="#a5b4fc" opacity="0.5"/>
+  <ellipse cx="62" cy="42" rx="4" ry="2.5" fill="#a5b4fc" opacity="0.5"/>
+</svg>

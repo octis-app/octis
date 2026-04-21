@@ -1,9 +1,29 @@
 import { useState } from 'react'
-import { useAuth } from '@clerk/clerk-react'
+import { useAuth } from '../lib/auth'
 import { useLabelStore, useSessionStore } from '../store/gatewayStore'
 import { usePushNotifications } from '../hooks/usePushNotifications'
 
 const API = import.meta.env.VITE_API_URL || ''
+
+// Quick Commands helpers
+const QUICK_COMMAND_DEFAULTS = {
+  brief: "Give me a 3-sentence status update: (1) what you last did, (2) what you're working on now, (3) what's next. No fluff.",
+  away: "I'm stepping away for a while. Please do the following:\n1. Summarize what you're currently working on (1-2 sentences).\n2. List anything you're blocked on or need from me before I go - be specific (credentials, a decision, a file, etc.).\n3. List everything you CAN do autonomously while I'm gone, in order.\n4. Estimate how long you can run without me.\nBe concise. I'll read this on my phone.",
+  save: "💾 checkpoint - save any key decisions, context, or tasks from this session to MEMORY.md and TODOS.md now. One-line ack only.",
+  archive_msg: "💾 Final save - write any remaining decisions, tasks, or context to MEMORY.md and TODOS.md. Reply with NO_REPLY only.",
+}
+
+function getQuickCommands() {
+  try {
+    return { ...QUICK_COMMAND_DEFAULTS, ...JSON.parse(localStorage.getItem('octis-quick-commands') || '{}') }
+  } catch { return { ...QUICK_COMMAND_DEFAULTS } }
+}
+
+function saveQuickCommand(key: keyof typeof QUICK_COMMAND_DEFAULTS, value: string) {
+  const current = getQuickCommands()
+  current[key] = value
+  localStorage.setItem('octis-quick-commands', JSON.stringify(current))
+}
 
 function Toggle({ value, onChange, label, description }: { value: boolean; onChange: (v: boolean) => void; label: string; description?: string }) {
   return (
@@ -34,6 +54,9 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
   // Load settings from localStorage
   const [autoRename, setAutoRename] = useState(() =>
     localStorage.getItem('octis-auto-rename') !== 'false'
+  )
+  const [renameModel, setRenameModel] = useState(() =>
+    localStorage.getItem('octis-rename-model') || ''
   )
   const [noiseHidden, setNoiseHidden] = useState(() =>
     localStorage.getItem('octis-noise-hidden') !== 'false'
@@ -131,6 +154,18 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
             label="Auto-rename sessions"
             description="Automatically use first message as session name"
           />
+          {autoRename && (
+            <div className="mt-3">
+              <div className="text-xs text-[#6b7280] mb-1">Rename model <span className="text-[#4b5563]">(blank = server default)</span></div>
+              <input
+                type="text"
+                value={renameModel}
+                onChange={e => { setRenameModel(e.target.value); localStorage.setItem('octis-rename-model', e.target.value) }}
+                placeholder="e.g. anthropic/claude-haiku-4-5"
+                className="w-full bg-[#0f1117] border border-[#2a3142] rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-[#6366f1]"
+              />
+            </div>
+          )}
 
           <div className="mt-3 flex gap-2">
             <button
@@ -151,6 +186,33 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
           {renameStatus && (
             <div className="mt-2 text-xs text-[#6b7280] bg-[#0f1117] rounded-lg px-3 py-2">{renameStatus}</div>
           )}
+
+          {/* Quick Commands */}
+          <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-3 mt-5">Quick Commands</div>
+          {(['brief', 'away', 'save', 'archive_msg'] as const).map((key) => {
+            const labels = { brief: '💬 Brief Me', away: '🚪 Stepping Away', save: '💾 Save', archive_msg: '📦 Archive msg' }
+            const notes = { brief: '', away: '', save: '', archive_msg: ' (also hides session from sidebar)' }
+            return (
+              <div key={key} className="mb-4">
+                <div className="flex items-center justify-between mb-1">
+                  <div className="text-sm text-white font-medium">{labels[key]}</div>
+                  <button
+                    onClick={() => saveQuickCommand(key, QUICK_COMMAND_DEFAULTS[key])}
+                    className="text-[10px] text-[#6b7280] hover:text-white transition-colors"
+                  >
+                    Reset
+                  </button>
+                </div>
+                <textarea
+                  value={getQuickCommands()[key]}
+                  onChange={(e) => saveQuickCommand(key, e.target.value)}
+                  className="w-full bg-[#0f1117] border border-[#2a3142] rounded-lg px-3 py-2 text-xs text-[#a5b4fc] font-mono focus:outline-none focus:border-[#6366f1] resize-none"
+                  rows={3}
+                />
+                {notes[key] && <div className="text-[10px] text-[#4b5563] mt-1">{notes[key]}</div>}
+              </div>
+            )
+          })}
 
           {/* Notifications */}
           <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-3 mt-5">Notifications</div>

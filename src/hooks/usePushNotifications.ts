@@ -49,12 +49,12 @@ export function usePushNotifications(getToken: () => Promise<string | null>) {
         applicationServerKey: urlBase64ToUint8Array(key),
       })
 
-      const token = await getToken()
+      
       await fetch(`${API_BASE}/api/push/subscribe`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          credentials: 'include',
         },
         body: JSON.stringify({
           subscription: sub.toJSON(),
@@ -74,12 +74,12 @@ export function usePushNotifications(getToken: () => Promise<string | null>) {
       const reg = await navigator.serviceWorker.ready
       const sub = await reg.pushManager.getSubscription()
       if (sub) {
-        const token = await getToken()
+        
         await fetch(`${API_BASE}/api/push/unsubscribe`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            credentials: 'include',
           },
           body: JSON.stringify({ endpoint: sub.endpoint }),
         })

@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
-import { useGatewayStore, useSessionStore, useLabelStore, Session } from '../store/gatewayStore'
+import { useState, useEffect, useRef, useCallback, memo } from 'react'
+import { useGatewayStore, useSessionStore, useLabelStore, useProjectStore, Session } from '../store/gatewayStore'
 
 function formatAgo(ms: number | null): string {
   if (!ms) return ''
@@ -58,7 +58,7 @@ const statusLabels: Record<string, string> = {
 
 const API = (import.meta.env.VITE_API_URL as string) || ''
 
-export default function MobileSessionCard({ session, onOpenFull, onArchive }: MobileSessionCardProps) {
+function MobileSessionCard({ session, onOpenFull, onArchive }: MobileSessionCardProps) {
   const { send, ws } = useGatewayStore()
   const { getStatus, getLastActivityMs } = useSessionStore()
   const { getLabel, setLabel } = useLabelStore()
@@ -173,7 +173,7 @@ export default function MobileSessionCard({ session, onOpenFull, onArchive }: Mo
     void fetch(`${API}/api/session-autoname`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: slim }),
+      body: JSON.stringify({ messages: slim, model: localStorage.getItem('octis-rename-model') || undefined }),
     }).then(r => r.json()).then((data: { label?: string }) => {
       const lbl = data.label
       if (!lbl) return
@@ -181,12 +181,13 @@ export default function MobileSessionCard({ session, onOpenFull, onArchive }: Mo
         type: 'req',
         id: `sessions-patch-${Date.now()}`,
         method: 'sessions.patch',
-        params: { sessionKey: session.key, patch: { label: lbl } },
+        params: { key: session.key, label: lbl },
       })
       setLabel(session.key, lbl)
       void fetch(`${API}/api/session-rename`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ sessionKey: session.key, label: lbl }),
       })
     }).catch(() => {})
@@ -202,11 +203,12 @@ export default function MobileSessionCard({ session, onOpenFull, onArchive }: Mo
       type: 'req',
       id: `sessions-patch-${Date.now()}`,
       method: 'sessions.patch',
-      params: { sessionKey: session.key, patch: { label: trimmed } },
+      params: { key: session.key, label: trimmed },
     })
     void fetch(`${API}/api/session-rename`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify({ sessionKey: session.key, label: trimmed }),
     })
     setEditing(false)
@@ -218,6 +220,8 @@ export default function MobileSessionCard({ session, onOpenFull, onArchive }: Mo
     setTimeout(() => renameInputRef.current?.select(), 50)
   }
 
+  const { getTag, getProjectEmoji } = useProjectStore()
+  const projEmoji = getProjectEmoji(getTag(session.key).project || '')
   const displayLabel = getLabel(session.key) || session.label || session.key
   const lastMs = getLastActivityMs(session)
   const recentMsgs = messages.slice(-6)
@@ -247,7 +251,10 @@ export default function MobileSessionCard({ session, onOpenFull, onArchive }: Mo
             autoFocus
           />
         ) : (
-          <span className="text-sm font-semibold text-white truncate flex-1">{displayLabel}</span>
+          <span className="text-sm font-semibold text-white truncate flex-1 flex items-center gap-1">
+            {projEmoji && <span className="shrink-0">{projEmoji}</span>}
+            <span className="truncate">{displayLabel}</span>
+          </span>
         )}
         <div className="flex flex-col items-end gap-0.5 shrink-0">
           <span
@@ -361,3 +368,18 @@ export default function MobileSessionCard({ session, onOpenFull, onArchive }: Mo
     </div>
   )
 }
+
+
+// React.memo: skip re-render if the session's key, status, cost, and lastActivity are unchanged.
+// Labels are read from the label store directly inside the component, so they update regardless.
+// This prevents 50+ card re-renders every time any session activity/meta changes in the store.
+export default memo(MobileSessionCard, (prev, next) => {
+  return (
+    prev.session.key === next.session.key &&
+    prev.session.status === next.session.status &&
+    prev.session.estimatedCostUsd === next.session.estimatedCostUsd &&
+    prev.session.updatedAt === next.session.updatedAt &&
+    prev.onOpenFull === next.onOpenFull &&
+    prev.onArchive === next.onArchive
+  )
+})

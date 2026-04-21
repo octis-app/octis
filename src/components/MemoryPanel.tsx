@@ -5,7 +5,7 @@ const API = import.meta.env.VITE_API_URL || ''
 
 interface ProjectData { name: string; content?: string; mtime?: string; size?: number }
 interface LogEntry { date: string; content?: string }
-interface MemData { todos?: string; recentLogs?: LogEntry[]; memory?: string }
+interface MemData { recentLogs?: LogEntry[]; memory?: string }
 interface ProjData { projects?: ProjectData[] }
 
 // ─── Markdown renderer ────────────────────────────────────────────────────────
@@ -238,17 +238,24 @@ function urgencyScore(content: string): number {
 }
 
 // ─── Main panel ───────────────────────────────────────────────────────────────
+const MEM_CACHE_KEY = 'octis-memory-cache'
+const MEM_PROJ_CACHE_KEY = 'octis-memory-proj-cache'
+function getCachedMem<T>(key: string): T | null {
+  try { return JSON.parse(localStorage.getItem(key) || 'null') } catch { return null }
+}
+
 export default function MemoryPanel() {
-  const [memData, setMemData] = useState<MemData | null>(null)
-  const [projData, setProjData] = useState<ProjData | null>(null)
+  const cachedMem = getCachedMem<MemData>(MEM_CACHE_KEY)
+  const cachedProj = getCachedMem<ProjData>(MEM_PROJ_CACHE_KEY)
+  const [memData, setMemData] = useState<MemData | null>(cachedMem)
+  const [projData, setProjData] = useState<ProjData | null>(cachedProj)
   const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [activeTab, setActiveTab] = useState('overview')
+  const [loading, setLoading] = useState(!cachedMem) // skip spinner if cache available
+  const [activeTab, setActiveTab] = useState('logs')
   const [projectSearch, setProjectSearch] = useState('')
   const [projectSort, setProjectSort] = useState('recency')
 
   const load = () => {
-    setLoading(true)
     Promise.all([
       fetch(`${API}/api/memory`).then(r => r.json()),
       fetch(`${API}/api/projects`).then(r => r.json()),
@@ -256,6 +263,8 @@ export default function MemoryPanel() {
       .then(([mem, proj]) => {
         setMemData(mem)
         setProjData(proj)
+        try { localStorage.setItem(MEM_CACHE_KEY, JSON.stringify(mem)) } catch {}
+        try { localStorage.setItem(MEM_PROJ_CACHE_KEY, JSON.stringify(proj)) } catch {}
         setLoading(false)
       })
       .catch(e => { setError(e.message); setLoading(false) })
@@ -278,7 +287,6 @@ export default function MemoryPanel() {
   }, [projData, projectSearch, projectSort])
 
   const tabs = [
-    { id: 'overview', label: '📋 TODOs' },
     { id: 'logs', label: '📅 Logs' },
     { id: 'projects', label: '📁 Projects' },
     { id: 'memory', label: '🧠 Memory' },
@@ -315,21 +323,6 @@ export default function MemoryPanel() {
       </div>
 
       <div className="flex-1 overflow-y-auto p-6 space-y-4">
-
-        {/* TODOs ─────────────────────────────────────────────────── */}
-        {activeTab === 'overview' && (
-          <div className="space-y-4">
-            <div className="bg-[#181c24] border border-[#2a3142] rounded-xl px-4 py-4">
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-sm font-bold text-white">✅ TODOs</h2>
-                <span className="text-[10px] text-[#4b5563]">TODOS.md</span>
-              </div>
-              <div className="space-y-0.5">
-                {renderMarkdown(memData?.todos || '(empty)')}
-              </div>
-            </div>
-          </div>
-        )}
 
         {/* LOGS ──────────────────────────────────────────────────── */}
         {activeTab === 'logs' && (
