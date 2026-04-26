@@ -1,6 +1,11 @@
 [
-  { "id": "main", "name": "Byte", "emoji": "🦞", "description": "Sonnet — default" },
-  { "id": "haiku", "name": "Haiku", "emoji": "⚡", "description": "Fast & lightweight" },
-  { "id": "minimax", "name": "MiniMax", "emoji": "🔧", "description": "Code & scripts" },
-  { "id": "gemini", "name": "Gemini", "emoji": "✨", "description": "Bulk tasks" }
+  { "id": "main", "name": "Byte", "emoji": "🦞", "description": "Claude Sonnet — default" },
+  { "id": "coder", "name": "Coder", "emoji": "🔧", "description": "DeepSeek V4 — coding" },
+  { "id": "coder-senior", "name": "Senior", "emoji": "🧠", "description": "Qwen3 Coder — escalation" },
+  { "id": "coder-genius", "name": "Genius", "emoji": "💡", "description": "Gemini Pro — hardest problems" },
+  { "id": "light", "name": "Light", "emoji": "⚡", "description": "Claude Haiku — summaries" },
+  { "id": "fast", "name": "Fast", "emoji": "🚀", "description": "GPT-4o mini — automation" },
+  { "id": "bulk", "name": "Bulk", "emoji": "📦", "description": "Gemini Flash — parallel tasks" },
+  { "id": "qa", "name": "QA", "emoji": "🧪", "description": "Gemini Flash — QA runner" },
+  { "id": "planner", "name": "Planner", "emoji": "🗺️", "description": "Claude Opus — architecture" }
 ]

@@ -12,12 +12,14 @@ import ConnectModal from './ConnectModal'
 import ProjectsGrid, { type Project } from './ProjectsGrid'
 import MobileProjectView from './MobileProjectView'
 import IssueReporter from './IssueReporter'
+import AgentsPage from './AgentsPage'
 
 const TABS = [
   { id: 'projects', icon: '🐙', label: 'Projects' },
   { id: 'sessions', icon: '💬', label: 'Sessions' },
   { id: 'costs', icon: '💰', label: 'Costs' },
   { id: 'memory', icon: '🧠', label: 'Memory' },
+  { id: 'agents', icon: '🤖', label: 'Agents' },
 ]
 
 type FilterType = 'all' | 'active' | 'idle'
@@ -447,6 +449,10 @@ export default function MobileApp() {
             <h1 className="text-white font-semibold text-sm">🧠 Memory</h1>
           </div>
           <MemoryPanel />
+        </div>
+
+        <div className={tab === 'agents' ? 'flex-1 min-h-0 flex flex-col overflow-y-auto' : 'hidden'}>
+          <AgentsPage onStartSession={() => setTab('sessions')} />
         </div>
       </div>
 

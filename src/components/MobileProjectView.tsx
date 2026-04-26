@@ -3,6 +3,8 @@ import { useAuth } from '../lib/auth'
 import { useSessionStore, useProjectStore, useLabelStore, useHiddenStore, useGatewayStore, Session } from '../store/gatewayStore'
 import { useAuthStore } from '../store/authStore'
 import { authFetch } from '../lib/authFetch'
+import InlineAgentPicker from './InlineAgentPicker'
+import { Agent } from './AgentPicker'
 import MobileFullChat from './MobileFullChat'
 import type { Project } from './ProjectsGrid'
 
@@ -82,6 +84,16 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
   const [justArchivedKeys, setJustArchivedKeys] = useState<Set<string>>(new Set())
   const [renamingKey, setRenamingKey] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
+  const [agents, setAgents] = useState<Agent[]>([])
+  const [showAgentPicker, setShowAgentPicker] = useState(false)
+  
+  useEffect(() => {
+    authFetch(`${API}/api/agents`)
+      .then(r => r.json())
+      .then((d: { agents?: Agent[] }) => setAgents(d.agents || []))
+      .catch(() => {})
+  }, [])
+  
   const { setLabel: saveLabelLocal } = useLabelStore()
   const { send: wsSend } = useGatewayStore()
 
@@ -168,7 +180,28 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
     !getTag(s.key).project && !isHidden(s.key) && !isHidden(s.id || '') && !isAgentSession(s)
   )
 
-  const handleNewSession = async () => {
+  const handleNewSession = async (agentId?: string) => {
+    const effectiveAgent = agentId || mainAgentId
+    if (effectiveAgent !== mainAgentId) {
+      // Non-primary agent: create real session via API
+      const res = await authFetch(`${API}/api/sessions/create`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentId: effectiveAgent }),
+      })
+      const data = await res.json()
+      const realKey = data.sessionKey || data.key
+      if (realKey) {
+        useAuthStore.getState().claimSession(realKey)
+        setTag(realKey, project.slug)
+        const newSession: Session = { key: realKey, label: `New ${project.name} session`, sessionKey: realKey } as Session
+        setSessions([newSession, ...getLiveSessions()])
+        setPendingNewSession(newSession)
+        setOpenSession(newSession)
+      }
+      setShowAgentPicker(false)
+      return
+    }
     // Create a real gateway session key via the API (same as Sidebar.tsx for main agent).
     // Using a temp key `session-<ts>` is unreliable because setSessions now filters it out
     // via the mainAgentId isolation guard (ef7582e regression — owners lost the bypass).
@@ -186,6 +219,9 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
     setPendingNewSession(placeholder)
     setOpenSession(placeholder)
     setPendingProjectInit(placeholderKey, project.slug)
+    
+    // Show agent picker and indicate we'll use the main agent
+    setShowAgentPicker(false)
 
     // Fire real session creation in background; swap key when it resolves
     authFetch(`${API}/api/sessions/create`, {
@@ -352,7 +388,7 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
           )}
           {!isOthers && !isArchived && (
             <button
-              onClick={handleNewSession}
+              onClick={() => agents.length > 1 ? setShowAgentPicker(v => !v) : handleNewSession()}
               className="w-7 h-7 rounded-full bg-[#6366f1] text-white flex items-center justify-center text-lg font-light leading-none active:bg-[#818cf8] shrink-0"
               title="New session in this project"
             >
@@ -360,6 +396,14 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
             </button>
           )}
         </div>
+        {showAgentPicker && agents.length > 1 && (
+          <InlineAgentPicker
+            agents={agents}
+            selectedId={mainAgentId}
+            onSelect={(id) => handleNewSession(id)}
+            onClose={() => setShowAgentPicker(false)}
+          />
+        )}
       </div>
 
       {/* Session list */}
@@ -378,7 +422,7 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
             {!isOthers && (
               <>
                 <button
-                  onClick={handleNewSession}
+                  onClick={() => agents.length > 1 ? setShowAgentPicker(v => !v) : handleNewSession()}
                   className="bg-[#6366f1] text-white px-5 py-2.5 rounded-xl text-sm font-medium"
                 >
                   ✶ New session
