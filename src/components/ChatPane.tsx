@@ -19,6 +19,8 @@ function getQuickCommands() {
 }
 
 // ─── Session cost/health badge (for panel header) ─────────────────────────────
+let cachedAgents: { id: string; name: string; emoji: string }[] = []
+
 function SessionCostBadge({ sessionKey }: { sessionKey: string }) {
   const { sessions, sessionMeta } = useSessionStore()
   const { send, sendChat } = useGatewayStore()
@@ -392,6 +394,22 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   const { setCard, getTag, getProjectEmoji } = useProjectStore()
   const { setLabel: saveLabelLocal, getLabel } = useLabelStore()
   const { setDraft, getDraft, clearDraft } = useDraftStore()
+  
+  let cachedAgents: { id: string; name: string; emoji: string }[] = []
+  const [agents, setAgents] = useState<{ id: string; name: string; emoji: string }[]>([])
+  useEffect(() => {
+    if (cachedAgents.length === 0) {
+      authFetch(`${API}/api/agents`)
+        .then(r => r.json())
+        .then(d => { 
+          const fetched = d.agents || []
+          cachedAgents = fetched
+          setAgents(fetched)
+        })
+        .catch(() => {})
+    }
+  }, [])
+  
   // Per-session message cache - show instantly on switch, refresh silently behind the scenes
   // Uses localStorage so cache survives pane unmount/remount (useRef would die on close)
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -1704,6 +1722,16 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                     title={sessionKey}
                   >
                     {displayName}
+                    {(() => {
+                      const m = sessionKey?.match(/^agent:([^:]+):/) 
+                      const agentId = m?.[1] || 'main'
+                      const agent = agents.find(a => a.id === agentId)
+                      return agent ? (
+                        <span className="ml-2 text-xs opacity-60" title={`Powered by ${agent.name} (${agentId})`}>
+                          {agent.emoji} {agent.name}
+                        </span>
+                      ) : null
+                    })()}
                   </span>
                   <button
                     className="opacity-65 hover:opacity-100 transition-opacity text-[11px] text-[#6b7280] hover:text-indigo-400 shrink-0 px-0.5"

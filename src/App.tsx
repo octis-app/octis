@@ -14,6 +14,7 @@ import SetupScreen from './components/SetupScreen'
 import ProjectsGrid, { type Project } from './components/ProjectsGrid'
 import ProjectView from './components/ProjectView'
 import IssueReporter from './components/IssueReporter'
+import AgentsPage from './components/AgentsPage'
 import { useHotkeys } from './hooks/useHotkeys'
 import { useSessionPreloader } from './hooks/useSessionPreloader'
 
@@ -36,6 +37,7 @@ const NAV_ALL = [
   { id: 'sessions', label: '💬 Sessions' },
   { id: 'costs', label: '💰 Costs', ownerOnly: true },
   { id: 'memory', label: '🧠 Memory', ownerOnly: true },
+  { id: 'agents', label: '🤖 Agents', ownerOnly: true },
 ]
 
 const API = (import.meta.env.VITE_API_URL as string) || ''
@@ -589,6 +591,13 @@ function AuthenticatedApp({ preloadedConfig }: { preloadedConfig?: GatewayConfig
           <h1 className="text-white font-semibold">🧠 Memory</h1>
         </div>
         <MemoryPanel />
+      </div>
+
+      <div className={`flex flex-col flex-1 overflow-hidden ${activeNav === 'agents' ? '' : 'hidden'}`}>
+        <div className="px-6 py-4 border-b border-[#2a3142] bg-[#181c24] shrink-0">
+          <h1 className="text-white font-semibold">🤖 Agents</h1>
+        </div>
+        <AgentsPage onStartSession={() => setActiveNav('sessions')} />
       </div>
 
       {showConnect && <ConnectModal onClose={() => setShowConnect(false)} />}

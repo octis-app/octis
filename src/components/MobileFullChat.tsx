@@ -341,11 +341,30 @@ function setMsgCache(sessionKey: string, msgs: ChatMessage[]): void {
   } catch {}
 }
 
+let cachedAgents: { id: string; name: string; emoji: string }[] = []
+
 export default function MobileFullChat({ session, onBack, recentSessions, onSwitch, onArchive, onNewSession }: MobileFullChatProps) {
-  const { send, sendChat, ws, connect, connected } = useGatewayStore()
+  const { send, sendChat, ws, connect, connected, agentId } = useGatewayStore()
   const { consumePendingProjectInit, getStatus } = useSessionStore()
   const { getLabel, setLabel } = useLabelStore()
   const { claimSession } = useAuthStore()
+  
+  const [agents, setAgents] = useState<{ id: string; name: string; emoji: string }[]>([])
+  const [, setForceUpdate] = useState({})  // Simple force-update trigger
+  
+  useEffect(() => {
+    if (cachedAgents.length === 0) {
+      authFetch(`${API}/api/agents`)
+        .then(r => r.json())
+        .then(d => { 
+          const fetched = d.agents || []
+          cachedAgents = fetched
+          setAgents(fetched)
+          setForceUpdate({})  // Ensure re-render when agents are loaded
+        })
+        .catch(() => {})
+    }
+  }, [])  // Empty dependency array to run only once
   // Initialize from cache if available
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
     const cached = session?.key ? getMsgCache(session.key) : null
@@ -1671,6 +1690,36 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
                 {noiseHidden ? 'chat only' : '+ tools'}
               </span>
             </button>
+            <div className="border-t border-[#2a3142] my-1" />
+            {(() => {
+              const m = session.key?.match(/^agent:([^:]+)/);
+              const agentIdParsed = m?.[1] || 'main'
+              const agent = agents.find(a => a.id === agentIdParsed)
+            
+              return agent ? (
+                <div className="w-full px-4 py-3.5 rounded-xl bg-[#1a1d2e]">
+                  <div className="text-xs uppercase tracking-wider text-[#6b7280] mb-1">Agent</div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg">{agent.emoji}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-white text-sm font-medium truncate">{agent.name}</div>
+                      <div className="text-[#a5b4fc] text-xs font-mono truncate">{agentIdParsed}</div>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="w-full px-4 py-3.5 rounded-xl bg-[#1a1d2e]">
+                  <div className="text-xs uppercase tracking-wider text-[#6b7280] mb-1">Agent</div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg">🤖</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-white text-sm font-medium truncate">Main</div>
+                      <div className="text-[#a5b4fc] text-xs font-mono truncate">main</div>
+                    </div>
+                  </div>
+                </div>
+              )
+            })()}
             <div className="border-t border-[#2a3142] my-1" />
             <button
               onClick={() => { setShowArchiveSheet(false); setShowAssignSheet(true) }}

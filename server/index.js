@@ -238,10 +238,72 @@ app.get('/api/health', (req, res) => res.json({ ok: true }))
 app.get('/api/agents', requireAuth, (req, res) => {
   try {
     const agentsFile = path.join(__serverDir, 'config', 'agents.json')
+    const staticAgents = JSON.parse(readFileSync(agentsFile, 'utf8'))
+    const staticMap = Object.fromEntries(staticAgents.map(a => [a.id, a]))
+
+    // Try to read openclaw.json for live agent list
+    let liveAgents = []
+    let defaultModel = ''
+    try {
+      const clawConfig = JSON.parse(readFileSync(path.join(HOME, '.openclaw', 'openclaw.json'), 'utf8'))
+      liveAgents = clawConfig.agents?.list || []
+      defaultModel = clawConfig.agents?.defaults?.model?.primary || ''
+    } catch {}
+
+    function friendlyModel(m) {
+      if (!m) return 'Default'
+      if (m.includes('claude-sonnet')) return 'Claude Sonnet'
+      if (m.includes('claude-haiku')) return 'Claude Haiku'
+      if (m.includes('claude-opus')) return 'Claude Opus'
+      if (m.includes('deepseek-v4')) return 'DeepSeek V4'
+      if (m.includes('gpt-4o-mini')) return 'GPT-4o mini'
+      if (m.includes('gemini-2.5-flash')) return 'Gemini Flash'
+      if (m.includes('gemini-2.5-pro')) return 'Gemini Pro'
+      if (m.includes('qwen3-coder')) return 'Qwen3 Coder'
+      return m.split('/').pop() || m
+    }
+
+    const primaryAgentId = req.user.agent_id || 'main'
+
+    let merged
+    if (liveAgents.length > 0) {
+      merged = liveAgents.map(la => {
+        const override = staticMap[la.id] || {}
+        return {
+          id: la.id,
+          name: override.name || la.name || la.id,
+          emoji: override.emoji || '🤖',
+          description: override.description || '',
+          model: friendlyModel(la.model?.primary || la.model || defaultModel),
+          isPrimary: la.id === primaryAgentId,
+        }
+      })
+    } else {
+      merged = staticAgents.map(a => ({ ...a, model: a.description?.match(/—\s*(.+)/)?.[1] || 'Default', isPrimary: a.id === primaryAgentId }))
+    }
+
+    res.json({ agents: merged })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.patch('/api/agents/:id/meta', requireAuth, (req, res) => {
+  try {
+    const { emoji, description } = req.body
+    const agentsFile = path.join(__serverDir, 'config', 'agents.json')
     const agents = JSON.parse(readFileSync(agentsFile, 'utf8'))
-    res.json({ agents })
-  } catch {
-    res.json({ agents: [{ id: 'main', name: 'Byte', emoji: '🦞', description: 'Default' }] })
+    const idx = agents.findIndex(a => a.id === req.params.id)
+    if (idx === -1) {
+      agents.push({ id: req.params.id, name: req.params.id, emoji: emoji || '🤖', description: description || '' })
+    } else {
+      if (emoji !== undefined) agents[idx].emoji = emoji
+      if (description !== undefined) agents[idx].description = description
+    }
+    writeFileSync(agentsFile, JSON.stringify(agents, null, 2))
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
   }
 })
 
