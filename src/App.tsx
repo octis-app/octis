@@ -437,7 +437,7 @@ function AuthenticatedApp({ preloadedConfig }: { preloadedConfig?: GatewayConfig
           className="mb-2 hover:opacity-70 transition-opacity"
           title="Settings"
         >
-          <img src="/octis-logo.svg" alt="Octis" className="w-9 h-9" />
+          <img src={`${import.meta.env.BASE_URL}octis-logo.svg`} alt="Octis" className="w-9 h-9" />
         </button>
         {NAV.map((n) => (
           <button

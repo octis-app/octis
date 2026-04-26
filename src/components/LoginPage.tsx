@@ -36,7 +36,7 @@ export default function LoginPage({ API, onLogin }: Props) {
     <div className="min-h-screen bg-[#0f1117] flex items-center justify-center px-4">
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
-          <img src="/octis-logo.svg" alt="Octis" className="w-16 h-16 mx-auto mb-3" />
+          <img src={`${import.meta.env.BASE_URL}octis-logo.svg`} alt="Octis" className="w-16 h-16 mx-auto mb-3" />
           <h1 className="text-2xl font-bold text-white">Octis</h1>
           <p className="text-[#6b7280] text-sm mt-1">Your AI command center</p>
         </div>

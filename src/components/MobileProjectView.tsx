@@ -169,25 +169,53 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
   )
 
   const handleNewSession = async () => {
-    // Create session immediately and auto-inject project context
-    const key = `session-${Date.now()}`
-    const label = `New ${project.name} session`
-    const newSession: Session = { key, label, sessionKey: key } as Session
-    // Snapshot keys before creation so we can detect the real gateway-assigned key
-    pendingTagRef.current = { pendingKey: key, slug: project.slug }
-    setSessions([newSession, ...getLiveSessions()])
-    setTag(key, project.slug)
+    // Create a real gateway session key via the API (same as Sidebar.tsx for main agent).
+    // Using a temp key `session-<ts>` is unreliable because setSessions now filters it out
+    // via the mainAgentId isolation guard (ef7582e regression — owners lost the bypass).
+    // A real `agent:main:session-<ts>` key passes the isolation filter automatically.
+    const placeholderLabel = `New ${project.name} session`
+    const placeholderKey = `session-${Date.now()}`
+    const placeholder: Session = { key: placeholderKey, label: placeholderLabel, sessionKey: placeholderKey } as Session
+
+    // Show the chat immediately with a placeholder so the tap feels instant
+    useAuthStore.getState().claimSession(placeholderKey)
+    pendingTagRef.current = { pendingKey: placeholderKey, slug: project.slug }
+    setSessions([placeholder, ...getLiveSessions()])
+    setTag(placeholderKey, project.slug)
     setShowPicker(false)
-    setPendingNewSession(newSession)
-    setOpenSession(newSession)
-    // Persist the tag to server async
-    authFetch(`${API}/api/session-projects`, {
+    setPendingNewSession(placeholder)
+    setOpenSession(placeholder)
+    setPendingProjectInit(placeholderKey, project.slug)
+
+    // Fire real session creation in background; swap key when it resolves
+    authFetch(`${API}/api/sessions/create`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionKey: key, projectTag: project.slug }),
-    }).catch(() => {})
-    // Defer context injection until user actually sends a first message
-    setPendingProjectInit(key, project.slug)
+      body: JSON.stringify({ agentId: 'main' }),
+    }).then(async r => {
+      if (!r.ok) return
+      const data = await r.json() as { ok: boolean; sessionKey?: string }
+      const realKey = data.sessionKey
+      if (!realKey) return
+      // Claim real key and tag it
+      useAuthStore.getState().claimSession(realKey)
+      setTag(realKey, project.slug)
+      // Persist tag + pending init under real key
+      authFetch(`${API}/api/session-projects`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionKey: realKey, projectTag: project.slug }),
+      }).catch(() => {})
+      // Transfer pending project init from placeholder to real key
+      setPendingProjectInit(realKey, project.slug)
+      // Replace open session with real key so chat sends go to the right place
+      const realSession: Session = { key: realKey, label: placeholderLabel, sessionKey: realKey } as Session
+      setSessions([realSession, ...getLiveSessions().filter(s => s.key !== placeholderKey)])
+      setPendingNewSession(realSession)
+      setOpenSession(realSession)
+    }).catch(() => {
+      // Keep placeholder open — first send will still create the gateway session
+    })
   }
 
   const handleLongPressStart = (s: Session) => {

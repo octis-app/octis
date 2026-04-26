@@ -674,7 +674,9 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     // Use proper req/method format (not old type-based format)
     const reqId = `chat-history-${session.key}-${Date.now()}`
     currentHistoryReqIdRef.current = reqId
-    send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey: session.key, limit: DEFAULT_HISTORY_LIMIT } })
+    const sent = send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey: session.key, limit: DEFAULT_HISTORY_LIMIT } })
+    // WS not ready yet — fetch via HTTP immediately so messages don't wait for WS to connect
+    if (!sent) void fetchHistoryHttp(DEFAULT_HISTORY_LIMIT)
 
     const handleMsg = (event: MessageEvent) => {
       try {

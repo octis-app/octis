@@ -3,7 +3,7 @@ import { useAuth } from '../lib/auth'
 import { authFetch } from '../lib/authFetch'
 import { useGatewayStore, useSessionStore, useHiddenStore, useProjectStore, useLabelStore, Session } from '../store/gatewayStore'
 
-const API = ''  // same-origin
+const API = (import.meta.env.VITE_API_URL as string) || ''
 import MobileSessionCard from './MobileSessionCard'
 import MobileFullChat from './MobileFullChat'
 import CostsPanel from './CostsPanel'
@@ -50,7 +50,7 @@ export default function MobileApp() {
     void useSessionStore.getState().hydrateHiddenFromServer(token)
     // Fetch server-side session labels
     const authHeader = {}
-    fetch('/api/session-labels', { credentials: 'include' })
+    fetch(`${API}/api/session-labels`, { credentials: 'include' })
       .then(r => r.json())
       .then((data: Record<string, string>) => {
         if (typeof data === 'object' && !('error' in data)) {
@@ -297,7 +297,7 @@ export default function MobileApp() {
       >
         <div className="flex items-center justify-between px-4 py-3">
           <div className="flex items-center gap-2">
-            <img src="/octis-logo.svg" alt="Octis" className="w-6 h-6" />
+            <img src={`${import.meta.env.BASE_URL}octis-logo.svg`} alt="Octis" className="w-6 h-6" />
             <span className="text-white font-semibold text-base tracking-tight">Octis</span>
           </div>
           <button
@@ -353,7 +353,7 @@ export default function MobileApp() {
             {filtered.length === 0 ? (
               <div className="flex-1 flex items-center justify-center">
                 <div className="text-center px-8">
-                  <img src="/octis-logo.svg" alt="Octis" className="w-16 h-16 mx-auto mb-3" />
+                  <img src={`${import.meta.env.BASE_URL}octis-logo.svg`} alt="Octis" className="w-16 h-16 mx-auto mb-3" />
                   <div className="text-[#6b7280] text-sm">
                     {sessions.length === 0
                       ? 'No sessions yet. Connect to your gateway to get started.'

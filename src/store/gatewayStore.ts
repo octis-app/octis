@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { authFetch } from '../lib/authFetch'
+import { useAuthStore } from './authStore'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -54,6 +55,7 @@ interface GatewayState {
   subscribe: (fn: (msg: unknown) => void) => () => void
   connect: () => void
   forceReconnect: () => void
+  scheduleReconnect: () => void
   disconnect: () => void
   sendChat: (params: { sessionKey: string; message: string; idempotencyKey?: string; deliver?: boolean; attachments?: { type: string; mimeType: string; content: string }[] }) => Promise<{ ok: boolean; via: 'ws' | 'http'; runId?: string }>
   send: (payload: unknown) => boolean
@@ -254,6 +256,16 @@ export const useGatewayStore = create<GatewayState>()(
         if (ws) { ws.onclose = null; ws.onerror = null; ws.onmessage = null; try { ws.close() } catch {} }
         set({ ws: null, connected: false, _reconnectAttempts: 0 })
         useGatewayStore.getState().connect()
+      },
+
+      // scheduleReconnect: exponential backoff, used on auth failure
+      scheduleReconnect: () => {
+        const attempts = get()._reconnectAttempts || 0
+        const delay = Math.min(1000 * Math.pow(2, attempts), 10000)
+        set({ _reconnectAttempts: attempts + 1 })
+        setTimeout(() => {
+          if (!useGatewayStore.getState().connected) useGatewayStore.getState().connect()
+        }, delay)
       },
 
       disconnect: () => {
