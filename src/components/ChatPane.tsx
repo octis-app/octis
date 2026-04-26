@@ -993,7 +993,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     void fetch(`${API}/api/session-autoname`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: slim, model: localStorage.getItem('octis-rename-model') || undefined }),
+      body: JSON.stringify({ messages: slim }),
     }).then((r) => r.json()).then((data: { label?: string }) => {
       const label = data.label
       if (!label) return
@@ -1536,7 +1536,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
       const res = await fetch(`${API}/api/session-autoname`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: slim, model: localStorage.getItem('octis-rename-model') || undefined }),
+        body: JSON.stringify({ messages: slim }),
       })
       const data = await res.json() as { label?: string; error?: string }
       const label = data.label
