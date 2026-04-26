@@ -958,7 +958,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
                     <div className="flex items-center gap-2 mt-0.5 pl-5">
                       <span className="text-[10px] text-[#4b5563]">{r.sender_name}</span>
                       {ago && <span className="text-[10px] text-[#4b5563]">{ago}</span>}
-                      <span className="text-[10px] text-[#4b5563] ml-auto">${r.cost.toFixed(3)}</span>
+                      {r.cost != null && <span className="text-[10px] text-[#4b5563] ml-auto">${(r.cost as number).toFixed(3)}</span>}
                     </div>
                   </div>
                 )

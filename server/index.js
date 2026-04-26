@@ -539,8 +539,8 @@ app.get('/api/my-sessions', requireAuth, (req, res) => {
   const role = req.user.role
   if (role === 'owner' || role === 'admin') {
     const mainAgentId = req.user.agent_id || 'main'
-    const ownedRows = db.prepare('SELECT session_key FROM octis_session_ownership WHERE user_id = ?').all(req.user.id)
-    return res.json({ all: false, mainAgentId, sessionKeys: ownedRows.map(r => r.session_key) })
+    // Owners see all sessions via the agent-namespace filter — no DB rows needed
+    return res.json({ all: true, mainAgentId, sessionKeys: [] })
   }
   const rows = db.prepare('SELECT session_key FROM octis_session_ownership WHERE user_id = ?').all(req.user.id)
   res.json({ all: false, sessionKeys: rows.map(r => r.session_key) })
@@ -621,10 +621,26 @@ app.post('/api/session-init', requireAuth, async (req, res) => {
     const contextNote = `📁 **${emoji} ${name}** — You are working in the ${name} project.${
       memory_file ? ` Context file: memory/${memory_file}` : ''
     }${description ? '\n' + description : ''}`
-    await adminGwCall([
-      { method: 'sessions.patch', params: { key: sessionKey, label: `${emoji} ${name}`.trim() } },
-      { method: 'chat.inject', params: { sessionKey, message: contextNote, label: '📁 Project' } },
-    ])
+    // Try to set label; if taken, append a numeric suffix until it succeeds
+    let labelSet = false
+    let baseLabel = `${emoji} ${name}`.trim()
+    for (let attempt = 0; attempt <= 9; attempt++) {
+      const label = attempt === 0 ? baseLabel : `${baseLabel} ${attempt + 1}`
+      try {
+        await adminGwCall([{ method: 'sessions.patch', params: { key: sessionKey, label } }])
+        labelSet = true
+        break
+      } catch (labelErr) {
+        if (!labelErr.message?.includes('label already in use')) throw labelErr
+        // label taken — try next suffix
+      }
+    }
+    if (!labelSet) {
+      // Fallback: set a timestamp-based label so the session is still usable
+      const ts = new Date().toLocaleTimeString('en-CA', { hour: '2-digit', minute: '2-digit', hour12: false })
+      await adminGwCall([{ method: 'sessions.patch', params: { key: sessionKey, label: `${baseLabel} ${ts}` } }])
+    }
+    await adminGwCall([{ method: 'chat.inject', params: { sessionKey, message: contextNote, label: '📁 Project' } }])
     claimSessionOwnership(sessionKey, req.user.id)
     res.json({ ok: true })
   } catch (err) {

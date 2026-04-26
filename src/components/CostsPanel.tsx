@@ -108,6 +108,11 @@ export default function CostsPanel() {
       </div>
     )
   if (!data) return null
+  if ((data as unknown as { disabled?: boolean }).disabled) return (
+    <div className="p-6 text-[#6b7280] text-sm">
+      Cost tracking not configured. Add <code className="bg-[#1a1d2e] px-1 rounded">COSTS_DB_URL</code> to enable.
+    </div>
+  )
 
   const maxSessionCost = Math.max(...(data.sessions?.map((s) => s.cost) || [0]))
   const maxTodaySessionCost = Math.max(...(data.todaySessions?.map((s) => s.cost) || [0]))
