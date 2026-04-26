@@ -1,14 +1,85 @@
 {
   "renameAgentId": "fast",
   "agents": [
-    { "id": "main",         "name": "Byte",    "emoji": "🦞", "description": "Claude Sonnet — default", "visibleInPicker": true,  "soul": "" },
-    { "id": "coder",        "name": "Coder",   "emoji": "🔧", "description": "DeepSeek V4 — coding",    "visibleInPicker": true,  "soul": "" },
-    { "id": "coder-senior", "name": "Senior",  "emoji": "🧠", "description": "Qwen3 Coder — escalation","visibleInPicker": false, "soul": "" },
-    { "id": "coder-genius", "name": "Genius",  "emoji": "💡", "description": "Gemini Pro — hardest",    "visibleInPicker": false, "soul": "" },
-    { "id": "light",        "name": "Light",   "emoji": "⚡", "description": "Claude Haiku — summaries","visibleInPicker": true,  "soul": "" },
-    { "id": "fast",         "name": "Fast",    "emoji": "🚀", "description": "GPT-4o mini — automation","visibleInPicker": true,  "soul": "" },
-    { "id": "bulk",         "name": "Bulk",    "emoji": "📦", "description": "Gemini Flash — parallel", "visibleInPicker": false, "soul": "" },
-    { "id": "qa",           "name": "QA",      "emoji": "🧪", "description": "Gemini Flash — QA runner","visibleInPicker": false, "soul": "" },
-    { "id": "planner",      "name": "Planner", "emoji": "🗺️", "description": "Claude Opus — planning",  "visibleInPicker": false, "soul": "" }
+    {
+      "id": "main",
+      "name": "Byte",
+      "emoji": "🦞",
+      "description": "Claude Sonnet — default",
+      "visibleInPicker": true,
+      "soul": ""
+    },
+    {
+      "id": "coder",
+      "name": "Coder",
+      "emoji": "🔧",
+      "description": "DeepSeek V4 — coding",
+      "visibleInPicker": true,
+      "soul": ""
+    },
+    {
+      "id": "coder-senior",
+      "name": "Senior",
+      "emoji": "🧠",
+      "description": "Qwen3 Coder — escalation",
+      "visibleInPicker": false,
+      "soul": ""
+    },
+    {
+      "id": "coder-genius",
+      "name": "Genius",
+      "emoji": "💡",
+      "description": "Gemini Pro — hardest",
+      "visibleInPicker": false,
+      "soul": ""
+    },
+    {
+      "id": "light",
+      "name": "Light",
+      "emoji": "⚡",
+      "description": "Claude Haiku — summaries",
+      "visibleInPicker": true,
+      "soul": ""
+    },
+    {
+      "id": "fast",
+      "name": "Fast",
+      "emoji": "🚀",
+      "description": "GPT-4o mini — automation",
+      "visibleInPicker": true,
+      "soul": ""
+    },
+    {
+      "id": "bulk",
+      "name": "Bulk",
+      "emoji": "📦",
+      "description": "Gemini Flash — parallel",
+      "visibleInPicker": false,
+      "soul": ""
+    },
+    {
+      "id": "qa",
+      "name": "QA",
+      "emoji": "🧪",
+      "description": "Gemini Flash — QA runner",
+      "visibleInPicker": false,
+      "soul": ""
+    },
+    {
+      "id": "planner",
+      "name": "Planner",
+      "emoji": "🗺️",
+      "description": "Claude Opus — planning",
+      "visibleInPicker": false,
+      "soul": ""
+    },
+    {
+      "id": "mathieu",
+      "name": "mathieu",
+      "emoji": "🤖",
+      "description": "",
+      "visibleInPicker": false,
+      "soul": ""
+    }
   ]
 }
