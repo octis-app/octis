@@ -442,10 +442,12 @@ app.post('/api/session-autoname', async (req, res) => {
       if (renameAgent?.model) renameModel = typeof renameAgent.model === 'string' ? renameAgent.model : (renameAgent.model?.primary || renameModel)
     } catch {}
 
+    // openclaw stores models as 'openrouter/provider/model' but OpenRouter API expects 'provider/model'
+    const apiModel = renameModel.startsWith('openrouter/') ? renameModel.slice('openrouter/'.length) : renameModel
     const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${openrouterKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: renameModel, max_tokens: 20, messages: [{ role: 'user', content: prompt }] }),
+      body: JSON.stringify({ model: apiModel, max_tokens: 20, messages: [{ role: 'user', content: prompt }] }),
       signal: AbortSignal.timeout(8000),
     })
     const data = await r.json()

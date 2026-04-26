@@ -11,6 +11,7 @@ export interface Session {
   id?: string
   sessionId?: string
   label?: string
+  channel?: string
   cost?: number
   updatedAt?: string | number
   lastActivity?: string | number

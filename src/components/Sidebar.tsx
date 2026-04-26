@@ -652,6 +652,8 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
   const isAgentSession = (s: Session) => {
     const key = (s.key || '').toLowerCase()
     if (key.includes(':subagent:')) return true
+    // Hide uninitialized gateway sessions (WebSocket handshake artifacts with no real interaction)
+    if (s.channel === 'unknown') return true
     const lbl = getLabel(s.key, s.label || '')
     if (lbl.startsWith('Continue where you left off')) return true
     return false
