@@ -30,7 +30,7 @@
       "name": "Genius",
       "emoji": "💡",
       "description": "Gemini Pro — hardest",
-      "visibleInPicker": false,
+      "visibleInPicker": true,
       "soul": ""
     },
     {

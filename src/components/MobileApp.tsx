@@ -242,6 +242,8 @@ export default function MobileApp() {
     const key = (s.key || '').toLowerCase()
     // Only hide true background subagents — NOT :acp: sessions (those are user-spawned harnesses like Codex/Claude Code)
     if (key.includes(':subagent:')) return true
+    // Hide uninitialized gateway sessions (WebSocket handshake artifacts with no real interaction)
+    if (s.channel === 'unknown') return true
     // Also filter model-fallback sessions (OpenClaw auto-retry on timeout)
     const lbl = (s.label || '').toLowerCase()
     if (lbl.startsWith('continue where you left off')) return true
