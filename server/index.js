@@ -276,7 +276,8 @@ app.get('/api/agents', requireAuth, (req, res) => {
           name: override.name || la.name || la.id,
           emoji: override.emoji || '🤖',
           description: override.description || '',
-          visibleInPicker: override.visibleInPicker ?? true,
+          // Agents in agents.json use their saved value; unconfigured agents default to hidden
+          visibleInPicker: Object.keys(override).length > 0 ? (override.visibleInPicker ?? true) : false,
           soul: override.soul || '',
           model: friendlyModel(la.model?.primary || la.model || defaultModel),
           isPrimary: la.id === primaryAgentId,

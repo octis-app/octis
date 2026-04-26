@@ -100,33 +100,31 @@ export default function AgentsPage({ onStartSession }: AgentsPageProps) {
 
       {/* ── Rename agent picker ─────────────────────────────────────── */}
       <div className="bg-[#181c24] border border-[#2a3142] rounded-2xl p-5 mb-6">
-        <div className="flex items-start justify-between">
-          <div>
-            <div className="text-white font-semibold text-sm mb-0.5">✨ Auto-rename agent</div>
-            <div className="text-[#6b7280] text-xs">Used for the ✨ quick-rename button on sessions. Pick a fast, cheap model — speed matters more than quality here.</div>
-          </div>
-          <select
-            value={config.renameAgentId}
-            onChange={e => setRenameAgent(e.target.value)}
-            className="bg-[#2a3142] border border-[#3a4152] text-[#e8eaf0] text-sm rounded-lg px-3 py-1.5 outline-none focus:border-[#6366f1] ml-4 shrink-0"
-          >
-            {config.agents.map(a => (
-              <option key={a.id} value={a.id}>{a.emoji} {a.name} — {a.model}</option>
-            ))}
-          </select>
-        </div>
+        <div className="text-white font-semibold text-sm mb-1">✨ Auto-rename agent</div>
+        <div className="text-[#6b7280] text-xs mb-3">Used for the ✨ quick-rename button on sessions. Pick a fast, cheap model — speed matters more than quality here.</div>
+        <select
+          value={config.renameAgentId}
+          onChange={e => setRenameAgent(e.target.value)}
+          className="w-full bg-[#2a3142] border border-[#3a4152] text-[#e8eaf0] text-sm rounded-lg px-3 py-2 outline-none focus:border-[#6366f1]"
+        >
+          {config.agents.map(a => (
+            <option key={a.id} value={a.id}>{a.emoji} {a.name} — {a.model}</option>
+          ))}
+        </select>
         {/* Show the selected agent's model as a hint */}
         {(() => {
           const ra = config.agents.find(a => a.id === config.renameAgentId)
-          return ra ? (
-            <div className="mt-3 flex items-center gap-2">
-              <span className="text-lg">{ra.emoji}</span>
+          if (!ra) return null
+          const isRecommended = /flash|mini|haiku/i.test(ra.model)
+          return (
+            <div className="mt-2 flex items-center gap-2">
+              <span className="text-base">{ra.emoji}</span>
               <span className="text-[#9ca3af] text-xs">{ra.name} · <span className="bg-[#1e2333] px-1.5 py-0.5 rounded text-[#6b7280]">{ra.model}</span></span>
-              {(ra.id === 'fast' || ra.id === 'light' || ra.id === 'bulk') && (
+              {isRecommended && (
                 <span className="text-[9px] bg-green-900/40 text-green-400 px-1.5 py-0.5 rounded-full">recommended</span>
               )}
             </div>
-          ) : null
+          )
         })()}
       </div>
 
@@ -151,10 +149,12 @@ export default function AgentsPage({ onStartSession }: AgentsPageProps) {
                     {agent.isPrimary && <span className="text-[9px] bg-[#6366f1]/20 text-[#818cf8] px-1.5 py-0.5 rounded-full">primary</span>}
                     {agent.id === config.renameAgentId && <span className="text-[9px] bg-amber-900/40 text-amber-400 px-1.5 py-0.5 rounded-full">✨ rename</span>}
                   </div>
-                  <div className="flex items-center gap-2 mt-0.5">
-                    <span className="bg-[#1e2333] text-[#6b7280] text-[10px] px-1.5 py-0.5 rounded">{agent.model}</span>
-                    {agent.description && <span className="text-[#4b5563] text-xs truncate">{agent.description}</span>}
+                  <div className="flex items-center gap-1.5 mt-0.5">
+                    <span className="bg-[#1e2333] text-[#6b7280] text-[10px] px-1.5 py-0.5 rounded shrink-0">{agent.model}</span>
                   </div>
+                  {agent.description && (
+                    <div className="text-[#4b5563] text-xs mt-0.5 truncate">{agent.description}</div>
+                  )}
                 </div>
 
                 {/* Right-side controls */}
