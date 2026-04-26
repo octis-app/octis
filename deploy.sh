@@ -7,11 +7,14 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+echo "[octis] Fixing permissions for nginx (pre-build)..."
+chmod o+x /root /root/.openclaw /root/.openclaw/workspace /root/.openclaw/workspace/octis
+
 echo "[octis] Building frontend..."
 npm run build
 
-echo "[octis] Fixing permissions for nginx..."
-chmod o+x /root /root/.openclaw /root/.openclaw/workspace /root/.openclaw/workspace/octis /root/.openclaw/workspace/octis/dist
+echo "[octis] Fixing permissions for nginx (post-build)..."
+chmod o+x /root/.openclaw/workspace/octis/dist
 chmod -R o+r /root/.openclaw/workspace/octis/dist
 
 echo "[octis] Restarting API server..."

@@ -37,3 +37,37 @@ html { -webkit-text-size-adjust: 100%; }
   0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
   30% { transform: translateY(-5px); opacity: 1; }
 }
+
+/* Custom slim scrollbar — session panels + chat area */
+.session-scroll,
+.chat-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color 0.2s;
+}
+.session-scroll:hover,
+.chat-scroll:hover {
+  scrollbar-color: #3d4766 transparent;
+}
+.session-scroll::-webkit-scrollbar,
+.chat-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+.session-scroll::-webkit-scrollbar-track,
+.chat-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.session-scroll::-webkit-scrollbar-thumb,
+.chat-scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 4px;
+  transition: background 0.2s;
+}
+.session-scroll:hover::-webkit-scrollbar-thumb,
+.chat-scroll:hover::-webkit-scrollbar-thumb {
+  background: #3d4766;
+}
+.session-scroll:hover::-webkit-scrollbar-thumb:hover,
+.chat-scroll:hover::-webkit-scrollbar-thumb:hover {
+  background: #6366f1;
+}

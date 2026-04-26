@@ -26,6 +26,8 @@ export interface SessionMeta {
   isStreaming?: boolean
   unreadCount?: number
   lastExchangeCost?: number // cost of the most recent completed exchange
+  runActive?: boolean    // true from lifecycle:start until lifecycle:end — authoritative run-in-progress signal
+  lastEventTs?: number   // timestamp of last meaningful WS event for this session
 }
 
 export interface ProjectTag {
@@ -53,7 +55,7 @@ interface GatewayState {
   connect: () => void
   forceReconnect: () => void
   disconnect: () => void
-  sendChat: (params: { sessionKey: string; message: string; idempotencyKey?: string; deliver?: boolean }) => Promise<{ ok: boolean; via: 'ws' | 'http'; runId?: string }>
+  sendChat: (params: { sessionKey: string; message: string; idempotencyKey?: string; deliver?: boolean; attachments?: { type: string; mimeType: string; content: string }[] }) => Promise<{ ok: boolean; via: 'ws' | 'http'; runId?: string }>
   send: (payload: unknown) => boolean
   handleMessage: (msg: GatewayMessage) => void
 }
@@ -219,7 +221,7 @@ export const useGatewayStore = create<GatewayState>()(
         // Keepalive ping every 45s
         const pingInterval = setInterval(() => {
           if (get().ws === socket && socket.readyState === WebSocket.OPEN && get().connected)
-            try { socket.send(JSON.stringify({ type: 'req', id: `ping-${Date.now()}`, method: 'sessions.list', params: { limit: 1 } })) } catch {}
+            try { socket.send(JSON.stringify({ type: 'req', id: `ping-${Date.now()}`, method: 'sessions.list', params: { limit: 1 } })) } catch {} // keepalive — no agentId filter needed
         }, 45000)
 
         socket.onclose = (e: CloseEvent) => {
@@ -277,6 +279,7 @@ export const useGatewayStore = create<GatewayState>()(
         message: string
         idempotencyKey?: string
         deliver?: boolean
+        attachments?: { type: string; mimeType: string; content: string }[]
       }): Promise<{ ok: boolean; via: 'ws' | 'http'; runId?: string }> => {
         const { ws, connected } = get()
         const API = (import.meta as Record<string, unknown>).env
@@ -320,15 +323,15 @@ export const useGatewayStore = create<GatewayState>()(
             set({ connected: true, _reconnectAttempts: 0 })
             // Don't clear sessions on reconnect — keep stale list visible while new one loads.
             // Clearing caused project page to flash empty on every iOS WS reconnect.
-            const { ws, agentId } = useGatewayStore.getState()
-            const listParams = agentId ? { agentId } : {}
+            const { ws } = useGatewayStore.getState()
             if (ws) {
+              const { agentId: aid } = useGatewayStore.getState()
               ws.send(
                 JSON.stringify({
                   type: 'req',
                   id: 'sessions-list-init',
                   method: 'sessions.list',
-                  params: listParams,
+                  params: aid ? { agentId: aid, limit: 100 } : { limit: 100 },
                 })
               )
             }
@@ -358,6 +361,11 @@ export const useGatewayStore = create<GatewayState>()(
             }
           })
           useSessionStore.getState().setSessions(sessions)
+          // Cache to localStorage so next load is instant
+          if (msg.id === 'sessions-list-init') {
+            const { agentId } = useGatewayStore.getState()
+            try { localStorage.setItem(`octis-session-cache-${agentId || 'default'}`, JSON.stringify(sessions)) } catch {}
+          }
         }
 
         if (msg.type === 'sessions.list.result') {
@@ -377,9 +385,9 @@ export const useGatewayStore = create<GatewayState>()(
             // Authoritative run signal from the gateway runner
             const phase = (payload.data as Record<string, unknown>)?.phase as string | undefined
             if (phase === 'start') {
-              useSessionStore.getState().markStreaming(sk)
+              useSessionStore.getState().markRunStart(sk)
             } else if (phase === 'end' || phase === 'error') {
-              useSessionStore.getState().setLastRole(sk, 'assistant')
+              useSessionStore.getState().markRunEnd(sk)
             }
           } else if (stream === 'tool') {
             // Tool executing — keep streaming indicator alive
@@ -469,6 +477,16 @@ async function getHiddenAuthToken(): Promise<string> {
     const token = null
     return token || ''
   } catch { return '' }
+}
+
+async function fetchHiddenSessionDetails(token?: string): Promise<Session[]> {
+  try {
+    const hdrs: Record<string, string> = {}
+    if (token) hdrs['Authorization'] = `Bearer ${token}`
+    const r = await fetch(`${HIDDEN_API}/api/hidden-session-details`, { headers: hdrs, credentials: 'include' })
+    if (!r.ok) return []
+    return await r.json() as Session[]
+  } catch { return [] }
 }
 
 async function fetchHiddenFromServer(token?: string): Promise<string[]> {
@@ -749,25 +767,37 @@ export const useProjectStore = create<ProjectState>()(
 
 // ─── Session store ────────────────────────────────────────────────────────────
 
+// External Maps — not Zustand state, so mutations never trigger re-renders.
+// streamingTimerMap: tracks 90s fallback timeouts for clearing isStreaming.
+// touchThrottleMap: ensures touchSession fires at most once per 2s per session.
+const streamingTimerMap = new Map<string, ReturnType<typeof setTimeout>>()
+const touchThrottleMap = new Map<string, number>()
+const TOUCH_THROTTLE_MS = 2000
+
 interface SessionState {
   sessions: Session[]
   sessionActivity: Record<string, number>
   sessionMeta: Record<string, SessionMeta>
+  /** @deprecated timers moved to external streamingTimerMap — kept for interface compat, always {} */
   streamingTimers: Record<string, ReturnType<typeof setTimeout>>
   costHistory: Record<string, { ts: number; cost: number }[]>
   activePanes: (string | null)[]
   paneCount: number
+  paneLayout: 'row' | 'grid' | 'featured'
   manualOrder: string[]
   pendingProjectPrefixes: Record<string, string>
   pendingProjectInits: Record<string, string>
 
   hiddenSessions: Session[]
   setHiddenSessions: (sessions: Session[]) => void
+  hydrateHiddenFromServer: (token?: string) => Promise<void>
   setSessions: (sessions: Session[]) => void
   getCostDelta: (sessionKey: string) => number | null
   touchSession: (sessionKey: string) => void
   setLastRole: (sessionKey: string, role: 'user' | 'assistant') => void
   markStreaming: (sessionKey: string) => void
+  markRunStart: (sessionKey: string) => void
+  markRunEnd: (sessionKey: string) => void
   incrementUnread: (sessionKey: string) => void
   clearUnread: (sessionKey: string) => void
   getUnreadCount: (sessionKey: string) => number
@@ -783,6 +813,7 @@ interface SessionState {
   setSessionProject: (sessionKey: string, projectTag: string) => void
   pinToPane: (paneIndex: number, sessionKey: string | null) => void
   setPaneCount: (n: number) => void
+  setPaneLayout: (layout: 'row' | 'grid' | 'featured') => void
   getActiveCount: () => number
 }
 
@@ -792,20 +823,32 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
   sessionActivity: {},
   sessionMeta: {},
   costHistory: {},
-  streamingTimers: {},
+  streamingTimers: {}, // always empty — timers live in external streamingTimerMap
   activePanes: [null, null, null, null, null, null, null, null],
   paneCount: 2,
+  paneLayout: 'row',
   manualOrder: [],
   pendingProjectPrefixes: {},
   pendingProjectInits: {},
 
   setHiddenSessions: (sessions) => set({ hiddenSessions: sessions }),
+  hydrateHiddenFromServer: async (token?: string) => {
+    const fetched = await fetchHiddenSessionDetails(token)
+    if (fetched.length === 0) return
+    set(s => {
+      const existingKeys = new Set(s.hiddenSessions.map((h: Session) => h.key))
+      const merged = [...s.hiddenSessions]
+      for (const fs of fetched) {
+        if (!existingKeys.has(fs.key)) merged.push(fs)
+      }
+      return { hiddenSessions: merged }
+    })
+  },
 
   setSessions: (sessions) => {
     // Deduplicate by key — gateway sometimes sends the same session under different forms
     const seen = new Set<string>()
     const hiddenStore = useHiddenStore.getState()
-    const { agentId } = useGatewayStore.getState()
     const hiddenCollected: Session[] = []
     const deduped = sessions.filter((s) => {
       if (!s.key || seen.has(s.key)) return false
@@ -813,21 +856,17 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
         hiddenCollected.push({ ...s, key: s.key || s.id || s.sessionId || '' })
         return false
       }
-      // Client-side agentId guard: filter out sessions belonging to other agents
-      if (agentId && s.agentId && s.agentId !== agentId) return false
-      // Key-prefix guard: sessions keyed as agent:<other>:... belong to a different agent
-      // e.g. agent:nexus:slack:direct:<someone_else>:... leaks through when server-side filter is loose
-      if (agentId) {
+      // Isolation: show session if it belongs to this user's primary agent namespace OR is explicitly owned.
+      // This replaces the old single-agentId guard — supports multi-agent sessions while preventing
+      // cross-user leakage (each user's sessions live under their agent:<mainAgentId>:* namespace).
+      const { mainAgentId, ownedSessions } = useAuthStore.getState()
+      if (mainAgentId || (ownedSessions instanceof Set)) {
         const agentPrefixMatch = (s.key || '').match(/^agent:([^:]+):/)
-        if (agentPrefixMatch && agentPrefixMatch[1] !== agentId) return false
-      }
-      // Ownership filter: non-owners only see sessions they have claimed.
-      // If ownedSessions is null (not yet loaded) or 'all', skip filter.
-      const { ownedSessions, isOwner } = useAuthStore.getState()
-      if (!isOwner() && ownedSessions instanceof Set) {
-        // Also accept short key forms (session-<ts>) that may appear before gateway normalises them
+        const sessionAgentId = agentPrefixMatch?.[1] || (s as any).agentId || ''
+        const isPrimaryAgent = !!(mainAgentId && sessionAgentId === mainAgentId)
         const shortKey = (s.key || '').match(/^agent:[^:]+:(session-\d+)$/)?.[1]
-        if (!ownedSessions.has(s.key) && !(shortKey && ownedSessions.has(shortKey))) return false
+        const isOwned = ownedSessions instanceof Set && (ownedSessions.has(s.key) || !!(shortKey && ownedSessions.has(shortKey)))
+        if (!isPrimaryAgent && !isOwned) return false
       }
       seen.add(s.key)
       // Also mark the short form (session-<ts>) as seen so the pendingLocal filter drops it
@@ -886,8 +925,15 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
   },
 
   touchSession: (sessionKey) => {
+    // Throttle: max one Zustand update per session per 2s.
+    // During active streaming this fires on every token — without throttling
+    // it triggers a full re-render cascade on every WS message.
+    const now = Date.now()
+    const last = touchThrottleMap.get(sessionKey) || 0
+    if (now - last < TOUCH_THROTTLE_MS) return
+    touchThrottleMap.set(sessionKey, now)
     set((s) => ({
-      sessionActivity: { ...s.sessionActivity, [sessionKey]: Date.now() },
+      sessionActivity: { ...s.sessionActivity, [sessionKey]: now },
     }))
   },
 
@@ -923,7 +969,8 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
         [sessionKey]: {
           ...(s.sessionMeta[sessionKey] || {}),
           lastRole: role,
-          isStreaming: false,
+          // Only clear isStreaming if runActive is NOT set — preserve streaming during active runs
+          isStreaming: s.sessionMeta[sessionKey]?.runActive ? (s.sessionMeta[sessionKey]?.isStreaming ?? false) : false,
         },
       },
     }))
@@ -939,30 +986,81 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
   },
 
   markStreaming: (sessionKey) => {
-    const existing = get().streamingTimers[sessionKey]
+    // Reset the 5-min fallback timer — stored in external Map so this never triggers a re-render.
+    const existing = streamingTimerMap.get(sessionKey)
     if (existing) clearTimeout(existing)
-
-    // 90s fallback — lifecycle:end is the authoritative clear; this catches dropped events
     const timer = setTimeout(() => {
+      streamingTimerMap.delete(sessionKey)
       set((s) => ({
         sessionMeta: {
           ...s.sessionMeta,
           [sessionKey]: { ...(s.sessionMeta[sessionKey] || {}), isStreaming: false },
         },
-        streamingTimers: Object.fromEntries(
-          Object.entries(s.streamingTimers).filter(([k]) => k !== sessionKey)
-        ),
       }))
-    }, 90_000)
+    }, 5 * 60_000)
+    streamingTimerMap.set(sessionKey, timer)
 
-    set((s) => ({
-      streamingTimers: { ...s.streamingTimers, [sessionKey]: timer },
+    // Only call Zustand set() if isStreaming is not already true.
+    // Previously this fired on every streaming token (10-20/sec) → re-render storm.
+    // Now it fires once per streaming run (false→true transition only).
+    if (!get().sessionMeta[sessionKey]?.isStreaming) {
+      set((s) => ({
+        sessionMeta: {
+          ...s.sessionMeta,
+          [sessionKey]: {
+            ...(s.sessionMeta[sessionKey] || {}),
+            isStreaming: true,
+            lastRole: 'assistant',
+            lastEventTs: Date.now(),
+          },
+        },
+      }))
+    }
+  },
+
+  markRunStart: (sessionKey) => {
+    set(s => ({
       sessionMeta: {
         ...s.sessionMeta,
         [sessionKey]: {
           ...(s.sessionMeta[sessionKey] || {}),
+          runActive: true,
+          lastEventTs: Date.now(),
           isStreaming: true,
+          lastRole: undefined,
+        },
+      },
+    }))
+    // Reset the streaming timer
+    const existing = streamingTimerMap.get(sessionKey)
+    if (existing) clearTimeout(existing)
+    // 10-min max timeout — if no lifecycle:end for 10 min, assume dead
+    const timer = setTimeout(() => {
+      streamingTimerMap.delete(sessionKey)
+      set(s => ({
+        sessionMeta: {
+          ...s.sessionMeta,
+          [sessionKey]: { ...(s.sessionMeta[sessionKey] || {}), isStreaming: false, runActive: false },
+        },
+      }))
+    }, 10 * 60 * 1000)
+    streamingTimerMap.set(sessionKey, timer)
+  },
+
+  markRunEnd: (sessionKey) => {
+    // Clear the streaming timer
+    const existing = streamingTimerMap.get(sessionKey)
+    if (existing) clearTimeout(existing)
+    streamingTimerMap.delete(sessionKey)
+    set(s => ({
+      sessionMeta: {
+        ...s.sessionMeta,
+        [sessionKey]: {
+          ...(s.sessionMeta[sessionKey] || {}),
+          runActive: false,
+          isStreaming: false,
           lastRole: 'assistant',
+          lastEventTs: Date.now(),
         },
       },
     }))
@@ -993,6 +1091,15 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
       return get().sessionMeta[realKey] ? realKey : key
     })()
     const meta = get().sessionMeta[resolvedKey] || {}
+
+    // runActive = authoritative "run in progress" signal from lifecycle events
+    if (meta.runActive) {
+      // Check if run has gone quiet (no events for >3 min) → show stuck instead
+      const lastEvt = meta.lastEventTs || 0
+      const silentMs = Date.now() - lastEvt
+      if (lastEvt > 0 && silentMs > 3 * 60 * 1000) return 'stuck'
+      return 'working'
+    }
 
     if (meta.isStreaming) return 'working'
 
@@ -1089,11 +1196,18 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
 
   pinToPane: (paneIndex, sessionKey) => {
     const panes = [...get().activePanes]
+    // Prevent duplicate panes: if this session is already open in another slot, bail out.
+    // Closing a pane (sessionKey = null) is always allowed.
+    if (sessionKey !== null) {
+      const existingIdx = panes.indexOf(sessionKey)
+      if (existingIdx >= 0 && existingIdx !== paneIndex) return
+    }
     panes[paneIndex] = sessionKey
     set({ activePanes: panes })
   },
 
   setPaneCount: (n) => set({ paneCount: Math.min(8, Math.max(1, n)) }),
+  setPaneLayout: (layout) => set({ paneLayout: layout }),
 
   getActiveCount: () => {
     const { sessions, getStatus } = get()
@@ -1104,6 +1218,7 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
   partialize: (s) => ({
     activePanes: s.activePanes,
     paneCount: s.paneCount,
+    paneLayout: s.paneLayout,
     manualOrder: s.manualOrder,
     // Persist last-known sessions so they show instantly on next open (stale-while-revalidate)
     sessions: s.sessions.slice(0, 200),

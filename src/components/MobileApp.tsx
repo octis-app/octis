@@ -45,6 +45,9 @@ export default function MobileApp() {
       hydrateHidden(token),
       hydrateProjects(token),
     ])
+    // Hydrate archived session details from server (independent of gateway WS — ensures
+    // old/inactive archived sessions appear even if gateway doesn't include them in sessions.list)
+    void useSessionStore.getState().hydrateHiddenFromServer(token)
     // Fetch server-side session labels
     const authHeader = {}
     fetch('/api/session-labels', { credentials: 'include' })
@@ -294,7 +297,7 @@ export default function MobileApp() {
       >
         <div className="flex items-center justify-between px-4 py-3">
           <div className="flex items-center gap-2">
-            <span className="text-xl">🐙</span>
+            <img src="/octis-logo.svg" alt="Octis" className="w-6 h-6" />
             <span className="text-white font-semibold text-base tracking-tight">Octis</span>
           </div>
           <button
@@ -350,7 +353,7 @@ export default function MobileApp() {
             {filtered.length === 0 ? (
               <div className="flex-1 flex items-center justify-center">
                 <div className="text-center px-8">
-                  <div className="text-4xl mb-3">🐙</div>
+                  <img src="/octis-logo.svg" alt="Octis" className="w-16 h-16 mx-auto mb-3" />
                   <div className="text-[#6b7280] text-sm">
                     {sessions.length === 0
                       ? 'No sessions yet. Connect to your gateway to get started.'

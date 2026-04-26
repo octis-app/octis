@@ -12,9 +12,9 @@ import rateLimit from 'express-rate-limit'
 import helmet from 'helmet'
 import cookieParser from 'cookie-parser'
 import webpush from 'web-push'
+import { WebSocket, WebSocketServer } from 'ws'
 
 const _require = createRequire(import.meta.url)
-const WS = _require('/usr/lib/node_modules/openclaw/node_modules/ws')
 const pdfParse = _require('pdf-parse')
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -160,7 +160,7 @@ app.post('/api/auth/logout', (req, res) => {
 
 function adminGwCall(calls) {
   return new Promise((resolve, reject) => {
-    const ws = new WS('ws://localhost:18789/gateway', {
+    const ws = new WebSocket('ws://localhost:18789/gateway', {
       headers: { Authorization: `Bearer ${GATEWAY_TOKEN}`, Origin: 'http://localhost:18789' }
     })
     let reqId = 1
@@ -232,6 +232,18 @@ function cleanSessionLabel(raw, sessionId) {
 // ─── Health ───────────────────────────────────────────────────────────────────
 
 app.get('/api/health', (req, res) => res.json({ ok: true }))
+
+// ─── Agents list ─────────────────────────────────────────────────────────────
+
+app.get('/api/agents', requireAuth, (req, res) => {
+  try {
+    const agentsFile = path.join(__serverDir, 'config', 'agents.json')
+    const agents = JSON.parse(readFileSync(agentsFile, 'utf8'))
+    res.json({ agents })
+  } catch {
+    res.json({ agents: [{ id: 'main', name: 'Byte', emoji: '🦞', description: 'Default' }] })
+  }
+})
 
 // ─── Cache clear page ─────────────────────────────────────────────────────────
 
@@ -452,6 +464,22 @@ app.post('/api/hidden-sessions/unhide', requireAuth, (req, res) => {
   res.json({ ok: true })
 })
 
+app.get('/api/hidden-session-details', requireAuth, (req, res) => {
+  const hiddenKeys = db.prepare('SELECT session_key FROM octis_hidden_sessions').all().map(r => r.session_key)
+  const details = hiddenKeys.map(key => {
+    const labelRow = db.prepare('SELECT label, updated_at FROM octis_session_labels WHERE session_key = ?').get(key)
+    return {
+      key,
+      id: key,
+      sessionId: key,
+      label: labelRow?.label || null,
+      lastActivity: labelRow?.updated_at ? new Date(labelRow.updated_at * 1000).toISOString() : null,
+      status: 'quiet'
+    }
+  })
+  res.json(details)
+})
+
 // ─── Pinned sessions ──────────────────────────────────────────────────────────
 
 app.get('/api/pinned-sessions', requireAuth, (req, res) => {
@@ -470,6 +498,52 @@ app.post('/api/pinned-sessions/unpin', requireAuth, (req, res) => {
   if (!sessionKey) return res.status(400).json({ error: 'sessionKey required' })
   db.prepare('DELETE FROM octis_pinned_sessions WHERE session_key = ?').run(sessionKey)
   res.json({ ok: true })
+})
+
+// ─── Session ownership ──────────────────────────────────────────────────────
+// Tracks which user created/opened each session.
+// Owners (role=owner/admin) always see all sessions.
+// Viewers only see sessions they have claimed.
+
+function claimSessionOwnership(sessionKey, userId) {
+  if (!sessionKey || !userId) return
+  try {
+    db.prepare('INSERT OR IGNORE INTO octis_session_ownership (session_key, user_id) VALUES (?, ?)').run(sessionKey, userId)
+  } catch {}
+}
+
+// Create a session on a specific agent (owner-only)
+app.post('/api/sessions/create', requireAuth, async (req, res) => {
+  try {
+    const { agentId = 'main' } = req.body
+    const [result] = await adminGwCall([{ method: 'sessions.create', params: { agentId } }])
+    const sessionKey = result?.key
+    if (!sessionKey) return res.status(500).json({ error: 'No session key returned' })
+    claimSessionOwnership(sessionKey, req.user.id)
+    res.json({ ok: true, sessionKey, agentId })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// Claim a session (called from client when opening or creating a session)
+app.post('/api/session-ownership/claim', requireAuth, (req, res) => {
+  const { sessionKey } = req.body
+  if (!sessionKey) return res.status(400).json({ error: 'sessionKey required' })
+  claimSessionOwnership(sessionKey, req.user.id)
+  res.json({ ok: true })
+})
+
+// Return session keys this user owns (used by client to filter session list)
+app.get('/api/my-sessions', requireAuth, (req, res) => {
+  const role = req.user.role
+  if (role === 'owner' || role === 'admin') {
+    const mainAgentId = req.user.agent_id || 'main'
+    const ownedRows = db.prepare('SELECT session_key FROM octis_session_ownership WHERE user_id = ?').all(req.user.id)
+    return res.json({ all: false, mainAgentId, sessionKeys: ownedRows.map(r => r.session_key) })
+  }
+  const rows = db.prepare('SELECT session_key FROM octis_session_ownership WHERE user_id = ?').all(req.user.id)
+  res.json({ all: false, sessionKeys: rows.map(r => r.session_key) })
 })
 
 // ─── Push notifications ───────────────────────────────────────────────────────
@@ -562,9 +636,9 @@ app.post('/api/session-init', requireAuth, async (req, res) => {
 // ─── HTTP fallback for sessions.list ────────────────────────────────────
 app.get('/api/sessions-list', requireAuth, async (req, res) => {
   try {
-    const { agentId, limit = 50 } = req.query
-    const params = { limit: Math.min(Number(limit), 100) }
-    if (agentId) params.agentId = agentId
+    const { limit = 50 } = req.query
+    const agentId = req.user.agent_id || 'main'
+    const params = { limit: Math.min(Number(limit), 100), agentId }
     const [result] = await adminGwCall([{ method: 'sessions.list', params }])
     res.json({ ok: true, sessions: result?.sessions || [] })
   } catch (err) {
