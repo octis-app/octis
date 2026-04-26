@@ -8,7 +8,7 @@ interface ConnectModalProps {
 export default function ConnectModal({ onClose }: ConnectModalProps) {
   const { gatewayUrl, gatewayToken, setCredentials, connect, connected } = useGatewayStore()
   const [url, setUrl] = useState(
-    gatewayUrl || (import.meta.env.VITE_GATEWAY_URL as string) || 'wss://your-openclaw-host/ws'
+    gatewayUrl || (import.meta.env.VITE_GATEWAY_URL as string) || ''
   )
   const [token, setToken] = useState(
     gatewayToken || (import.meta.env.VITE_GATEWAY_TOKEN as string) || ''

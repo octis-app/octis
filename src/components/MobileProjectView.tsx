@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useAuth } from '../lib/auth'
-import { useSessionStore, useProjectStore, useLabelStore, useHiddenStore, Session } from '../store/gatewayStore'
-import { useGatewayStore, useHiddenStore } from '../store/gatewayStore'
+import { useSessionStore, useProjectStore, useLabelStore, useHiddenStore, useGatewayStore, Session } from '../store/gatewayStore'
+import { useAuthStore } from '../store/authStore'
 import { authFetch } from '../lib/authFetch'
 import MobileFullChat from './MobileFullChat'
 import type { Project } from './ProjectsGrid'
@@ -30,6 +30,20 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
   const { getLabel } = useLabelStore()
   const { isHidden, hide: hideSession, unhide: unhideSession } = useHiddenStore()
   const { send, agentId } = useGatewayStore()
+  const { mainAgentId } = useAuthStore()
+
+  const getAgentBadge = (sessionKey: string): { emoji: string; label: string } | null => {
+    const m = (sessionKey || '').match(/^agent:([^:]+):/)
+    const aid = m?.[1]
+    if (!aid || aid === (mainAgentId || 'main')) return null
+    const BADGES: Record<string, { emoji: string; label: string }> = {
+      haiku: { emoji: '⚡', label: 'Haiku' },
+      minimax: { emoji: '🔧', label: 'MiniMax' },
+      gemini: { emoji: '✨', label: 'Gemini' },
+      opus: { emoji: '🔮', label: 'Opus' },
+    }
+    return BADGES[aid] || { emoji: '🤖', label: aid }
+  }
 
   // Track session keys that existed before we created a new session,
   // so we can detect the real gateway-assigned key when sessions.list fires.
@@ -116,7 +130,7 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
     send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey: key, message: text, idempotencyKey: `octis-proj-${Date.now()}-${Math.random().toString(36).slice(2)}` } })
     // Trigger sessions.list refresh after send so the real session key is detected
     setTimeout(() => {
-      send({ type: 'req', id: `sessions-list-${Date.now()}`, method: 'sessions.list', params: agentId ? { agentId } : {} })
+      send({ type: 'req', id: `sessions-list-${Date.now()}`, method: 'sessions.list', params: {} })
     }, 800)
     // Also persist the tag to server async
     authFetch(`${API}/api/session-projects`, {
@@ -385,7 +399,13 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
                       className="w-2.5 h-2.5 rounded-full shrink-0"
                       style={{ background: statusColors[status] || statusColors.quiet }}
                     />
-                    <span className="text-white text-sm font-medium flex-1 min-w-0 truncate">{label}</span>
+                    <span className="text-white text-sm font-medium flex-1 min-w-0 truncate flex items-center gap-1">
+                      {label}
+                      {(() => {
+                        const badge = getAgentBadge(s.key)
+                        return badge ? <span className="text-[10px] text-[#6b7280] bg-[#1a1d2e] px-1 rounded flex-shrink-0" title={badge.label}>{badge.emoji}</span> : null
+                      })()}
+                    </span>
                     <span
                       className="text-xs shrink-0"
                       style={{ color: statusColors[status] || statusColors.quiet }}

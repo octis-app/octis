@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useSessionStore, useGatewayStore, useProjectStore, useLabelStore, useHiddenStore, Session, SessionStatus } from '../store/gatewayStore'
+import { useAuthStore } from '../store/authStore'
 import { authFetch } from '../lib/authFetch'
+import { AgentPicker } from './AgentPicker'
 
 // ─── Health Circle ─────────────────────────────────────────────────────────────
 function HealthCircle({ session }: { session: Session }) {
@@ -14,7 +16,7 @@ function HealthCircle({ session }: { session: Session }) {
   const exchangeCost = sessionMeta[session.key]?.lastExchangeCost ?? null
   if (exchangeCost == null) return null
 
-  // Per-exchange cost: signals context overhead, only appears after first completed exchange
+  // Per-message cost overhead — green/yellow/red tells you when to start a new session
   let color = '#22c55e'
   let label = 'Light'
   if (exchangeCost > 0.15) {
@@ -94,7 +96,7 @@ function timeAgo(ms: number): string {
 
 const STATUS = {
   working: { color: '#a855f7', label: 'Thinking', dot: 'animate-pulse' },
-  stuck:   { color: '#f59e0b', label: 'Stuck',    dot: '' },
+  stuck:   { color: '#f59e0b', label: 'Running (quiet)', dot: 'animate-pulse' },
   active:  { color: '#22c55e', label: 'Active',   dot: '' },
   quiet:   { color: '#6b7280', label: 'Quiet',    dot: '' },
 }
@@ -155,6 +157,7 @@ function SessionItem({ session, isPinned, onPin, onRename, onArchive, onContinue
   const { getStatus, getLastActivityMs, getUnreadCount } = useSessionStore()
   const { getTag, getProjectEmoji } = useProjectStore()
   const { getLabel, setLabel: saveLabel } = useLabelStore()
+  const { mainAgentId } = useAuthStore()
   const lastMs = getLastActivityMs(session)
   const lastSeen = lastMs ? timeAgo(lastMs) : null
   const status = getStatus(session)
@@ -244,6 +247,14 @@ function SessionItem({ session, isPinned, onPin, onRename, onArchive, onContinue
               <span className="text-[11px] shrink-0 opacity-80">{getProjectEmoji(tag.project)}</span>
             )}
             {displayLabel}
+            {(() => {
+              const m = (session.key || '').match(/^agent:([^:]+):/)
+              const aid = m?.[1]
+              if (!aid || aid === (mainAgentId || 'main')) return null
+              const BADGES: Record<string, string> = { haiku: '⚡', minimax: '🔧', gemini: '✨', opus: '🔮' }
+              const emoji = BADGES[aid] || '🤖'
+              return <span className="text-[9px] text-[#6b7280] bg-[#1a1d2e] px-1 rounded flex-shrink-0" title={aid}>{emoji}</span>
+            })()}
           </span>
         )}
 
@@ -401,7 +412,7 @@ function ProjectGroup({ name, sessions, activePanes, paneCount, onPin, onRename,
 
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => void }) {
-  const { sessions, getStatus, getSortedSessions, pinToPane, activePanes, paneCount, setPaneCount, setSessions, setManualOrder } = useSessionStore()
+  const { sessions, getStatus, getSortedSessions, pinToPane, activePanes, paneCount, setPaneCount, setSessions, setManualOrder, paneLayout, setPaneLayout } = useSessionStore()
   // Re-render every 60s so stuck detection updates live
   const [, setTick] = useState(0)
   useEffect(() => {
@@ -412,6 +423,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
   const { getTag, getProjects } = useProjectStore()
   const { getLabel } = useLabelStore()
   const { hide: hideSession } = useHiddenStore()
+  const { mainAgentId } = useAuthStore()
   const [sidebarView, setSidebarView] = useState('sessions') // 'sessions' | 'projects' | 'archives'
   const [filter, setFilter] = useState('all')
   const [search, setSearch] = useState('')
@@ -421,6 +433,39 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
   const [showNewSessionPicker, setShowNewSessionPicker] = useState(false)
   const [pickerProjects, setPickerProjects] = useState<{ id: string; name: string; slug: string; emoji: string }[]>([])
   const newSessionPickerRef = useRef<HTMLDivElement>(null)
+  const [selectedAgentId, setSelectedAgentId] = useState<string>('')
+  const [showAgentPickerModal, setShowAgentPickerModal] = useState(false)
+
+  useEffect(() => {
+    if (mainAgentId && !selectedAgentId) setSelectedAgentId(mainAgentId)
+  }, [mainAgentId])
+
+  const AGENT_DISPLAY: Record<string, { emoji: string; name: string }> = {
+    main: { emoji: '🦞', name: 'Byte' },
+    haiku: { emoji: '⚡', name: 'Haiku' },
+    minimax: { emoji: '🔧', name: 'MiniMax' },
+    gemini: { emoji: '✨', name: 'Gemini' },
+  }
+  const agentDisplay = (id: string) => AGENT_DISPLAY[id] || { emoji: '🤖', name: id || 'Byte' }
+
+  const createSessionKey = async (aid: string): Promise<string> => {
+    const effective = aid || mainAgentId || 'main'
+    if (effective === (mainAgentId || 'main')) {
+      const key = `session-${Date.now()}`
+      // Claim immediately so it passes the isolation filter in setSessions
+      useAuthStore.getState().claimSession(key)
+      return key
+    }
+    const res = await authFetch(`${API}/api/sessions/create`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agentId: effective }),
+    })
+    const data = await res.json() as { ok: boolean; sessionKey?: string; error?: string }
+    if (!data.ok || !data.sessionKey) throw new Error(data.error || 'Failed to create session')
+    useAuthStore.getState().claimSession(data.sessionKey)
+    return data.sessionKey
+  }
 
   const [dragOverKey, setDragOverKey] = useState<string | null>(null)
   const [archiveRows, setArchiveRows] = useState<ArchiveRow[]>([])
@@ -455,9 +500,8 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
   // Poll sessions.list every 30s to refresh live cost data
   useEffect(() => {
     if (!connected) return
-    const listParams = agentId ? { agentId } : {}
     const poll = () => {
-      send({ type: 'req', id: `sessions-list-${Date.now()}`, method: 'sessions.list', params: listParams })
+      send({ type: 'req', id: `sessions-list-${Date.now()}`, method: 'sessions.list', params: {} })
     }
     const t = setInterval(poll, 30_000)
     return () => clearInterval(t)
@@ -683,6 +727,29 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
           <span className="font-semibold text-white tracking-tight text-sm flex-1">
             {sidebarView === 'sessions' ? 'Sessions' : sidebarView === 'projects' ? 'Projects' : 'Archives'}
           </span>
+          {sidebarView === 'sessions' && (
+            <div className="flex items-center gap-1">
+              <button
+                title="Open all sessions in panes"
+                onClick={() => {
+                  const toOpen = filtered.slice(0, 8)
+                  // Expand pane count to fit
+                  const needed = Math.max(paneCount, toOpen.length)
+                  if (needed > paneCount) setPaneCount(needed)
+                  toOpen.forEach((s, i) => pinToPane(i, s.key))
+                }}
+                className="text-[10px] text-[#6b7280] hover:text-[#6366f1] px-1.5 py-0.5 rounded hover:bg-[#2a3142] transition-colors"
+              >all</button>
+              <span className="text-[#2a3142]">|</span>
+              <button
+                title="Close all panes"
+                onClick={() => {
+                  activePanes.forEach((_, i) => pinToPane(i, null))
+                }}
+                className="text-[10px] text-[#6b7280] hover:text-red-400 px-1.5 py-0.5 rounded hover:bg-[#2a3142] transition-colors"
+              >none</button>
+            </div>
+          )}
           <div className="flex items-center gap-1.5">
             <div className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`} />
             <span className="text-xs text-[#6b7280]">{connected ? 'live' : 'off'}</span>
@@ -761,7 +828,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
       )}
 
       {/* List */}
-      <div className="flex-1 overflow-y-auto py-2">
+      <div className="flex-1 overflow-y-auto py-2 session-scroll">
 
         {/* ── SESSIONS VIEW ── */}
         {sidebarView === 'sessions' && (
@@ -908,12 +975,14 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
           <div className="absolute bottom-full left-3 right-3 mb-1 bg-[#1e2333] border border-[#2a3142] rounded-lg shadow-xl z-50 overflow-hidden">
             <div className="px-3 py-1.5 text-[10px] text-[#6b7280] border-b border-[#2a3142] font-medium uppercase tracking-wide">Open in project</div>
             <button
-              onClick={() => {
-                const key = `session-${Date.now()}`
-                setSessions([{ key, label: 'New session', sessionKey: key }, ...sessions])
-                const emptyPane = activePanes.findIndex((p, i) => i < paneCount && !p)
-                pinToPane(emptyPane >= 0 ? emptyPane : paneCount - 1, key)
-                setShowNewSessionPicker(false)
+              onClick={async () => {
+                try {
+                  const key = await createSessionKey(selectedAgentId)
+                  setSessions([{ key, label: 'New session', sessionKey: key }, ...sessions])
+                  const emptyPane = activePanes.findIndex((p, i) => i < paneCount && !p)
+                  pinToPane(emptyPane >= 0 ? emptyPane : paneCount - 1, key)
+                  setShowNewSessionPicker(false)
+                } catch (e) { console.error('Failed to create session:', e) }
               }}
               className="w-full text-left px-3 py-2 text-xs text-[#9ca3af] hover:bg-[#2a3142] hover:text-white transition-colors flex items-center gap-2"
             >
@@ -922,18 +991,20 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
             {pickerProjects.map(p => (
               <button
                 key={p.slug}
-                onClick={() => {
-                  const key = `session-${Date.now()}`
-                  setSessions([{ key, label: 'New session', sessionKey: key }, ...sessions])
-                  useProjectStore.getState().setTag(key, p.slug)
-                  authFetch(`${API}/api/session-projects`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ sessionKey: key, projectTag: p.slug }),
-                  }).catch(() => {})
-                  const emptyPane = activePanes.findIndex((pn, i) => i < paneCount && !pn)
-                  pinToPane(emptyPane >= 0 ? emptyPane : paneCount - 1, key)
-                  setShowNewSessionPicker(false)
+                onClick={async () => {
+                  try {
+                    const key = await createSessionKey(selectedAgentId)
+                    setSessions([{ key, label: 'New session', sessionKey: key }, ...sessions])
+                    useProjectStore.getState().setTag(key, p.slug)
+                    authFetch(`${API}/api/session-projects`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ sessionKey: key, projectTag: p.slug }),
+                    }).catch(() => {})
+                    const emptyPane = activePanes.findIndex((pn, i) => i < paneCount && !pn)
+                    pinToPane(emptyPane >= 0 ? emptyPane : paneCount - 1, key)
+                    setShowNewSessionPicker(false)
+                  } catch (e) { console.error('Failed to create session:', e) }
                 }}
                 className="w-full text-left px-3 py-2 text-xs text-[#e8eaf0] hover:bg-[#2a3142] transition-colors flex items-center gap-2"
               >
@@ -942,6 +1013,38 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
             ))}
           </div>
         )}
+        {/* Layout toggle — only shown when 2+ panes are open */}
+        {activePanes.filter(Boolean).length > 1 && (
+          <div className="flex items-center gap-1.5 mb-2">
+            <span className="text-[10px] text-[#4b5563] shrink-0">Layout</span>
+            <div className="flex gap-0.5 bg-[#0f1117] rounded-md p-0.5 border border-[#2a3142] flex-1">
+              {(['row', 'grid', 'featured'] as const).map(mode => (
+                <button
+                  key={mode}
+                  onClick={() => setPaneLayout(mode)}
+                  title={mode === 'row' ? 'Row — side by side' : mode === 'grid' ? 'Grid — 2 rows' : 'Featured — focus one pane'}
+                  className={`flex-1 text-[11px] py-0.5 rounded transition-colors ${
+                    paneLayout === mode ? 'bg-[#6366f1] text-white' : 'text-[#4b5563] hover:text-white'
+                  }`}
+                >
+                  {mode === 'row' ? '▤' : mode === 'grid' ? '⊞' : '⬛·'}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {/* Agent selector */}
+        <div className="flex items-center justify-between mb-1 px-0.5">
+          <span className="text-[10px] text-[#6b7280]">Agent</span>
+          <button
+            onClick={(e) => { e.stopPropagation(); setShowAgentPickerModal(true) }}
+            className="text-[10px] text-[#818cf8] hover:text-[#a5b4fc] flex items-center gap-1 transition-colors"
+          >
+            {agentDisplay(selectedAgentId || mainAgentId || 'main').emoji}{' '}
+            {agentDisplay(selectedAgentId || mainAgentId || 'main').name}
+            <span className="text-[#4b5563] ml-0.5">▾</span>
+          </button>
+        </div>
         <button
           onClick={() => {
             if (!showNewSessionPicker) {
@@ -956,6 +1059,15 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
           <span className="text-[9px] opacity-60 font-mono bg-white/10 rounded px-1 py-0.5 leading-none">N</span>
         </button>
       </div>
+
+      {/* Agent picker modal */}
+      {showAgentPickerModal && (
+        <AgentPicker
+          mainAgentId={mainAgentId || 'main'}
+          onSelect={(id) => { setSelectedAgentId(id); setShowAgentPickerModal(false) }}
+          onClose={() => setShowAgentPickerModal(false)}
+        />
+      )}
     </aside>
   )
 }

@@ -45,6 +45,10 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
   const [editEmojiValue, setEditEmojiValue] = useState('')
   const emojiInputRef = useRef<HTMLInputElement>(null)
 
+  // Drag-and-drop reorder state
+  const [dragIndex, setDragIndex] = useState<number | null>(null)
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
+
   const QUICK_EMOJIS = ['📁', '📂', '🏢', '🏠', '💼', '🚀', '⚙️', '💡', '🔬', '🎯', '📊', '🐙']
 
   const startEmojiEdit = useCallback((e: React.MouseEvent, project: Project) => {
@@ -86,6 +90,28 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
       })
       .catch(() => setLoading(false))
   }, [])
+
+  const handleReorder = useCallback(async (fromIndex: number, toIndex: number) => {
+    if (fromIndex === toIndex) return
+    const newOrder = [...projects]
+    const [moved] = newOrder.splice(fromIndex, 1)
+    newOrder.splice(toIndex, 0, moved)
+    // Update positions in local state
+    const withPositions = newOrder.map((p, i) => ({ ...p, position: i }))
+    setProjects(withPositions)
+    // PATCH only items whose position changed
+    const patches = withPositions.filter((p, i) => projects.findIndex(op => op.id === p.id) !== i)
+    await Promise.all(
+      patches.map(p =>
+        fetch(`${API}/api/projects/${p.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ position: p.position }),
+        })
+      )
+    )
+  }, [projects])
 
   const handleCreate = async () => {
     if (!newName.trim()) return
@@ -197,21 +223,36 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
 
         {/* Project grid */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {projects.map(project => {
+          {projects.map((project, i) => {
             const count = sessionCountForProject(project.slug)
             const active = activeCountForProject(project.slug)
             const lastActivity = lastActivityForProject(project.slug)
             const isEditingEmoji = editingEmojiId === project.id
+            const isDragging = dragIndex === i
+            const isDragOver = dragOverIndex === i && dragOverIndex !== dragIndex
 
             return (
               <div
                 key={project.id}
                 role="button"
                 tabIndex={0}
+                draggable={!isEditingEmoji}
+                onDragStart={(e) => { setDragIndex(i); e.dataTransfer.effectAllowed = 'move' }}
+                onDragOver={(e) => { e.preventDefault(); setDragOverIndex(i) }}
+                onDragLeave={() => setDragOverIndex(null)}
+                onDragEnd={() => { setDragIndex(null); setDragOverIndex(null) }}
+                onDrop={(e) => { e.preventDefault(); if (dragIndex !== null) handleReorder(dragIndex, i); setDragIndex(null); setDragOverIndex(null) }}
                 onClick={() => !isEditingEmoji && onOpenProject(project)}
                 onKeyDown={e => { if ((e.key === 'Enter' || e.key === ' ') && !isEditingEmoji) onOpenProject(project) }}
-                className="text-left bg-[#181c24] hover:bg-[#1e2330] border border-[#2a3142] hover:border-[#3a4152] rounded-2xl p-5 transition-all group cursor-pointer select-none"
+                className={`relative text-left bg-[#181c24] hover:bg-[#1e2330] border rounded-2xl p-5 transition-all group select-none ${
+                  isDragOver ? 'border-[#6366f1] bg-[#1e2330]' : 'border-[#2a3142] hover:border-[#3a4152]'
+                } ${
+                  isDragging ? 'opacity-40 cursor-grabbing' : 'cursor-grab'
+                }`}
               >
+                {/* Drag handle — subtle, appears on hover */}
+                <div className="absolute top-3 left-3 opacity-0 group-hover:opacity-30 text-[#9ca3af] text-xs pointer-events-none select-none" aria-hidden="true">⠿</div>
+
                 {/* Emoji + status dot */}
                 <div className="flex items-start justify-between mb-3">
                   <div className="relative">

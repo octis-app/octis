@@ -28,8 +28,8 @@ export default defineConfig({
       workbox: {
         navigateFallbackDenylist: [/^\/dev\//],
         importScripts: ['/sw-push.js'],
-        skipWaiting: false, // Don't force-reload mid-session; new SW activates on next app launch
-        clientsClaim: false,
+        skipWaiting: true,  // Activate new SW immediately on install — users get new code on next refresh
+        clientsClaim: true,  // New SW takes control of all open tabs immediately after activation
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
         runtimeCaching: [
           {
@@ -47,5 +47,17 @@ export default defineConfig({
   ],
   resolve: {
     extensions: ['.tsx', '.ts', '.jsx', '.js'],
+  },
+  server: {
+    proxy: {
+      '/api': {
+        target: 'http://localhost:3747',
+        changeOrigin: true,
+      },
+      '/ws': {
+        target: 'ws://localhost:3747',
+        ws: true,
+      },
+    },
   },
 })

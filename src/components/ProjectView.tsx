@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useAuth } from '../lib/auth'
 import { useSessionStore, useProjectStore, useLabelStore, useHiddenStore, useGatewayStore, Session } from '../store/gatewayStore'
+import { useAuthStore } from '../store/authStore'
 import ChatPane from './ChatPane'
 import type { Project } from './ProjectsGrid'
 
@@ -16,11 +17,14 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
   const { sessions, hiddenSessions, getStatus, setSessions, setPendingProjectPrefix, setPendingProjectInit } = useSessionStore()
   const { getTag, setTag } = useProjectStore()
   const { getLabel, setLabel } = useLabelStore()
-  const { isHidden } = useHiddenStore()
+  const { isHidden, unhide: unhideSession } = useHiddenStore()
   const { send } = useGatewayStore()
   // Local pane state — independent of the shared activePanes (Sessions view)
   const [localPanes, setLocalPanes] = useState<(string | null)[]>([null, null, null, null, null, null, null, null])
   const [activeSession, setActiveSession] = useState<string | null>(null)
+  const dragSourceRef = useRef<number | null>(null)
+  const [dragOverPane, setDragOverPane] = useState<number | null>(null)
+  const [dragGhost, setDragGhost] = useState<{ x: number; y: number; label: string } | null>(null)
 
   // Reset panes when switching projects (avoids stale panes from previous visit)
   useEffect(() => {
@@ -34,6 +38,7 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
   const _editInputRef = useRef<HTMLInputElement | null>(null)
   const handleTodoNewSession = async (text: string) => {
     const key = `session-${Date.now()}`
+    useAuthStore.getState().claimSession(key)
     const newSession: Session = { key, label: text.slice(0, 40), sessionKey: key } as Session
     setSessions([newSession, ...sessions])
     const freshPanes: (string | null)[] = [null, null, null, null, null, null, null, null]
@@ -124,6 +129,7 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
   // Create a brand-new session in this project
   const handleNewSession = async () => {
     const key = `session-${Date.now()}`
+    useAuthStore.getState().claimSession(key)
     const label = `New ${project.name} session`
     const newSession: Session = { key, label, sessionKey: key } as Session
     // Set state synchronously before await to prevent useEffect race
@@ -200,6 +206,42 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
   }
 
   // Untagged sessions (for the "Add existing session" panel)
+  // Drag-and-drop handlers for pane reordering
+  const handlePaneDragStart = (i: number, e: React.PointerEvent, label: string) => {
+    dragSourceRef.current = i
+    setDragGhost({ x: e.clientX, y: e.clientY, label })
+    ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
+  }
+  const handlePanePointerMove = (e: React.PointerEvent) => {
+    if (dragSourceRef.current === null) return
+    setDragGhost(g => g ? { ...g, x: e.clientX, y: e.clientY } : null)
+    const el = document.elementFromPoint(e.clientX, e.clientY)
+    const paneEl = el?.closest('[data-pane-index]') as HTMLElement | null
+    const idx = paneEl ? parseInt(paneEl.dataset.paneIndex!) : null
+    setDragOverPane(idx !== null && !isNaN(idx) ? idx : null)
+  }
+  const handlePanePointerUp = () => {
+    const src = dragSourceRef.current
+    const dst = dragOverPane
+    dragSourceRef.current = null
+    setDragGhost(null)
+    setDragOverPane(null)
+    if (src === null || dst === null || src === dst) return
+    const visiblePanes = localPanes.filter((p): p is string => !!p)
+    const srcKey = visiblePanes[src]
+    const dstKey = visiblePanes[dst]
+    if (!srcKey || !dstKey) return
+    const srcIdx = localPanes.indexOf(srcKey)
+    const dstIdx = localPanes.indexOf(dstKey)
+    if (srcIdx === -1 || dstIdx === -1) return
+    setLocalPanes(prev => {
+      const next = [...prev]
+      next[srcIdx] = dstKey
+      next[dstIdx] = srcKey
+      return next
+    })
+  }
+
   const untaggedSessions = sessions.filter((s: Session) =>
     !getTag(s.key).project && !isHidden(s.key) && !isHidden(s.id || '')
   )
@@ -238,7 +280,7 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
         </div>
 
         {/* Session list */}
-        <div className="flex-1 overflow-y-auto py-2">
+        <div className="flex-1 overflow-y-auto py-2 session-scroll">
           {projectSessions.length === 0 ? (
             <div className="px-4 py-4 text-center">
               <div className="text-[#4b5563] text-xs mb-3">No sessions in this project yet.</div>
@@ -296,6 +338,19 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
                     {editingSessionKey !== s.key && (
                       <div className="text-[10px] text-[#4b5563] pl-3.5 mt-0.5">{statusLabels[status] || 'Quiet'}</div>
                     )}
+                    {isArchived && editingSessionKey !== s.key && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          unhideSession(s.key)
+                          if ((s as any).id) unhideSession((s as any).id)
+                        }}
+                        className="absolute right-1.5 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 text-xs text-[#4b5563] hover:text-[#6366f1] transition-all px-1.5 py-0.5 rounded"
+                        title="Restore session"
+                      >
+                        ↩
+                      </button>
+                    )}
                   </div>
                 )
               })}
@@ -352,7 +407,11 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
       </div>
 
       {/* Main: chat pane(s) */}
-      <div className="flex-1 flex min-w-0">
+      <div
+        className="flex-1 flex min-w-0 relative"
+        onPointerMove={handlePanePointerMove}
+        onPointerUp={handlePanePointerUp}
+      >
         {activeSession ? (
           <>
             {localPanes.filter(Boolean).map((paneSession, i) =>
@@ -362,8 +421,19 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
                   sessionKey={paneSession}
                   paneIndex={i}
                   onClose={() => handleClosePane(i)}
+                  onDragStart={(e, label) => handlePaneDragStart(i, e, label)}
+                  isDragOver={dragOverPane === i && dragSourceRef.current !== i}
                 />
               ) : null
+            )}
+            {dragGhost && (
+              <div
+                className="pointer-events-none fixed z-50 flex items-center gap-2 px-4 py-2.5 rounded-xl border border-[#6366f1] bg-[#1a1d2e]/80 backdrop-blur-sm shadow-[0_8px_32px_rgba(99,102,241,0.35)] text-white text-sm font-medium"
+                style={{ left: dragGhost.x + 16, top: dragGhost.y - 20, transform: 'rotate(1.5deg)' }}
+              >
+                <span className="text-[#6366f1]">⠿</span>
+                <span className="max-w-[160px] truncate">{dragGhost.label || 'Pane'}</span>
+              </div>
             )}
           </>
         ) : (

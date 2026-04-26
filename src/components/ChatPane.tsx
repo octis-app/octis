@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { useGatewayStore, useSessionStore, useProjectStore, useLabelStore, useDraftStore, useHiddenStore, Session } from '../store/gatewayStore'
 import { authFetch } from '../lib/authFetch'
+import { useAuthStore } from '../store/authStore'
+import DecisionButtons from './DecisionButtons'
 
 // Quick Commands helpers
 const QUICK_COMMAND_DEFAULTS = {
@@ -29,7 +31,7 @@ function SessionCostBadge({ sessionKey }: { sessionKey: string }) {
   const exchangeCost = sessionMeta[sessionKey]?.lastExchangeCost ?? null
   if (exchangeCost == null) return null
 
-  // Per-exchange cost: signals context overhead for the most recent completed message
+  // Per-message cost overhead — color tells you when to start a new session
   let icon = '🟢'
   let level = 'Light'
   let pillClass = 'bg-emerald-900/40 text-emerald-400 border-emerald-700/40'
@@ -112,6 +114,7 @@ interface ChatPaneProps {
   onDrop?: () => void
   onDragEnd?: () => void
   isDragOver?: boolean
+  isFeatured?: boolean
 }
 
 // ─── Markdown renderer ────────────────────────────────────────────────────────
@@ -378,25 +381,30 @@ function isNoiseMsg(msg: ChatMessage): boolean {
   return false
 }
 
+// ─── Message cache (localStorage — survives pane unmount) ──────────────────────
+import { loadMsgCache, saveMsgCache } from '../lib/msgCache'
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, onFocus, isFocused, onDragStart, onDragOver, onDrop, onDragEnd, isDragOver, renameRequested }: ChatPaneProps) {
+export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, onFocus, isFocused, isFeatured, onDragStart, onDragOver, onDrop, onDragEnd, isDragOver, renameRequested }: ChatPaneProps) {
   const { send, sendChat, ws, connected, agentId } = useGatewayStore()
   const { setSessions, sessions, setLastRole, markStreaming: markSessionStreaming, incrementUnread, clearUnread, sessionMeta, consumePendingProjectPrefix, consumePendingProjectInit, setLastExchangeCost } = useSessionStore()
-  const { setCard } = useProjectStore()
+  const { setCard, getTag, getProjectEmoji } = useProjectStore()
   const { setLabel: saveLabelLocal, getLabel } = useLabelStore()
   const { setDraft, getDraft, clearDraft } = useDraftStore()
   // Per-session message cache - show instantly on switch, refresh silently behind the scenes
-  const messageCacheRef = useRef<Map<string, ChatMessage[]>>(new Map())
+  // Uses localStorage so cache survives pane unmount/remount (useRef would die on close)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const setMessagesAndCache = (updater: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[]), key?: string) => {
     setMessages(prev => {
       const next = typeof updater === 'function' ? updater(prev) : updater
-      if (key && next.length > 0) messageCacheRef.current.set(key, next)
+      if (key && next.length > 0) saveMsgCache(key, next)
       return next
     })
   }
   const [loadedKey, setLoadedKey] = useState<string | null>(null)
+  const [historyLimit, setHistoryLimit] = useState(200)
+  const [hasMore, setHasMore] = useState(false)
   const [input, setInput] = useState(() => (sessionKey ? getDraft(sessionKey) : ''))
   const [sessionCard, setSessionCard] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -414,8 +422,11 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   const preSendCostRef = useRef<number>(0) // session cost at time of last send
   const pendingOptimisticIdRef = useRef<number | null>(null) // id of current optimistic message
   const loadedSessionRef = useRef<string | null>(null) // session key for which history is currently loaded
-  const workingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null) // fallback: clear working after 90s
+  const workingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null) // fallback: clear working after 5 min max
   const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const runActiveRef = useRef(false)           // lifecycle:start→true, lifecycle:end→false
+  const lastEventTsRef = useRef(0)             // updated on every WS event
+  const [runQuiet, setRunQuiet] = useState(false) // run is active but no events for >60s
   // Show thinking indicator if: local state says working, OR the global session store says this
   // session is streaming (e.g. driven from another pane or another surface like Slack)
   const globalStreaming = sessionKey ? (sessionMeta[sessionKey]?.isStreaming ?? false) : false
@@ -426,8 +437,8 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   const awaitingRender = !isWorking && !globalStreaming &&
     lastVisibleMsg?.role === 'user' &&
     lastSentRef.current > 0 &&
-    (Date.now() - lastSentRef.current) < 120000
-  const showWorking = isWorking || globalStreaming || awaitingRender
+    (Date.now() - lastSentRef.current) < 300000
+  const showWorking = isWorking || globalStreaming || awaitingRender || runActiveRef.current
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const [noiseHidden, setNoiseHidden] = useState(() => {
     try {
@@ -439,6 +450,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   const bottomRef = useRef<HTMLDivElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const userScrolledUpRef = useRef(false)
+  const isInitialScrollRef = useRef(true) // true until first scroll after session load
 
   const toggleNoise = () =>
     setNoiseHidden((v) => {
@@ -448,6 +460,16 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
       } catch {}
       return next
     })
+
+  // "Quiet run" detector: runActive but no events for >60s → amber indicator
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const quiet = runActiveRef.current && !isWorking && !globalStreaming &&
+        lastEventTsRef.current > 0 && (Date.now() - lastEventTsRef.current > 60_000)
+      setRunQuiet(quiet)
+    }, 5000)
+    return () => clearInterval(interval)
+  }, [isWorking, globalStreaming])
 
   // Load chat history when session or ws changes
   // Clear unread count when this pane is active on a session
@@ -465,7 +487,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   // (Sidebar polls every 30s - without this, a newly-opened pane can wait up to 30s)
   useEffect(() => {
     if (!sessionKey || !connected) return
-    send({ type: 'req', id: `sessions-list-pane-${Date.now()}`, method: 'sessions.list', params: agentId ? { agentId } : {} })
+    send({ type: 'req', id: `sessions-list-pane-${Date.now()}`, method: 'sessions.list', params: {} })
   }, [sessionKey, connected, send])
 
   // Handle sent queue delivery confirmation outside of setMessages callbacks
@@ -482,7 +504,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   // Keep message cache fresh as messages update (so future visits to this session are instant)
   useEffect(() => {
     if (sessionKey && messages.length > 0 && loadedKey === sessionKey) {
-      messageCacheRef.current.set(sessionKey, messages)
+      saveMsgCache(sessionKey, messages)
     }
   }, [messages, sessionKey, loadedKey])
 
@@ -494,7 +516,9 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   }, [globalStreaming])
 
   useEffect(() => {
-    if (!sessionKey || !ws) return
+    // Wait for WS to be both set AND connected (readyState=OPEN).
+    // Without the connected check, send() fires while readyState=CONNECTING and silently drops.
+    if (!sessionKey || !ws || !connected) return
     const isSameSession = loadedSessionRef.current === sessionKey
     loadedSessionRef.current = sessionKey
     // Only wipe messages when switching to a different session.
@@ -502,9 +526,10 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     if (!isSameSession) {
       // Reset scroll state so new session always starts at the bottom
       userScrolledUpRef.current = false
+      isInitialScrollRef.current = true
       // Show cached messages instantly while fresh history loads in background
-      const cached = messageCacheRef.current.get(sessionKey)
-      if (cached && cached.length > 0) {
+      const cached = loadMsgCache(sessionKey)
+      if (cached.length > 0) {
         setMessages(cached)
       } else {
         setMessages([])
@@ -512,9 +537,9 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     }
     setLoadedKey(null)
     setSessionCard(null)
-    if (!isSameSession) setAutoRenamed(false)
+    if (!isSameSession) { setAutoRenamed(false); setHistoryLimit(200); setHasMore(false) }
     const reqId = `chat-history-${sessionKey}-${Date.now()}`
-    send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey, limit: 100 } })
+    send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey, limit: historyLimit } })
 
     const handleMsg = (event: MessageEvent) => {
       try {
@@ -556,12 +581,12 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             }
             // Fallback: if we've been waiting >90s with no lifecycle:end, clear it
             const waitedTooLong = lastSentRef.current > 0 && (Date.now() - lastSentRef.current) > 90 * 1000
-            if (waitedTooLong) {
+            if (waitedTooLong && !runActiveRef.current) {
               setIsWorking(false)
               setWorkingTool(null)
             }
             // Also clear if this is a session opened without a recent send (history load)
-            if (lastSentRef.current === 0 && msgTs > 0) {
+            if (lastSentRef.current === 0 && msgTs > 0 && !runActiveRef.current) {
               setIsWorking(false)
               setWorkingTool(null)
             }
@@ -608,13 +633,30 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               }
               return msgs // server confirmed all orphans — drop them cleanly
             }
-            // Always apply server list - this is the authoritative source.
-            // Skip only if count AND last ID both match (prevents skipping when duplicates
-            // inflated prev.length beyond what the server returned).
+            // Guard: poll limit (30 idle / 100 active) is smaller than history limit (200).
+            // Never replace a larger prev with a smaller poll result — that wipes loaded history.
+            // Gateway messages have id=undefined; use timestamp for dedup instead.
+            if (msgs.length < prev.length) {
+              const lastNew = msgs[msgs.length - 1]
+              const lastInPrev = prev[prev.length - 1]
+              // Fast-exit: if the last message is unchanged (same timestamp), nothing new.
+              const lastNewTs = getMsgTs(lastNew)
+              const lastInPrevTs = getMsgTs(lastInPrev)
+              if (lastNewTs > 0 && lastNewTs === lastInPrevTs) return prev
+              // Append only genuinely new messages (by timestamp).
+              const prevTs = new Set(prev.map(m => getMsgTs(m)).filter(ts => ts > 0))
+              const newOnes = msgs.filter(m => {
+                const ts = getMsgTs(m)
+                return ts === 0 || !prevTs.has(ts)
+              })
+              return newOnes.length > 0 ? [...prev, ...newOnes] : prev
+            }
+            // Standard: poll returned at least as many messages as we have.
+            // Fast-exit if the last message (by timestamp) is identical — nothing new.
             const lastNew = msgs[msgs.length - 1]
             const lastInPrev = prev[prev.length - 1]
-            if (msgs.length === prev.length && lastNew?.id !== undefined && lastNew?.id !== null && lastNew.id === lastInPrev?.id) {
-              return prev // same count + same last ID = nothing new, safe to skip
+            if (getMsgTs(lastNew) > 0 && getMsgTs(lastNew) === getMsgTs(lastInPrev) && msgs.length === prev.length) {
+              return prev
             }
             return msgs
           })
@@ -658,7 +700,9 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             }
           }
           // Cache so next visit to this session is instant
-          if (msgs.length > 0) messageCacheRef.current.set(sessionKey, msgs)
+          if (msgs.length > 0) saveMsgCache(sessionKey, msgs)
+          // Show "load older" button if response filled the limit (more messages may exist)
+          setHasMore(msgs.length >= historyLimit)
           setMessages((prev) => {
             if (msgs.length === 0) return prev
             const pendingOid = pendingOptimisticIdRef.current
@@ -701,11 +745,14 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
           // -- Lifecycle events: authoritative run start/end --
           if (stream === 'lifecycle') {
             const phase = (payload.data as Record<string, unknown>)?.phase as string | undefined
+            lastEventTsRef.current = Date.now()
             if (phase === 'start') {
+              runActiveRef.current = true
               setIsWorking(true)
               if (workingTimeoutRef.current) clearTimeout(workingTimeoutRef.current)
-              workingTimeoutRef.current = setTimeout(() => { setIsWorking(false); setWorkingTool(null) }, 90_000)
+              workingTimeoutRef.current = setTimeout(() => { runActiveRef.current = false; setIsWorking(false); setWorkingTool(null) }, 10 * 60 * 1000)
             } else if (phase === 'end' || phase === 'error') {
+              runActiveRef.current = false
               setIsWorking(false)
               setWorkingTool(null)
               if (workingTimeoutRef.current) { clearTimeout(workingTimeoutRef.current); workingTimeoutRef.current = null }
@@ -717,17 +764,19 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
           if (stream === 'tool') {
             const phase = (payload.data as Record<string, unknown>)?.phase as string | undefined
             const toolName = (payload.data as Record<string, unknown>)?.name as string | undefined
+            lastEventTsRef.current = Date.now()
             if (phase === 'start') {
               setIsWorking(true)
               if (toolName) setWorkingTool(toolName)
               if (workingTimeoutRef.current) clearTimeout(workingTimeoutRef.current)
-              workingTimeoutRef.current = setTimeout(() => { setIsWorking(false); setWorkingTool(null) }, 90_000)
+              workingTimeoutRef.current = setTimeout(() => { setIsWorking(false); setWorkingTool(null) }, 5 * 60 * 1000)
             }
             return
           }
 
           // -- Delta: streaming tokens --
           if (evtState === 'delta') {
+            lastEventTsRef.current = Date.now()
             setIsWorking(true)
             return
           }
@@ -848,7 +897,31 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
 
     ws.addEventListener('message', handleMsg)
     return () => ws.removeEventListener('message', handleMsg)
-  }, [sessionKey, ws, send, setCard])
+  }, [sessionKey, ws, connected, send, setCard, historyLimit])
+
+  // Auto-refresh on return: if tab was hidden and user comes back, immediately fetch history.
+  // Prevents the "no reply after 1h" issue where idle poll was paused while hidden.
+  useEffect(() => {
+    if (!sessionKey || !ws || !connected) return
+    let hiddenAt = 0
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        hiddenAt = Date.now()
+        return
+      }
+      // Refresh on return from any meaningful absence (>10s).
+      // Use chat-poll- prefix so the response goes through the existing poll handler.
+      const awayMs = hiddenAt > 0 ? Date.now() - hiddenAt : 0
+      if (awayMs > 10_000) {
+        // Reset scroll so the latest messages scroll into view on return.
+        userScrolledUpRef.current = false
+        const pollId = `chat-poll-${sessionKey}-${Date.now()}`
+        send({ type: 'req', id: pollId, method: 'chat.history', params: { sessionKey, limit: 100 } })
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => document.removeEventListener('visibilitychange', handleVisibility)
+  }, [sessionKey, ws, connected, send])
 
   // Polling fallback — two-tier: fast only while waiting for reply, slow otherwise.
   // Was 2s unconditional per pane: 3 open panes = 90 WS requests/min.
@@ -932,7 +1005,17 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
 
   useEffect(() => {
     if (!userScrolledUpRef.current) {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+      if (isInitialScrollRef.current) {
+        // Initial load: use rAF to ensure DOM is fully painted, then jump instantly to bottom
+        requestAnimationFrame(() => {
+          if (scrollContainerRef.current) {
+            scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight
+          }
+          isInitialScrollRef.current = false
+        })
+      } else {
+        bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+      }
     }
   }, [messages])
 
@@ -1238,7 +1321,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
       ? imageFiles.map(f => ({ type: 'image', mimeType: f.mimeType, content: f.dataUrl.split(',')[1] }))
       : undefined
     // sendChat: WS-first, HTTP fallback if WS is dead/zombie
-    void sendChat({ sessionKey, message: msg, idempotencyKey, deliver: false })
+    void sendChat({ sessionKey, message: msg, idempotencyKey, deliver: false, attachments: attachments })
     // Use structured content for optimistic message so files render immediately
     const optimisticContent: MessageContent = pendingFiles.length > 0
       ? [
@@ -1545,7 +1628,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   return (
     <div
       data-pane-index={_paneIndex}
-      className={`flex flex-1 min-w-0 border-r border-[#2a3142] transition-all relative ${isFocused ? 'shadow-[inset_3px_0_0_#818cf8,inset_20px_0_32px_rgba(129,140,248,0.08)]' : ''}`}
+      className={`flex min-w-0 border-r border-[#2a3142] transition-all relative ${isFeatured ? 'flex-[3]' : 'flex-1'} ${isFocused ? 'shadow-[inset_3px_0_0_#818cf8,inset_20px_0_32px_rgba(129,140,248,0.08)]' : ''}`}
       onMouseDown={(e) => {
         onFocus?.()
         // If clicking a non-input area, blur any active input so bare-key hotkeys (E, R, N) fire
@@ -1560,12 +1643,17 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
         <div className="pointer-events-none absolute inset-0 z-40 border-l-2 border-[#6366f1] bg-[#6366f1]/[0.07] shadow-[inset_4px_0_20px_rgba(99,102,241,0.15)]" />
       )}
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-        {/* Status bar at top: animated purple when running, solid green when idle */}
+        {/* Status bar at top: animated purple when running, amber when quiet-run, solid green when idle */}
         <div className="h-0.5 w-full shrink-0 overflow-hidden">
-          {showWorking ? (
+          {showWorking && !runQuiet ? (
             <div
               className="h-full bg-gradient-to-r from-transparent via-[#a855f7] to-transparent"
               style={{ animation: 'slide 1.4s ease-in-out infinite', width: '60%' }}
+            />
+          ) : runQuiet ? (
+            <div
+              className="h-full bg-gradient-to-r from-transparent via-[#f59e0b] to-transparent"
+              style={{ animation: 'slide 2s ease-in-out infinite', width: '60%' }}
             />
           ) : (
             <div className="h-full w-full bg-[#22c55e]" />
@@ -1590,7 +1678,11 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             >⠿</div>
             <div className="group flex items-center gap-1.5 flex-1 min-w-0">
               {showWorking && (
-                <span className="w-2 h-2 rounded-full bg-[#a855f7] animate-pulse shrink-0" title={workingTool ? `Running: ${workingTool}` : 'Working...'} />
+                <span
+                  className="w-2 h-2 rounded-full animate-pulse shrink-0"
+                  style={{ background: runQuiet ? '#f59e0b' : '#a855f7' }}
+                  title={runQuiet ? 'Running quietly (no events >60s)' : workingTool ? `Running: ${workingTool}` : 'Working...'}
+                />
               )}
               {labelEditing ? (
                 <input
@@ -1606,6 +1698,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                 />
               ) : (
                 <>
+                  {(() => { const slug = getTag(sessionKey).project; const emoji = slug ? getProjectEmoji(slug) : ''; return emoji ? <span className="text-[13px] shrink-0 leading-none" title={slug}>{emoji}</span> : null })()}
                   <span
                     className="text-sm font-medium text-white truncate leading-none"
                     title={sessionKey}
@@ -1613,7 +1706,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                     {displayName}
                   </span>
                   <button
-                    className="opacity-40 hover:opacity-100 transition-opacity text-[11px] text-[#6b7280] hover:text-indigo-400 shrink-0 px-0.5"
+                    className="opacity-65 hover:opacity-100 transition-opacity text-[11px] text-[#6b7280] hover:text-indigo-400 shrink-0 px-0.5"
                     title="AI auto-rename"
                     disabled={autoNaming}
                     onClick={() => { void handleAutoRename() }}
@@ -1622,13 +1715,14 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                   </button>
                 </>
               )}
-              {showWorking && workingTool && (
+              {runQuiet && (
+                <span className="text-[10px] text-[#f59e0b] shrink-0 truncate max-w-[140px] animate-pulse">Running quietly…</span>
+              )}
+              {!runQuiet && showWorking && workingTool && (
                 <span className="text-[10px] text-[#a855f7] shrink-0 truncate max-w-[120px]">{workingTool}...</span>
               )}
             </div>
-            {!showWorking && lastMsgTime && (
-              <span className="text-[10px] text-[#4b5563] shrink-0" title="Last message">{lastMsgTime}</span>
-            )}
+
             {lastHeartbeat && (
               <span
                 title={`Last heartbeat: ${lastHeartbeat.ts.toLocaleTimeString()}`}
@@ -1739,7 +1833,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
         {/* Messages */}
         <div
           ref={scrollContainerRef}
-          className="flex-1 overflow-y-auto px-4 py-3 space-y-3"
+          className="flex-1 overflow-y-auto px-4 py-3 space-y-3 chat-scroll"
           onScroll={() => {
             const el = scrollContainerRef.current
             if (!el) return
@@ -1748,6 +1842,16 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             userScrolledUpRef.current = !atBottom
           }}
         >
+          {hasMore && (
+            <div className="flex justify-center py-2">
+              <button
+                onClick={() => setHistoryLimit(prev => prev + 100)}
+                className="text-xs text-[#6b7280] hover:text-[#a5b4fc] px-3 py-1 rounded-lg hover:bg-[#2a3142] transition-colors"
+              >
+                ↑ Load older messages
+              </button>
+            </div>
+          )}
           {(loadedKey === sessionKey || messages.length > 0 ? messages : [])
             .filter(
               (msg) => !isHeartbeatMsg(msg) && !(noiseHidden && isNoiseMsg(msg))
@@ -1836,6 +1940,15 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                       {fmtMsgTs(msgTs)}
                     </div>
                   )}
+                  {msg.role === 'assistant' && (
+                    <DecisionButtons
+                      text={extractText(msg.content)}
+                      onSelect={(letter) => {
+                        if (!sessionKey) return
+                        void sendChat({ sessionKey, message: letter })
+                      }}
+                    />
+                  )}
                 </div>
               </div>
               </>
@@ -1843,14 +1956,25 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             })}
           {showWorking && (
             <div className="flex gap-2 justify-start">
-              <div className="bg-[#1e2330] text-[#6b7280] px-3 py-2 rounded-xl rounded-bl-sm text-xs flex items-center gap-2">
+              <div
+                className="px-3 py-2 rounded-xl rounded-bl-sm text-xs flex items-center gap-2"
+                style={{
+                  background: runQuiet ? '#451a03' : '#1e2330',
+                  color: runQuiet ? '#fbbf24' : '#6b7280',
+                }}
+              >
                 <span className="inline-flex gap-0.5">
-                  <span className="w-1.5 h-1.5 bg-[#6366f1] rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                  <span className="w-1.5 h-1.5 bg-[#6366f1] rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                  <span className="w-1.5 h-1.5 bg-[#6366f1] rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                  <span className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ background: runQuiet ? '#f59e0b' : '#6366f1', animationDelay: '0ms' }} />
+                  <span className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ background: runQuiet ? '#f59e0b' : '#6366f1', animationDelay: '150ms' }} />
+                  <span className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ background: runQuiet ? '#f59e0b' : '#6366f1', animationDelay: '300ms' }} />
                 </span>
-                <span>{workingTool ? `${workingTool}...` : 'thinking...'}</span>
+                <span>{runQuiet ? 'Running quietly…' : workingTool ? `${workingTool}...` : 'thinking...'}</span>
               </div>
+            </div>
+          )}
+          {messages.length > 0 && lastMsgTime && (
+            <div className="flex justify-end pr-1 -mt-1 pb-1">
+              <span className="text-[9px] text-[#3a4152] select-none">· {lastMsgTime}</span>
             </div>
           )}
           <div ref={bottomRef} />
@@ -1938,7 +2062,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               ref={textareaRef}
               className="flex-1 bg-[#0f1117] border border-[#2a3142] rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-[#6366f1] placeholder-[#4b5563] resize-none overflow-y-auto leading-relaxed"
               style={{ minHeight: '38px', maxHeight: '150px' }}
-              placeholder="Message... (Enter to send, Shift+Enter for new line, paste image or attach PDF)"
+              placeholder="Message…"
               value={input}
               rows={1}
               onChange={(e) => {
@@ -1964,7 +2088,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             />
             <button
               onClick={handleSend}
-              className="bg-[#6366f1] hover:bg-[#818cf8] text-white rounded-lg px-4 text-sm font-medium transition-colors self-end"
+              className="bg-[#6366f1] hover:bg-[#818cf8] text-white rounded-lg px-4 text-sm font-medium transition-colors self-end md:hidden"
               style={{ height: '38px' }}
             >
               ↑

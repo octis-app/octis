@@ -1,0 +1,6 @@
+[
+  { "id": "main", "name": "Byte", "emoji": "🦞", "description": "Sonnet — default" },
+  { "id": "haiku", "name": "Haiku", "emoji": "⚡", "description": "Fast & lightweight" },
+  { "id": "minimax", "name": "MiniMax", "emoji": "🔧", "description": "Code & scripts" },
+  { "id": "gemini", "name": "Gemini", "emoji": "✨", "description": "Bulk tasks" }
+]

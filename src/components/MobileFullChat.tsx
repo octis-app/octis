@@ -1,6 +1,8 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
 import { useGatewayStore, useSessionStore, useProjectStore, useLabelStore, useDraftStore, Session } from '../store/gatewayStore'
 import { authFetch } from '../lib/authFetch'
+import { useAuthStore } from '../store/authStore'
+import DecisionButtons from './DecisionButtons'
 
 // Quick Commands helpers
 const QUICK_COMMAND_DEFAULTS = {
@@ -315,7 +317,9 @@ async function compressImage(dataUrl: string, mimeType: string): Promise<{ dataU
 // Cache utilities
 const CACHE_PREFIX = 'octis-msg-cache-'
 const MAX_CACHED_SESSIONS = 20
-const MAX_MESSAGES_PER_SESSION = 60
+const MAX_MESSAGES_PER_SESSION = 50
+const DEFAULT_HISTORY_LIMIT = 50
+const LOAD_MORE_INCREMENT = 50
 
 function getMsgCache(sessionKey: string): ChatMessage[] | null {
   try {
@@ -375,6 +379,8 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
   const [editing, setEditing] = useState(false)
   const [renameValue, setRenameValue] = useState('')
   const [autoRenaming, setAutoRenaming] = useState(false)
+  const [historyLimit, setHistoryLimit] = useState(DEFAULT_HISTORY_LIMIT)
+  const [hasMore, setHasMore] = useState(false)
   const [showArchiveSheet, setShowArchiveSheet] = useState(false)
   const [copiedMsgId, setCopiedMsgId] = useState<string | number | null>(null)
   const [swipeHint, setSwipeHint] = useState<string | null>(null)
@@ -536,6 +542,26 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const outerRef = useRef<HTMLDivElement>(null)
 
+  // HTTP history fetch — declared EARLY (before its first useEffect dep array) to avoid TDZ on iOS.
+  // Must be declared before any useEffect that lists it in deps, or React evaluates dep array
+  // during render before the const is initialized → "Cannot access before initialization".
+  const fetchHistoryHttp = useCallback(async (limit: number) => {
+    if (!session?.key) return
+    try {
+      const r = await fetch(`${API}/api/chat-history?sessionKey=${encodeURIComponent(session.key)}&limit=${limit}`, { credentials: 'include' })
+      if (!r.ok) return
+      const data = await r.json() as { ok: boolean; messages?: ChatMessage[] }
+      if (!data.ok || !data.messages?.length) return
+      setMessages(data.messages)
+      setMsgCache(session.key, data.messages)
+      const last = data.messages[data.messages.length - 1]
+      if (last?.role === 'assistant') {
+        const txt = typeof last.content === 'string' ? last.content.trim() : ''
+        if (txt && txt !== 'HEARTBEAT_OK') setSending(false)
+      }
+    } catch { /* best-effort */ }
+  }, [session?.key]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // Reconnect + re-fetch when returning from background.
   // Always force reconnect — WS can show readyState=OPEN while actually dead (half-open).
   // Pin body background to chat color while mounted — prevents black flash on iOS keyboard dismiss
@@ -580,16 +606,30 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
   }, [])
 
   useEffect(() => {
+    let hiddenAt = 0
     const handleVisibility = () => {
-      if (document.visibilityState !== 'visible') return
-      // Force a fresh connection regardless of apparent WS state.
-      // connect() closes the old socket and opens a new one; the ws-change
-      // effect below will re-fetch history once the new connection is authed.
-      connect()
+      if (document.visibilityState === 'hidden') {
+        hiddenAt = Date.now()
+        return
+      }
+      // Returning to visible
+      const awayMs = hiddenAt > 0 ? Date.now() - hiddenAt : 0
+      if (connected && ws && ws.readyState === WebSocket.OPEN) {
+        // WS is alive — just refresh history immediately (no reconnect needed)
+        // If away >60s, use larger limit to catch any missed replies
+        const limit = awayMs > 60_000 ? historyLimit : 30
+        send({ type: 'req', id: `chat-history-return-${session?.key}-${Date.now()}`, method: 'chat.history', params: { sessionKey: session?.key, limit } })
+      } else {
+        // WS dropped — fetch history via HTTP immediately so messages appear right away,
+        // then reconnect in parallel (ws-change effect will also re-fetch once live).
+        const limit = awayMs > 60_000 ? historyLimit : 30
+        void fetchHistoryHttp(limit)
+        connect()
+      }
     }
     document.addEventListener('visibilitychange', handleVisibility)
     return () => document.removeEventListener('visibilitychange', handleVisibility)
-  }, [connect])
+  }, [connect, connected, ws, session?.key, send, fetchHistoryHttp])
 
   // Claim session ownership when session opens
   useEffect(() => {
@@ -627,11 +667,14 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
       setMessages([])
       setLoadedKey(null)
     }
+    // Reset limit + hasMore on session switch
+    setHistoryLimit(DEFAULT_HISTORY_LIMIT)
+    setHasMore(false)
 
     // Use proper req/method format (not old type-based format)
     const reqId = `chat-history-${session.key}-${Date.now()}`
     currentHistoryReqIdRef.current = reqId
-    send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey: session.key, limit: 100 } })
+    send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey: session.key, limit: DEFAULT_HISTORY_LIMIT } })
 
     const handleMsg = (event: MessageEvent) => {
       try {
@@ -749,6 +792,8 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
           // indicator and stops the fast poll mid-response.
           setMessages(finalMsgs)
           setLoadedKey(session.key)
+          // Show load-more button if we got a full page (more may exist)
+          setHasMore(finalMsgs.length >= historyLimit)
           // Write to cache after receiving fresh history
           setMsgCache(session.key, finalMsgs)
         }
@@ -814,26 +859,8 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     if (!connected || !session?.key || !ws) return
     const reqId = `chat-history-reconnect-${session.key}-${Date.now()}`
     currentHistoryReqIdRef.current = reqId
-    send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey: session.key, limit: 100 } })
+    send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey: session.key, limit: historyLimit } })
   }, [connected, session?.key]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // HTTP history fetch — used when WS is dead. Returns messages directly without WS.
-  const fetchHistoryHttp = useCallback(async (limit: number) => {
-    if (!session?.key) return
-    try {
-      const r = await fetch(`${API}/api/chat-history?sessionKey=${encodeURIComponent(session.key)}&limit=${limit}`, { credentials: 'include' })
-      if (!r.ok) return
-      const data = await r.json() as { ok: boolean; messages?: ChatMessage[] }
-      if (!data.ok || !data.messages?.length) return
-      setMessages(data.messages)
-      setMsgCache(session.key, data.messages)
-      const last = data.messages[data.messages.length - 1]
-      if (last?.role === 'assistant') {
-        const txt = typeof last.content === 'string' ? last.content.trim() : ''
-        if (txt && txt !== 'HEARTBEAT_OK') setSending(false)
-      }
-    } catch { /* best-effort */ }
-  }, [session?.key, API])
 
   // Idle poll (15s) — WS when connected, HTTP when WS is dead.
   // Runs regardless of WS state so replies always arrive even when disconnected.
@@ -964,7 +991,10 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     if (sendingRef.current && !overrideMsg) {
       setQueuedMessage(effectiveInput.trim())
       queuedMessageRef.current = effectiveInput.trim()
+      if (draftTimerRef.current) clearTimeout(draftTimerRef.current)
+      draftTimerRef.current = null
       setInput('')
+      clearDraft(session.key)
       return
     }
     let msg = effectiveInput.trim()
@@ -1023,7 +1053,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
         ]
       : msg
     // sendChat uses WS if alive, falls back to HTTP if WS is dead/zombie
-    sendChat({ sessionKey: session.key, message: msg, idempotencyKey, deliver: false })
+    sendChat({ sessionKey: session.key, message: msg, idempotencyKey, deliver: false, attachments: attachments })
     userScrolledUpRef.current = false
     setPendingFiles([])
     const optimisticId = Date.now()
@@ -1044,6 +1074,8 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
       })) return prev
       return [...prev, { role: 'user', content: optimisticContent as string, id: optimisticId }]
     })
+    if (draftTimerRef.current) clearTimeout(draftTimerRef.current)
+    draftTimerRef.current = null
     setInput('')
     clearDraft(session.key)
     // Reset textarea height to 1 line after send
@@ -1351,6 +1383,18 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
           if (!el) return
           // With flex-col-reverse, scrollTop=0 is the bottom. User scrolled up = scrollTop > 80
           userScrolledUpRef.current = el.scrollTop > 80
+          // Auto-trigger load-more when user scrolls near the top (visual top = high scrollTop in col-reverse)
+          if (hasMore && loadedKey === session?.key && !sending) {
+            const nearTop = el.scrollTop >= el.scrollHeight - el.clientHeight - 120
+            if (nearTop) {
+              const newLimit = historyLimit + LOAD_MORE_INCREMENT
+              setHistoryLimit(newLimit)
+              setHasMore(false)
+              const reqId = `chat-history-loadmore-${session?.key}-${Date.now()}`
+              currentHistoryReqIdRef.current = reqId
+              send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey: session?.key, limit: newLimit } })
+            }
+          }
         }}
       >
         {/* Loading indicator when no messages and history not yet loaded */}
@@ -1377,7 +1421,9 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
             : []
           // Reverse so newest is first in DOM — flex-col-reverse makes it appear at visual bottom
           const filtered = showMessages.filter((msg) => !isHeartbeatMsg(msg) && !(noiseHidden && isNoiseMsg(msg)) && !(msg.role === 'assistant' && extractText(msg.content).trimStart().startsWith('📁 **')))
-          return [...filtered].reverse().map((msg, i) => (
+          const reversed = [...filtered].reverse()
+          return (<>
+            {reversed.map((msg, i) => (
             <div
               key={msg.id !== undefined ? String(msg.id) : i}
               className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
@@ -1471,9 +1517,34 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
                     </div>
                   )
                 })()}
+                {msg.role === 'assistant' && (
+                  <DecisionButtons
+                    text={extractText(msg.content)}
+                    onSelect={(letter) => handleSend(letter)}
+                  />
+                )}
               </div>
             </div>
-          ))
+          ))}
+            {/* Load-more: LAST in DOM = visual TOP in flex-col-reverse */}
+            {hasMore && loadedKey === session?.key && (
+              <div className="flex justify-center py-3">
+                <button
+                  onClick={() => {
+                    const newLimit = historyLimit + LOAD_MORE_INCREMENT
+                    setHistoryLimit(newLimit)
+                    setHasMore(false)
+                    const reqId = `chat-history-loadmore-${session?.key}-${Date.now()}`
+                    currentHistoryReqIdRef.current = reqId
+                    send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey: session?.key, limit: newLimit } })
+                  }}
+                  className="text-xs text-[#6366f1] bg-[#1e2330] px-4 py-2 rounded-full border border-[#6366f1]/30 active:opacity-70"
+                >
+                  ↑ Load older
+                </button>
+              </div>
+            )}
+          </>)
         })()}
 
       </div>
