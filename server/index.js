@@ -1,7 +1,7 @@
 import express from 'express'
 import cors from 'cors'
 import fs from 'fs/promises'
-import { readFileSync, mkdirSync } from 'fs'
+import { readFileSync, mkdirSync, writeFileSync } from 'fs'
 import path from 'path'
 import { createRequire } from 'module'
 import crypto from 'crypto'
@@ -238,8 +238,10 @@ app.get('/api/health', (req, res) => res.json({ ok: true }))
 app.get('/api/agents', requireAuth, (req, res) => {
   try {
     const agentsFile = path.join(__serverDir, 'config', 'agents.json')
-    const staticAgents = JSON.parse(readFileSync(agentsFile, 'utf8'))
+    const raw = JSON.parse(readFileSync(agentsFile, 'utf8'))
+    const staticAgents = Array.isArray(raw) ? raw : (raw.agents || [])
     const staticMap = Object.fromEntries(staticAgents.map(a => [a.id, a]))
+    const renameAgentId = raw.renameAgentId || 'fast'
 
     // Try to read openclaw.json for live agent list
     let liveAgents = []
@@ -274,15 +276,26 @@ app.get('/api/agents', requireAuth, (req, res) => {
           name: override.name || la.name || la.id,
           emoji: override.emoji || '🤖',
           description: override.description || '',
+          visibleInPicker: override.visibleInPicker ?? true,
+          soul: override.soul || '',
           model: friendlyModel(la.model?.primary || la.model || defaultModel),
           isPrimary: la.id === primaryAgentId,
         }
       })
     } else {
-      merged = staticAgents.map(a => ({ ...a, model: a.description?.match(/—\s*(.+)/)?.[1] || 'Default', isPrimary: a.id === primaryAgentId }))
+      merged = staticAgents.map(a => ({ 
+        id: a.id,
+        name: a.name || a.id,
+        emoji: a.emoji || '🤖', 
+        description: a.description || '',
+        visibleInPicker: a.visibleInPicker ?? true,
+        soul: a.soul || '',
+        model: a.description?.match(/—\s*(.+)/)?.[1] || 'Default', 
+        isPrimary: a.id === primaryAgentId 
+      }))
     }
 
-    res.json({ agents: merged })
+    res.json({ agents: merged, renameAgentId })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
@@ -290,17 +303,60 @@ app.get('/api/agents', requireAuth, (req, res) => {
 
 app.patch('/api/agents/:id/meta', requireAuth, (req, res) => {
   try {
-    const { emoji, description } = req.body
+    const { emoji, description, name, model, soul, visibleInPicker } = req.body
     const agentsFile = path.join(__serverDir, 'config', 'agents.json')
-    const agents = JSON.parse(readFileSync(agentsFile, 'utf8'))
-    const idx = agents.findIndex(a => a.id === req.params.id)
+    const raw = JSON.parse(readFileSync(agentsFile, 'utf8'))
+    const agentsList = Array.isArray(raw) ? raw : (raw.agents || [])
+    const renameAgentId = raw.renameAgentId || 'fast'
+    
+    const idx = agentsList.findIndex(a => a.id === req.params.id)
     if (idx === -1) {
-      agents.push({ id: req.params.id, name: req.params.id, emoji: emoji || '🤖', description: description || '' })
+      agentsList.push({ 
+        id: req.params.id, 
+        name: name || req.params.id, 
+        emoji: emoji || '🤖', 
+        description: description || '', 
+        visibleInPicker: visibleInPicker ?? true, 
+        soul: soul || '' 
+      })
     } else {
-      if (emoji !== undefined) agents[idx].emoji = emoji
-      if (description !== undefined) agents[idx].description = description
+      if (emoji !== undefined) agentsList[idx].emoji = emoji
+      if (description !== undefined) agentsList[idx].description = description
+      if (name !== undefined) agentsList[idx].name = name
+      if (soul !== undefined) agentsList[idx].soul = soul
+      if (visibleInPicker !== undefined) agentsList[idx].visibleInPicker = visibleInPicker
+      // model change: update openclaw.json agents.list[id].model
+      if (model !== undefined) {
+        agentsList[idx].model = model  // store in agents.json for display
+        try {
+          const clawPath = path.join(HOME, '.openclaw', 'openclaw.json')
+          const claw = JSON.parse(readFileSync(clawPath, 'utf8'))
+          const agentEntry = (claw.agents?.list || []).find(a => a.id === req.params.id)
+          if (agentEntry) {
+            agentEntry.model = model
+            writeFileSync(clawPath, JSON.stringify(claw, null, 2))
+          }
+        } catch (e) {
+          console.warn('[octis] Could not update openclaw.json model:', e.message)
+        }
+      }
     }
-    writeFileSync(agentsFile, JSON.stringify(agents, null, 2))
+    
+    writeFileSync(agentsFile, JSON.stringify({ renameAgentId, agents: agentsList }, null, 2))
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.patch('/api/agents-config', requireAuth, (req, res) => {
+  try {
+    const { renameAgentId } = req.body
+    const agentsFile = path.join(__serverDir, 'config', 'agents.json')
+    const raw = JSON.parse(readFileSync(agentsFile, 'utf8'))
+    const agentsList = Array.isArray(raw) ? [] : (raw.agents || [])
+    const config = { renameAgentId: renameAgentId || raw.renameAgentId || 'fast', agents: agentsList }
+    writeFileSync(agentsFile, JSON.stringify(config, null, 2))
     res.json({ ok: true })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -373,10 +429,22 @@ app.post('/api/session-autoname', async (req, res) => {
 
     const prompt = `Generate a 3-5 word session title for this conversation. Reply with ONLY the title — no quotes, no punctuation, no explanation.\nExamples: Octis Sidebar Layout Fixes | Sage GL Batch Push | Centurion Deal Analysis\n\n${excerpt}\n\nTitle:`
 
+    // Get agent config to determine the renaming model
+    const agentsFile = path.join(__serverDir, 'config', 'agents.json')
+    let renameModel = process.env.OCTIS_RENAME_MODEL || 'openrouter/google/gemini-2.5-flash'
+    try {
+      const agentsConfig = JSON.parse(readFileSync(agentsFile, 'utf8'))
+      const renameId = agentsConfig.renameAgentId || 'fast'
+      // Look up model from openclaw.json
+      const clawConfig = JSON.parse(readFileSync(path.join(HOME, '.openclaw', 'openclaw.json'), 'utf8'))
+      const renameAgent = (clawConfig.agents?.list || []).find(a => a.id === renameId)
+      if (renameAgent?.model) renameModel = typeof renameAgent.model === 'string' ? renameAgent.model : (renameAgent.model?.primary || renameModel)
+    } catch {}
+
     const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${openrouterKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: req.body.model || process.env.OCTIS_RENAME_MODEL || 'meta-llama/llama-3.2-3b-instruct', max_tokens: 20, messages: [{ role: 'user', content: prompt }] }),
+      body: JSON.stringify({ model: renameModel, max_tokens: 20, messages: [{ role: 'user', content: prompt }] }),
       signal: AbortSignal.timeout(8000),
     })
     const data = await r.json()

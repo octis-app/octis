@@ -1225,7 +1225,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
       const res = await fetch(`${API}/api/session-autoname`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: slim, model: localStorage.getItem('octis-rename-model') || undefined }),
+        body: JSON.stringify({ messages: slim }),
       })
       const data = await res.json() as { label?: string }
       if (data.label) {

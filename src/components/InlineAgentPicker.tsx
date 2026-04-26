@@ -8,9 +8,17 @@ interface InlineAgentPickerProps {
 }
 
 export default function InlineAgentPicker({ agents, selectedId, onSelect, onClose }: InlineAgentPickerProps) {
+  const visible = agents.filter(a => a.visibleInPicker !== false)
+  
+  // Automatically select the agent if only one is visible
+  if (visible.length === 1 && agents.length > 1) {
+    onSelect(visible[0].id)
+    return null
+  }
+  
   return (
     <div className="flex items-center gap-2 p-2 bg-[#1e2333] border border-[#2a3142] rounded-xl overflow-x-auto shrink-0">
-      {agents.map(agent => (
+      {visible.map(agent => (
         <button
           key={agent.id}
           onClick={() => onSelect(agent.id)}
