@@ -11,6 +11,7 @@ interface Project {
   description: string
   memory_file: string
   position: number
+  hide_from_sessions?: number
 }
 
 interface ProjectsGridProps {
@@ -83,9 +84,9 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
         const list = d.projects || []
         setProjects(list)
         setLoading(false)
-        // Publish emoji/name/color to global store so Sidebar + pills can prefix sessions
-        const meta: Record<string, { emoji: string; name: string; color: string }> = {}
-        for (const p of list) meta[p.slug] = { emoji: p.emoji || '📁', name: p.name, color: p.color || '#6366f1' }
+        // Publish emoji/name/color/hideFromSessions to global store so Sidebar + pills can prefix sessions
+        const meta: Record<string, { emoji: string; name: string; color: string; hideFromSessions?: boolean }> = {}
+        for (const p of list) meta[p.slug] = { emoji: p.emoji || '📁', name: p.name, color: p.color || '#6366f1', hideFromSessions: !!p.hide_from_sessions }
         setProjectMeta(meta)
       })
       .catch(() => setLoading(false))
@@ -347,9 +348,39 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
                   <span className="text-[#4b5563] text-xs">
                     {count === 0 ? 'No sessions' : `${count} session${count !== 1 ? 's' : ''}`}
                   </span>
-                  {lastActivity && (
-                    <span className="text-[#4b5563] text-xs">{formatAgo(lastActivity)}</span>
-                  )}
+                  <div className="flex items-center gap-2">
+                    {lastActivity && (
+                      <span className="text-[#4b5563] text-xs">{formatAgo(lastActivity)}</span>
+                    )}
+                    {/* Hide from Sessions toggle */}
+                    <button
+                      type="button"
+                      title={project.hide_from_sessions ? 'Shown only in Projects tab (click to show in Sessions)' : 'Click to hide from Sessions tab'}
+                      onClick={async (e) => {
+                        e.stopPropagation()
+                        const newVal = project.hide_from_sessions ? 0 : 1
+                        await fetch(`${API}/api/projects/${project.id}`, {
+                          method: 'PATCH',
+                          headers: { 'Content-Type': 'application/json' },
+                          credentials: 'include',
+                          body: JSON.stringify({ hide_from_sessions: newVal }),
+                        })
+                        setProjects(prev => prev.map(p => p.id === project.id ? { ...p, hide_from_sessions: newVal } : p))
+                        // Refresh projectMeta in global store
+                        const updatedList = projects.map(p => p.id === project.id ? { ...p, hide_from_sessions: newVal } : p)
+                        const meta: Record<string, { emoji: string; name: string; color: string; hideFromSessions?: boolean }> = {}
+                        for (const p of updatedList) meta[p.slug] = { emoji: p.emoji || '📁', name: p.name, color: p.color || '#6366f1', hideFromSessions: !!p.hide_from_sessions }
+                        setProjectMeta(meta)
+                      }}
+                      className={`opacity-0 group-hover:opacity-100 transition-all text-[10px] px-1.5 py-0.5 rounded ${
+                        project.hide_from_sessions
+                          ? 'bg-[#6366f1]/20 text-[#818cf8]'
+                          : 'bg-[#2a3142] text-[#4b5563] hover:text-[#6b7280]'
+                      }`}
+                    >
+                      {project.hide_from_sessions ? '📂 hidden' : '💬'}
+                    </button>
+                  </div>
                 </div>
               </div>
             )

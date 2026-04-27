@@ -5,10 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "node scripts/check-tzdeps.cjs && vite build",
     "preview": "vite preview",
     "server": "node server/index.js",
-    "dev:all": "concurrently \"npm run dev\" \"npm run server\""
+    "dev:all": "concurrently \"npm run dev\" \"npm run server\"",
+    "check:tzdeps": "node scripts/check-tzdeps.cjs"
   },
   "dependencies": {
     "@clerk/clerk-react": "^5.61.4",

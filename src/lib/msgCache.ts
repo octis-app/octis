@@ -24,7 +24,7 @@ export function saveMsgCache(key: string, msgs: CachedMessage[]) {
     // Exclude optimistic messages (numeric ids) — they get filtered on load when
     // pendingOptimisticIdRef.current is null (fresh state), causing visible disappear.
     const toSave = msgs.filter(m => typeof m.id !== 'number')
-    localStorage.setItem(MSG_CACHE_PREFIX + key, JSON.stringify(toSave.slice(-150)))
+    localStorage.setItem(MSG_CACHE_PREFIX + key, JSON.stringify(toSave.slice(-200)))
     // Track timestamp for staleness checks
     localStorage.setItem(MSG_CACHE_TS_PREFIX + key, new Date().toISOString())
   } catch {}
