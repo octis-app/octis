@@ -1210,3 +1210,65 @@ New file at `/opt/octis/CHANGELOG.md` documenting all changes since initial comm
 ### Known issues / needs review before merge
 - `ANTHROPIC_API_KEY` is now in `/opt/octis/.env` — any new deployment needs this key added manually. Should be documented in README.
 - `apply-local-patches.cjs` still not updated for: patches 27–31, 37–45, `hydrateFromServer` server-wins change, SettingsPanel `QUICK_COMMANDS_CONFIG` refactor — must register all before next upstream pull.
+
+---
+
+## Session: 2026-04-27 (19:15–19:30 UTC) — Auto-push script, VERSION, fork setup
+
+### Context
+Kennan asked for automatic commits + pushes to a named GitHub branch whenever OCTIS_CHANGES.md is updated, with semantic versioning (+1 for big changes, +0.01 for small).
+
+---
+
+### 1. `scripts/push-changes.sh` — new file
+
+Auto-commit + push script. Run after every OCTIS_CHANGES.md update.
+
+**Usage:**
+```bash
+bash scripts/push-changes.sh minor   # +0.01 (small fix/note)
+bash scripts/push-changes.sh major   # +1.00 (big feature batch)
+```
+
+**What it does:**
+1. Reads current `VERSION`, bumps by major or minor increment
+2. Strips `backups/` and `.env.production` from staging (prevents secret leaks)
+3. Stages all remaining local changes (`git add -A`)
+4. Commits as Kennan Hoa (`hoa_kennan2@hotmail.com`) with message `chore(local): vX.XX — <date>`
+5. Force-pushes to `origin/kennan-local-changes` (on `octis-app/octis`)
+6. Also pushes to `KennanHoa/octis` fork (once the fork remote is configured)
+7. Creates a lightweight git tag `vX.XX`
+
+**Security fix:** Initial run accidentally committed `backups/env/` files containing plaintext passwords. Fixed immediately by:
+- Adding `backups/` to `.gitignore`
+- Running `git rm --cached backups/ .env.production`
+- Amending the commit + force-pushing to overwrite
+
+---
+
+### 2. `VERSION` — new file
+
+Plain text file at repo root containing current version (e.g. `1.01`). Read and written by `push-changes.sh`. Current value: `1.01`.
+
+---
+
+### 3. `.gitignore` — updated
+
+Added `backups/` to prevent automated backup snapshots (which contain plaintext gateway tokens and admin passwords) from ever being committed.
+
+Also untracked `.env.production` (`git rm --cached`) — this file was previously tracked in upstream but contains `VITE_GATEWAY_TOKEN` and should never be committed.
+
+---
+
+### 4. GitHub fork + PAT
+
+- Forked `octis-app/octis` → `KennanHoa/octis` (now shows in Kennan's GitHub profile)
+- `kennan-local-changes` branch pushed to fork at `5ea4e98`
+- Classic PAT for KennanHoa saved to 1Password → GitHub item (`Kennan — PAT`)
+- Fine-grained PAT removed from 1Password (superseded by classic; Kennan deleting from GitHub)
+- Branch renamed: `backup/kennan-local-patches-2026-04-27` → `kennan-local-changes`
+
+### Known issues / needs review before merge
+- `apply-local-patches.cjs` still not updated for: patches 27–31, 37–45, `hydrateFromServer` server-wins change, SettingsPanel `QUICK_COMMANDS_CONFIG` refactor — must register all before next upstream pull.
+- README does not yet document the `ANTHROPIC_API_KEY` env requirement for fresh deployments.
+- `push-changes.sh` pushes to `octis-app/octis` (origin) and has a `kennan` remote for the fork — verify both remotes are set after any fresh clone.
