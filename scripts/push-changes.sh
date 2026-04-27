@@ -1,15 +1,31 @@
 #!/usr/bin/env bash
 # push-changes.sh — Commit all local changes to kennan-local-changes branch and push.
 # Usage:
-#   bash scripts/push-changes.sh major   → bumps version by +1.00 (big changes)
-#   bash scripts/push-changes.sh minor   → bumps version by +0.01 (small changes)
-#   bash scripts/push-changes.sh         → defaults to minor
+#   bash scripts/push-changes.sh minor "what changed"   → small fix
+#   bash scripts/push-changes.sh major "what changed"   → big feature batch
+#   bash scripts/push-changes.sh "what changed"         → defaults to minor
+#   bash scripts/push-changes.sh                        → defaults to minor, prompts for message
 
 set -e
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
-BUMP="${1:-minor}"
+# Parse args: optional bump type (major/minor) + required summary message
+if [ "$1" = "major" ] || [ "$1" = "minor" ]; then
+  BUMP="$1"
+  SUMMARY="$2"
+else
+  BUMP="minor"
+  SUMMARY="$1"
+fi
+
+# Require a summary message
+if [ -z "$SUMMARY" ]; then
+  echo "❌ Commit message required."
+  echo "   Usage: bash scripts/push-changes.sh [major|minor] \"what changed\""
+  exit 1
+fi
+
 BRANCH="kennan-local-changes"
 
 # ── 1. Ensure we know about the remote branch ────────────────────────────────
@@ -53,8 +69,9 @@ fi
 CHANGED_FILES=$(git diff --cached --name-only | head -20 | tr '\n' ' ')
 DATE_UTC=$(date -u +"%Y-%m-%d %H:%M UTC")
 
-MSG="chore(local): v${NEW_VERSION} — ${DATE_UTC}
+MSG="v${NEW_VERSION} — ${SUMMARY}
 
+Date: ${DATE_UTC}
 Based on upstream: ${MAIN_HEAD:0:7}
 Changed: ${CHANGED_FILES}"
 
