@@ -1279,3 +1279,122 @@ Also untracked `.env.production` (`git rm --cached`) — this file was previousl
 - `apply-local-patches.cjs` still not updated for: patches 27–31, 37–45, `hydrateFromServer` server-wins change, SettingsPanel `QUICK_COMMANDS_CONFIG` refactor — must register all before next upstream pull.
 - README does not yet document the `ANTHROPIC_API_KEY` env requirement for fresh deployments.
 - `push-changes.sh` pushes to `octis-app/octis` (origin) and has a `kennan` remote for the fork — verify both remotes are set after any fresh clone.
+
+---
+
+## Session: 2026-04-27 (20:10–21:00 UTC) — WhatsApp Project, Branch Strategy, Patch Restore
+
+### Context
+Kennan asked to group all WhatsApp sessions into a new project folder and update the app. During deployment, a series of regressions were introduced and fixed. Branch strategy was also clarified and locked in.
+
+---
+
+### 1. WhatsApp Project — DB + auto-tag
+
+**DB change:**
+```sql
+INSERT INTO octis_projects (name, slug, emoji, color, description, position)
+VALUES ('WhatsApp', 'WhatsApp', '💬', '#25d366', 'All WhatsApp conversations.', 10);
+```
+- Existing session `agent:main:whatsapp:direct:+15142457588` back-filled into `octis_session_projects` with `project = 'WhatsApp'`
+
+**`src/store/gatewayStore.ts` — auto-tag in `autoTagSlackSessions()`:**
+- Added WhatsApp detection alongside existing Slack detection:
+```ts
+if (/whatsapp/i.test(s.key) && !projectStore.tags[s.key]?.project) {
+  projectStore.setTag(s.key, 'WhatsApp')
+}
+```
+- Any session whose key matches `/whatsapp/i` is automatically tagged to the WhatsApp project on every `setSessions` call.
+
+**Verified:** Project appears in Projects tab; existing session tagged correctly.
+
+---
+
+### 2. Regression: `vite.config.js` base path wiped (CRITICAL)
+
+**What happened:** The dev deployment session (setting up `dev.octis`) reset `vite.config.js` to the upstream committed state, removing the `base: '/octis/'` patch. A subsequent `npm run build` baked in asset paths as `/assets/...` instead of `/octis/assets/...` — every JS/CSS file 404'd, app shell loaded but was completely non-functional.
+
+**Fix applied (patch re-applied):**
+```js
+base: '/octis/',
+importScripts: ['sw-push.js'],     // relative (was '/sw-push.js')
+urlPattern: /\/api\//,             // unanchored (was /^\/api\//)
+```
+
+**Lesson:** `vite.config.js` patches are now committed to `kennan-local-changes` so they can't be silently wiped again.
+
+---
+
+### 3. Regression: `server/config/agents.json` set to Byte
+
+**What happened:** Dev deployment session changed agents.json in `/opt/octis/` to the upstream Byte config (array format, name: "Byte"). Main app was serving Byte as the agent identity.
+
+**Fix:** Restored to Ghosty:
+```json
+[{ "id": "main", "name": "Ghosty", "emoji": "👻", "description": "Sonnet — default", "default": true }]
+```
+
+---
+
+### 4. Regression: All 67 local patches lost from `kennan-local-changes`
+
+**Root cause:** `push-changes.sh` was being run from the local `main` branch, and previous runs only committed metadata files (OCTIS_CHANGES.md, VERSION, push-changes.sh). The actual source file patches (all 67 changes across 20 files) were never staged/committed — they only existed as live edits on disk. When the dev deployment session reset files, all patches were lost from the working tree.
+
+**Fix:** Restored all 30 modified/new source files from `origin/backup/kennan-local-patches-2026-04-27` (commit `f930b87`):
+- `vite.config.js`, `db/schema.sql`, `index.html`, `package.json`
+- `server/config/agents.json`, `server/index.js`
+- `src/App.tsx`, `src/components/ChatPane.tsx`, `src/components/DeleteConfirmModal.tsx`
+- `src/components/MobileApp.tsx`, `src/components/MobileFullChat.tsx`
+- `src/components/MobileProjectView.tsx`, `src/components/ProjectView.tsx`
+- `src/components/ProjectsGrid.tsx`, `src/components/SettingsPanel.tsx`
+- `src/components/Sidebar.tsx`, `src/hooks/useTextareaUndo.ts`
+- `src/index.css`, `src/lib/msgCache.ts`, `src/store/gatewayStore.ts`
+- All scripts: `apply-local-patches.cjs`, `backup.sh`, `check-tzdeps.cjs`, `healthcheck.sh`, `patch-drift-check.sh`, `rollback.sh`, `safe-pull.sh`, `sync-costs.js`, `watchdog.sh`
+- `CHANGELOG.md`
+
+All files committed to `kennan-local-changes` at **v2.00** — first time the full patch set is properly tracked in git.
+
+---
+
+### 5. Branch strategy locked in
+
+**Rule (confirmed by Kennan, 2026-04-27):**
+- `origin/main` = upstream (Byte's branch). Read-only. Never touch.
+- `kennan-local-changes` = all Kennan's fixes. Runs `/octis/`. **All fixes always go here.**
+- `merge/kennan-upstream-sync` = test-only merge of both. Runs `/dev.octis/`. Never committed to directly.
+- Merge to `main` only after Kennan tests `dev.octis` and explicitly approves.
+- Active branch in `/opt/octis/` switched from `main` → `kennan-local-changes`.
+
+---
+
+### 6. `scripts/push-changes.sh` — descriptive commit messages required
+
+**Change:** Script now requires a summary message as argument. Errors out if omitted.
+
+**New usage:**
+```bash
+bash scripts/push-changes.sh minor "what changed"
+bash scripts/push-changes.sh major "what changed"
+```
+
+**Commit format changed from:**
+`chore(local): v2.00 — 2026-04-27 20:54 UTC`
+
+**To:**
+`v2.01 — require descriptive commit messages in push-changes.sh`
+
+---
+
+### Versions this session
+| Version | What |
+|---|---|
+| v1.03 | WhatsApp project + auto-tag (gatewayStore.ts) |
+| v1.04 | Restore vite.config.js base + agents.json Ghosty fix |
+| v2.00 | Restore all 67 patches from backup branch (major — first proper commit of full patch set) |
+| v2.01 | Descriptive commit messages in push-changes.sh + WhatsApp tag in autoTagSlack helper |
+
+### Known issues / needs review before merge
+- `apply-local-patches.cjs` exists now but has not been audited to confirm it covers all 67 patches (especially patches 27–45). Should be verified before next upstream pull.
+- `dev.octis` (`merge/kennan-upstream-sync`) was built before the patch restore — it may need a re-merge and rebuild now that `kennan-local-changes` has the full patch set properly committed.
+- README does not document `ANTHROPIC_API_KEY` env requirement for fresh deployments.

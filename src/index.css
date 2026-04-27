@@ -72,6 +72,16 @@ html { -webkit-text-size-adjust: 100%; }
   background: #6366f1;
 }
 
+/* Links inside user message bubbles — make visible against the purple background */
+.octis-user-bubble a {
+  color: rgba(255, 255, 255, 0.9) !important;
+  text-decoration: underline;
+}
+.octis-user-bubble a:hover {
+  color: #fff !important;
+  opacity: 1;
+}
+
 /* Reply quote jump flash animation */
 @keyframes octisFlash {
   0%   { box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.75); }

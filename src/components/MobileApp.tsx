@@ -182,7 +182,12 @@ export default function MobileApp() {
   const [availableProjects, setAvailableProjects] = useState<Array<{id: string; name: string; slug: string; emoji?: string; color?: string}>>([])
   const [archiveToast, setArchiveToast] = useState<string | null>(null)
   const [showArchivedSection, setShowArchivedSection] = useState(false)
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem('octis-mobile-collapsed-groups')
+      return saved ? new Set(JSON.parse(saved) as string[]) : new Set()
+    } catch { return new Set() }
+  })
   // Reactive archived sessions — sorted by lastActivity desc (same as Projects ARCHIVED view)
   const hiddenSessionsRaw = useSessionStore(s => s.hiddenSessions)
   const archivedSessions = [...hiddenSessionsRaw].sort((a, b) => {
@@ -662,6 +667,7 @@ export default function MobileApp() {
                     const toggleCollapse = () => setCollapsedGroups(prev => {
                       const next = new Set(prev)
                       if (next.has(slug)) next.delete(slug); else next.add(slug)
+                      localStorage.setItem('octis-mobile-collapsed-groups', JSON.stringify([...next]))
                       return next
                     })
                     return (
