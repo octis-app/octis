@@ -98,6 +98,13 @@
 |---|--------|-----|
 | 26 | `autoTagSlackSessions()` runs on every `setSessions` call | Sessions with `:slack:` in their key are automatically tagged to the Slack project so they stay out of the main Sessions tab without manual tagging |
 
+### 4f. Auto-tag WhatsApp sessions + WhatsApp project
+| # | Change | Why |
+|---|--------|-----|
+| 46 | WhatsApp project inserted into `octis_projects` (slug: `WhatsApp`, emoji: 💬, color: #25d366) | Groups all WhatsApp conversations into a dedicated project folder |
+| 47 | `setSessions` auto-tags sessions whose key matches `/whatsapp/i` with the `WhatsApp` project (if not already tagged) | Future WhatsApp sessions are automatically organized without manual tagging |
+| 48 | Existing WhatsApp session `agent:main:whatsapp:direct:+15142457588` back-filled to WhatsApp project in DB | Retroactive tagging so existing conversations appear in the new project immediately |
+
 ---
 
 ## 5. Desktop Sidebar — `src/components/Sidebar.tsx`
