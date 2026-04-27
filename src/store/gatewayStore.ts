@@ -902,6 +902,12 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
         }
       }
     }
+    // Auto-tag channel sessions by key pattern (e.g. whatsapp → WhatsApp project)
+    for (const s of deduped) {
+      if (/whatsapp/i.test(s.key) && !projectStore.getTag(s.key).project) {
+        projectStore.setTag(s.key, 'WhatsApp')
+      }
+    }
     // Update cost history for sessions with live cost data
     const now = Date.now()
     set((state) => {
