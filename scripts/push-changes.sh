@@ -36,7 +36,12 @@ echo "📦 Version: $CURRENT_VERSION → $NEW_VERSION"
 MAIN_HEAD=$(git rev-parse main 2>/dev/null || echo "unknown")
 
 # ── 4. Stage all modified + untracked files (respects .gitignore) ────────────
+# Always ensure sensitive dirs/files are untracked before staging
+git rm -r --cached backups/ 2>/dev/null || true
+git rm --cached .env.production 2>/dev/null || true
 git add -A
+# Re-exclude env.production explicitly (it may be tracked in upstream)
+git reset HEAD .env.production 2>/dev/null || true
 
 # ── 5. Check if anything to commit ───────────────────────────────────────────
 if git diff --cached --quiet; then
