@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
-import { useGatewayStore, useSessionStore, useProjectStore, useLabelStore, useDraftStore, useHiddenStore, Session } from '../store/gatewayStore'
+import { useGatewayStore, useSessionStore, useProjectStore, useLabelStore, useDraftStore, useHiddenStore, Session, DraftData } from '../store/gatewayStore'
 import { authFetch } from '../lib/authFetch'
 import { useAuthStore } from '../store/authStore'
 import DecisionButtons from './DecisionButtons'
+import { DeleteConfirmModal } from './DeleteConfirmModal'
 
 // Quick Commands helpers
 const QUICK_COMMAND_DEFAULTS = {
-  brief: "Give me a 3-sentence status update: (1) what you last did, (2) what you're working on now, (3) what's next. No fluff.",
+  brief: "If you're a session that modified Octis app code, keep OCTIS_CHANGES.md updated with only relevant development work since the last log update. Record every code modification, bug fix, config/schema/API change, dependency change, important decision, known issue, and testing/verification result.",
   away: "I'm stepping away for a while. Please do the following:\n1. Summarize what you're currently working on (1-2 sentences).\n2. List anything you're blocked on or need from me before I go - be specific (credentials, a decision, a file, etc.).\n3. List everything you CAN do autonomously while I'm gone, in order.\n4. Estimate how long you can run without me.\nBe concise. I'll read this on my phone.",
   save: "💾 checkpoint - save any key decisions, context, or tasks from this session to MEMORY.md and TODOS.md now. One-line ack only.",
   archive_msg: "💾 Final save - write any remaining decisions, tasks, or context to MEMORY.md and TODOS.md. Reply with NO_REPLY only.",
@@ -33,7 +34,7 @@ function SessionCostBadge({ sessionKey }: { sessionKey: string }) {
   const exchangeCost = sessionMeta[sessionKey]?.lastExchangeCost ?? null
   if (exchangeCost == null) return null
 
-  // Per-message cost overhead — color tells you when to start a new session
+  // Per-message cost overhead - color tells you when to start a new session
   let icon = '🟢'
   let level = 'Light'
   let pillClass = 'bg-emerald-900/40 text-emerald-400 border-emerald-700/40'
@@ -166,27 +167,23 @@ function ChatMarkdown({ text }: { text: string }) {
   let i = 0
 
   const renderInline = (str: string): React.ReactNode[] => {
-    const parts = str.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g)
-    return parts.map((p, j) => {
-      if (p.startsWith('**') && p.endsWith('**'))
-        return (
-          <strong key={j} className="font-semibold text-white">
-            {p.slice(2, -2)}
-          </strong>
-        )
-      if (p.startsWith('`') && p.endsWith('`') && p.length > 2)
-        return (
-          <code key={j} className="bg-[#0f1117] text-[#a5b4fc] px-1 rounded text-[11px] font-mono">
-            {p.slice(1, -1)}
-          </code>
-        )
-      if (p.startsWith('*') && p.endsWith('*') && p.length > 2)
-        return (
-          <em key={j} className="italic opacity-80">
-            {p.slice(1, -1)}
-          </em>
-        )
-      return <span key={j}>{p}</span>
+    // Split on URLs first, then handle markdown formatting within non-URL segments
+    const urlSegments = str.split(/(https?:\/\/[^\s<>"{}|\\^`\[\]*]+)/g)
+    return urlSegments.flatMap((seg, j) => {
+      if (/^https?:\/\//.test(seg)) {
+        return [<a key={`u${j}`} href={seg} target="_blank" rel="noopener noreferrer"
+          className="text-[#6366f1] underline break-all hover:text-[#818cf8]">{seg}</a>]
+      }
+      const parts = seg.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g)
+      return parts.map((p, k) => {
+        if (p.startsWith('**') && p.endsWith('**'))
+          return <strong key={`${j}-${k}`} className="font-semibold text-white">{p.slice(2, -2)}</strong>
+        if (p.startsWith('`') && p.endsWith('`') && p.length > 2)
+          return <code key={`${j}-${k}`} className="bg-[#0f1117] text-[#a5b4fc] px-1 rounded text-[11px] font-mono">{p.slice(1, -1)}</code>
+        if (p.startsWith('*') && p.endsWith('*') && p.length > 2)
+          return <em key={`${j}-${k}`} className="italic opacity-80">{p.slice(1, -1)}</em>
+        return <span key={`${j}-${k}`}>{p}</span>
+      })
     })
   }
 
@@ -197,6 +194,31 @@ function ChatMarkdown({ text }: { text: string }) {
     const base64Image = renderBase64Image(line, i)
     if (base64Image) {
       elements.push(base64Image)
+      i++
+      continue
+    }
+
+    // Markdown image: ![alt](url)
+    const mdImgMatch = line.match(/^!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)$/)
+    if (mdImgMatch) {
+      elements.push(<img key={i} src={mdImgMatch[2]} alt={mdImgMatch[1]}
+        className="max-w-full rounded-lg my-1 max-h-64 object-contain"
+        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />)
+      i++
+      continue
+    }
+
+    // MEDIA:<url> directive
+    const mediaLineMatch = line.match(/^MEDIA:(https?:\/\/\S+)$/)
+    if (mediaLineMatch) {
+      const mUrl = mediaLineMatch[1]
+      const isImg = /\.(png|jpg|jpeg|gif|webp)(\?|$)/i.test(mUrl)
+      elements.push(isImg
+        ? <img key={i} src={mUrl} alt="image" className="max-w-full rounded-lg my-1 max-h-64 object-contain"
+            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
+        : <a key={i} href={mUrl} target="_blank" rel="noopener noreferrer"
+            className="text-[#6366f1] underline break-all">{mUrl}</a>
+      )
       i++
       continue
     }
@@ -383,8 +405,64 @@ function isNoiseMsg(msg: ChatMessage): boolean {
   return false
 }
 
-// ─── Message cache (localStorage — survives pane unmount) ──────────────────────
+// ─── Reply helpers ────────────────────────────────────────────────────────────
+
+function getReplyCtx(content: MessageContent): { role: string; preview: string; msgId?: string } | null {
+  const text = extractText(content)
+  // Handles both formats: "[Replying to AI: \"...\"]" and "[Replying to AI (42): \"...\"]"
+  const m = text.match(/^\[Replying to ([^(:]+?)(?:\s*\(([^)]+)\))?:\s*"([^"]{0,150})"\]\n\n/)
+  if (!m) return null
+  return { role: m[1].trim(), preview: m[3], msgId: m[2] || undefined }
+}
+
+function stripReplyCtxText(text: string): string {
+  return text.replace(/^\[Replying to [^:]+: "[^"]{0,150}"\]\n\n/, '')
+}
+
+function stripReplyCtx(content: MessageContent): MessageContent {
+  if (typeof content === 'string') return stripReplyCtxText(content)
+  if (Array.isArray(content)) {
+    const arr = content as ContentBlock[]
+    const firstTextIdx = arr.findIndex(b => b.type === 'text')
+    if (firstTextIdx === -1) return content
+    const ft = arr[firstTextIdx] as { type: 'text'; text: string }
+    const stripped = stripReplyCtxText(ft.text)
+    if (stripped === ft.text) return content
+    const updated = [...arr]
+    updated[firstTextIdx] = { ...ft, text: stripped }
+    return updated
+  }
+  return content
+}
+
+function ReplyQuoteBubble({ role, preview, isUserMsg, onJump }: { role: string; preview: string; isUserMsg: boolean; onJump?: () => void }) {
+  return (
+    <div
+      className={`mb-1.5 px-2 py-1 rounded-lg border-l-2 text-xs max-w-full transition-opacity ${
+        isUserMsg ? 'bg-[#4f51c0]/30 border-[#a5b4fc]/70' : 'bg-[#0f1117]/60 border-[#4b5563]'
+      } ${onJump ? 'cursor-pointer hover:opacity-100' : ''}`}
+      style={{ opacity: onJump ? 0.9 : undefined }}
+      onClick={onJump}
+      title={onJump ? 'Jump to message' : undefined}
+    >
+      <div className={`text-[10px] font-semibold mb-0.5 flex items-center gap-1 ${
+        isUserMsg ? 'text-[#c7d2fe]' : 'text-[#6b7280]'
+      }`}>
+        {role === 'AI' ? '🤖 AI' : '👤 You'}
+        {onJump && <span className="opacity-50 text-[9px]">↗</span>}
+      </div>
+      <div className={`line-clamp-2 leading-tight opacity-80 ${
+        isUserMsg ? 'text-[#e0e7ff]' : 'text-[#9ca3af]'
+      }`}>
+        {preview}
+      </div>
+    </div>
+  )
+}
+
+// ─── Message cache (localStorage - survives pane unmount) ──────────────────────
 import { loadMsgCache, saveMsgCache } from '../lib/msgCache'
+import { useTextareaUndo } from '../hooks/useTextareaUndo'
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -393,15 +471,15 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   const { setSessions, sessions, setLastRole, markStreaming: markSessionStreaming, incrementUnread, clearUnread, sessionMeta, consumePendingProjectPrefix, consumePendingProjectInit, setLastExchangeCost } = useSessionStore()
   const { setCard, getTag, getProjectEmoji } = useProjectStore()
   const { setLabel: saveLabelLocal, getLabel } = useLabelStore()
-  const { setDraft, getDraft, clearDraft } = useDraftStore()
-  
+  const { setDraft, getDraft, getDraftData, clearDraft, isDraftCleared, hydrateFromServer: hydrateDraftsFromServer } = useDraftStore()
+
   let cachedAgents: { id: string; name: string; emoji: string }[] = []
   const [agents, setAgents] = useState<{ id: string; name: string; emoji: string }[]>([])
   useEffect(() => {
     if (cachedAgents.length === 0) {
       authFetch(`${API}/api/agents`)
         .then(r => r.json())
-        .then(d => { 
+        .then(d => {
           const fetched = d.agents || []
           cachedAgents = fetched
           setAgents(fetched)
@@ -409,7 +487,6 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
         .catch(() => {})
     }
   }, [])
-  
   // Per-session message cache - show instantly on switch, refresh silently behind the scenes
   // Uses localStorage so cache survives pane unmount/remount (useRef would die on close)
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -422,8 +499,54 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   }
   const [loadedKey, setLoadedKey] = useState<string | null>(null)
   const [historyLimit, setHistoryLimit] = useState(200)
+  const historyLimitRef = useRef(200) // ref so WS closure always sees latest without re-running effect
   const [hasMore, setHasMore] = useState(false)
   const [input, setInput] = useState(() => (sessionKey ? getDraft(sessionKey) : ''))
+  // Resize textarea to fit content — called after any programmatic setInput()
+  const resizeTextarea = useCallback(() => {
+    const ta = textareaRef.current
+    if (!ta) return
+    // rAF ensures the DOM has painted the new value before we read scrollHeight
+    requestAnimationFrame(() => {
+      ta.style.height = 'auto'
+      ta.style.height = Math.min(ta.scrollHeight, 150) + 'px'
+    })
+  }, [])
+  // On mount: size textarea to fit initial draft
+  useEffect(() => {
+    if (input) resizeTextarea()
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ResizeObserver: re-compute textarea height whenever the container width changes.
+  // This fixes the "1 line draft when pane splits" bug — narrower pane = more wrapped lines.
+  useEffect(() => {
+    const ta = textareaRef.current
+    if (!ta) return
+    const ro = new ResizeObserver(() => {
+      if (!ta.value) return // empty — let CSS handle it
+      ta.style.height = 'auto'
+      ta.style.height = Math.min(ta.scrollHeight, 150) + 'px'
+    })
+    ro.observe(ta)
+    return () => ro.disconnect()
+  }, []) // stable — runs once, ResizeObserver watches the element
+  // When sessionKey changes (pane reuses same component), reset input to that session's draft
+  const prevSessionKeyRef = useRef<string | null>(sessionKey)
+  useEffect(() => {
+    if (prevSessionKeyRef.current === sessionKey) return
+    prevSessionKeyRef.current = sessionKey
+    const draftData = sessionKey ? getDraftData(sessionKey) : { text: '' }
+    setInput(draftData.text)
+    if (draftData.files && draftData.files.length > 0) {
+      // Restore image/doc attachments from draft (assign fresh _keys)
+      setPendingFiles(draftData.files.map((f, i) => ({ ...f, _key: Date.now() + i })) as PendingFile[])
+    } else {
+      setPendingFiles([])
+    }
+    inputUndo.reset() // new session = fresh undo history
+    // Resize after React re-renders with the new value
+    if (draftData.text) setTimeout(resizeTextarea, 0)
+  }, [sessionKey, getDraftData, resizeTextarea])
   const [sessionCard, setSessionCard] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [cardOpen, setCardOpen] = useState(false)
@@ -442,6 +565,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   const loadedSessionRef = useRef<string | null>(null) // session key for which history is currently loaded
   const workingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null) // fallback: clear working after 5 min max
   const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const inputUndo = useTextareaUndo()
   const runActiveRef = useRef(false)           // lifecycle:start→true, lifecycle:end→false
   const lastEventTsRef = useRef(0)             // updated on every WS event
   const [runQuiet, setRunQuiet] = useState(false) // run is active but no events for >60s
@@ -465,10 +589,17 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
       return true
     }
   })
+  // Reply state
+  const [hoveredMsgKey, setHoveredMsgKey] = useState<string | null>(null)
+  const [replyingTo, setReplyingTo] = useState<{ id: string | number | undefined; role: 'user' | 'assistant'; preview: string } | null>(null)
+  const [highlightedMsgKey, setHighlightedMsgKey] = useState<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const userScrolledUpRef = useRef(false)
   const isInitialScrollRef = useRef(true) // true until first scroll after session load
+  const savedScrollHeightRef = useRef<number>(0) // for scroll preservation when loading older
+  const isLoadingOlderRef = useRef(false) // true while an older-messages fetch is in flight
+  const wasLoadingOlderRef = useRef(false) // set in useLayoutEffect, consumed in useEffect to block scroll-to-bottom
 
   const toggleNoise = () =>
     setNoiseHidden((v) => {
@@ -501,6 +632,40 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     if (sessionKey) claimSession(sessionKey)
   }, [sessionKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Sync draft from server when switching to a session (cross-device persistence)
+  useEffect(() => {
+    if (!sessionKey) return
+    // Check if we already have a local draft (text OR files — don't trigger server fetch if files saved)
+    const localData = getDraftData(sessionKey)
+    const hasLocal = !!localData.text || (localData.files?.length ?? 0) > 0
+    if (hasLocal) return // local draft already loaded on mount — skip server fetch
+    // If draft was intentionally cleared (tombstone in localStorage), don't restore from server
+    if (isDraftCleared(sessionKey)) return
+    // No local draft at all — check server for a draft from another device
+    void (async () => {
+      try {
+        const resp = await authFetch(`${API}/api/drafts/${encodeURIComponent(sessionKey)}`)
+        if (!resp.ok) return
+        const data = await resp.json()
+        if (!data.text) return
+        // Verify still no local draft (avoid race condition)
+        const currentData = getDraftData(sessionKey)
+        if (currentData.text || (currentData.files?.length ?? 0) > 0) return
+        // Deserialize server response (data.text is the serialized DraftData JSON)
+        const parsed = (() => {
+          try { const p = JSON.parse(data.text); if (p && typeof p === 'object' && 'text' in p) return p as { text: string; files?: typeof localData.files } }
+          catch {} return { text: data.text as string, files: undefined }
+        })()
+        setDraft(sessionKey, parsed.text, parsed.files)
+        setInput(parsed.text)
+        if (parsed.files && parsed.files.length > 0) {
+          setPendingFiles(parsed.files.map((f, i) => ({ ...f, _key: Date.now() + i })) as PendingFile[])
+        }
+        if (parsed.text) setTimeout(resizeTextarea, 0)
+      } catch {}
+    })()
+  }, [sessionKey]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // Trigger a sessions.list refresh on mount so the cost badge populates immediately
   // (Sidebar polls every 30s - without this, a newly-opened pane can wait up to 30s)
   useEffect(() => {
@@ -519,6 +684,9 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     return () => clearTimeout(timer)
   }, [messages]) // runs after messages state settles
 
+  // Keep historyLimitRef in sync with historyLimit state
+  useEffect(() => { historyLimitRef.current = historyLimit }, [historyLimit])
+
   // Keep message cache fresh as messages update (so future visits to this session are instant)
   useEffect(() => {
     if (sessionKey && messages.length > 0 && loadedKey === sessionKey) {
@@ -526,12 +694,91 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     }
   }, [messages, sessionKey, loadedKey])
 
+
+  // When hasMore becomes true and we're already near the top (e.g. after initial load of a
+  // short session, or after load-more that left us < 150px from top), auto-trigger immediately
+  // without waiting for another onScroll event.
+  useEffect(() => {
+    if (!hasMore || isLoadingOlderRef.current) return
+    const el = scrollContainerRef.current
+    if (el && el.scrollTop < 150) {
+      isLoadingOlderRef.current = true
+      savedScrollHeightRef.current = el.scrollHeight
+      setHistoryLimit(prev => prev + 100)
+    }
+  }, [hasMore])
+
+  // Restore scroll position after loading older messages so the view doesn't jump
+  // useLayoutEffect fires synchronously after DOM update — before browser paint
+  const { useLayoutEffect } = React
+  useLayoutEffect(() => {
+    if (isLoadingOlderRef.current) {
+      // Load-more: preserve scroll position so content doesn't jump
+      const el = scrollContainerRef.current
+      const savedHeight = savedScrollHeightRef.current
+      if (!el || savedHeight === 0) return
+      wasLoadingOlderRef.current = true
+      isLoadingOlderRef.current = false
+      savedScrollHeightRef.current = 0
+      const delta = el.scrollHeight - savedHeight
+      if (delta > 0) el.scrollTop = delta
+      return
+    }
+    // Initial load: scroll to bottom BEFORE browser paints (no visible top-flash)
+    if (isInitialScrollRef.current && messages.length > 0) {
+      const el = scrollContainerRef.current
+      if (el) {
+        el.scrollTop = el.scrollHeight
+        isInitialScrollRef.current = false
+      }
+    }
+  }, [messages])
+
   // Clear sent queue as soon as agent starts streaming (message is being processed)
   useEffect(() => {
     if (globalStreaming) {
       setSentQueue(prev => prev.filter(e => e.status === 'sending'))
     }
   }, [globalStreaming])
+
+  // ── Phase 1: show cached messages immediately, no WS needed ──────────────
+  useEffect(() => {
+    if (!sessionKey) return
+    if (loadedSessionRef.current === sessionKey) return // already loaded or switching back
+    // Reset scroll state
+    userScrolledUpRef.current = false
+    isInitialScrollRef.current = true
+    // Paint cached messages right away so pane isn't blank while WS connects
+    const cached = loadMsgCache(sessionKey)
+    if (cached.length > 0) {
+      setMessages(cached)
+    } else {
+      setMessages([])
+      // No cache — fetch via HTTP immediately so pane isn't blank while WS connects
+      let cancelled = false
+      authFetch(`${API}/api/chat-history?sessionKey=${encodeURIComponent(sessionKey)}&limit=200`)
+        .then(r => r.json())
+        .then((d: { ok?: boolean; messages?: ChatMessage[] }) => {
+          if (cancelled) return
+          if (!d.ok || !d.messages?.length) return
+          if (loadedSessionRef.current === sessionKey) return // WS already delivered
+          setMessages(d.messages)
+          saveMsgCache(sessionKey, d.messages)
+        })
+        .catch(() => {})
+      return () => { cancelled = true }
+    }
+    setAutoRenamed(false)
+    setHistoryLimit(200)
+    setHasMore(false)
+  }, [sessionKey])
+
+  // Clear reply state when switching sessions
+  useEffect(() => {
+    setReplyingTo(null)
+    setHoveredMsgKey(null)
+    setHighlightedMsgKey(null)
+  }, [sessionKey])
 
   useEffect(() => {
     // Wait for WS to be both set AND connected (readyState=OPEN).
@@ -542,22 +789,15 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     // Only wipe messages when switching to a different session.
     // On ws reconnect (same session), keep old messages visible while history reloads silently.
     if (!isSameSession) {
-      // Reset scroll state so new session always starts at the bottom
+      // Phase 1 already painted cache - just reset scroll state in case Phase 1 ran before WS
       userScrolledUpRef.current = false
       isInitialScrollRef.current = true
-      // Show cached messages instantly while fresh history loads in background
-      const cached = loadMsgCache(sessionKey)
-      if (cached.length > 0) {
-        setMessages(cached)
-      } else {
-        setMessages([])
-      }
     }
     setLoadedKey(null)
     setSessionCard(null)
     if (!isSameSession) { setAutoRenamed(false); setHistoryLimit(200); setHasMore(false) }
     const reqId = `chat-history-${sessionKey}-${Date.now()}`
-    send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey, limit: historyLimit } })
+    send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey, limit: historyLimitRef.current } })
 
     const handleMsg = (event: MessageEvent) => {
       try {
@@ -580,7 +820,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
           msg.id?.startsWith(`chat-poll-${sessionKey}`)
         if (isPoll) {
           const msgs = msg.payload?.messages || []
-          // Poll is NO LONGER the primary clear signal — lifecycle:end handles that.
+          // Poll is NO LONGER the primary clear signal - lifecycle:end handles that.
           // Poll only handles: cost tracking + fallback clear when no lifecycle events arrive.
           const lastPollMsg = msgs[msgs.length - 1]
           if (lastPollMsg?.role === 'assistant' && extractText(lastPollMsg.content).trim()) {
@@ -588,7 +828,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                           (lastPollMsg as {ts?: string | number; created_at?: string | number; timestamp?: string | number}).created_at ||
                           (lastPollMsg as {ts?: string | number; created_at?: string | number; timestamp?: string | number}).timestamp
             const msgTs = rawTs ? new Date(rawTs as string | number).getTime() : 0
-            // Only update cost tracking here — isWorking cleared by lifecycle:end
+            // Only update cost tracking here - isWorking cleared by lifecycle:end
             if (sessionKey) {
               setLastRole(sessionKey, 'assistant')
               const currentCost = useSessionStore.getState().sessions.find((s: Session) => s.key === sessionKey)?.estimatedCostUsd
@@ -611,78 +851,93 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
           }
           setMessages((prev) => {
             if (msgs.length === 0) return prev
+
+            // ── Step 1: Compute base — NEVER downgrade loaded history ───────────────────────
+            // Poll limit (30 idle / 100 active) << history limit (200). Guard must run
+            // BEFORE optimistic logic — old code applied guard only when no optimistics
+            // existed, causing poll to collapse 200-msg history to 30 whenever user had
+            // a pending message. That's the root cause of messages disappearing on send.
+            const prevServer = prev.filter(m => typeof m.id !== 'number')
+            let base: ChatMessage[]
+            if (msgs.length >= prevServer.length) {
+              // Poll covers everything we have — use directly
+              base = msgs
+            } else {
+              // Poll is truncated: keep prev, append only genuinely new messages
+              const prevTs = new Set(prevServer.map(m => getMsgTs(m)).filter(ts => ts > 0))
+              // For ts=0 messages: use content fingerprint to avoid appending duplicates each poll
+              const prevFp = new Set(prevServer.filter(m => getMsgTs(m) === 0).map(m =>
+                `${m.role}:${extractText(m.content).substring(0, 100)}`
+              ))
+              const newOnes = msgs.filter(m => {
+                const ts = getMsgTs(m)
+                if (ts > 0) return !prevTs.has(ts)
+                return !prevFp.has(`${m.role}:${extractText(m.content).substring(0, 100)}`)
+              })
+              // Fast-exit: last message unchanged and nothing new — skip re-render
+              if (newOnes.length === 0) {
+                const lastPollTs = getMsgTs(msgs[msgs.length - 1])
+                const lastPrevTs = getMsgTs(prevServer[prevServer.length - 1])
+                if (lastPollTs > 0 && lastPollTs === lastPrevTs) return prev
+              }
+              base = newOnes.length > 0 ? [...prevServer, ...newOnes] : prevServer
+            }
+
+            // ── Step 2: Fast-exit for standard case (no optimistics, nothing new) ─────
             const oid = pendingOptimisticIdRef.current
-            // Search ALL of prev for the tracked optimistic
-            const optimisticIdx = oid !== null ? prev.findIndex((m) => m.id === oid) : -1
+            const optimisticIdx = oid !== null ? prev.findIndex(m => m.id === oid) : -1
             const isOptimistic = optimisticIdx >= 0
+            const orphans = isOptimistic ? [] : prev.filter(m => typeof m.id === 'number')
+
+            if (!isOptimistic && orphans.length === 0) {
+              // No pending messages — fast-exit if nothing changed
+              const lastBase = base[base.length - 1]
+              const lastPrev = prevServer[prevServer.length - 1]
+              if (lastBase && lastPrev &&
+                  getMsgTs(lastBase) > 0 && getMsgTs(lastBase) === getMsgTs(lastPrev) &&
+                  base.length === prevServer.length) {
+                return prev
+              }
+              return base
+            }
+
+            // ── Step 3: Handle active optimistic ────────────────────────────────
             if (isOptimistic) {
-              // Check if server already has our message via content match.
-              // This handles sessions at the history limit (100 msgs): msgs.length stays
-              // constant even after the server stores our message, breaking the count check.
               const optimistic = prev[optimisticIdx]
               const optimisticText = extractText(optimistic.content).substring(0, 80).trim()
-              const serverAlreadyHasMsg = !!optimisticText && msgs.some(
+              const serverAlreadyHasMsg = !!optimisticText && base.some(
                 m => m.role === 'user' && typeof m.id !== 'number' &&
                      extractText(m.content).substring(0, 80).trim() === optimisticText
               )
-              // Keep optimistic until server has our message (count increased OR content found)
-              if (!serverAlreadyHasMsg && msgs.length <= preSendCountRef.current) {
-                return [...msgs, prev[optimisticIdx]] // server hasn't received our msg yet
+              if (!serverAlreadyHasMsg) {
+                return [...base, optimistic] // keep optimistic on top of full history
               }
-              // Server has our message - drop optimistic, signal delivery
+              // Server confirmed — drop optimistic
               confirmedOptimisticRef.current = oid
               pendingOptimisticIdRef.current = null
-              return msgs
+              return base
             }
-            // Check for orphaned optimistic messages (number IDs) whose tracking ref was
-            // cleared prematurely (e.g. by a flush streaming event). Preserve them until
-            // the server confirms receipt — avoids the "disappeared then came back later" bug.
-            const orphans = prev.filter((m) => typeof m.id === 'number')
+
+            // ── Step 4: Handle orphaned optimistics ────────────────────────────
             if (orphans.length > 0) {
-              const serverHasOrphans = orphans.every((o) => {
+              const serverHasOrphans = orphans.every(o => {
                 const oText = extractText(o.content).substring(0, 80).trim()
-                return !!oText && msgs.some(
-                  (m) => m.role === 'user' && typeof m.id !== 'number' &&
-                         extractText(m.content).substring(0, 80).trim() === oText
+                return !!oText && base.some(
+                  m => m.role === 'user' && typeof m.id !== 'number' &&
+                       extractText(m.content).substring(0, 80).trim() === oText
                 )
               })
-              if (!serverHasOrphans) {
-                return [...msgs, ...orphans] // keep orphans visible until server confirms
-              }
-              return msgs // server confirmed all orphans — drop them cleanly
+              if (!serverHasOrphans) return [...base, ...orphans]
+              return base
             }
-            // Guard: poll limit (30 idle / 100 active) is smaller than history limit (200).
-            // Never replace a larger prev with a smaller poll result — that wipes loaded history.
-            // Gateway messages have id=undefined; use timestamp for dedup instead.
-            if (msgs.length < prev.length) {
-              const lastNew = msgs[msgs.length - 1]
-              const lastInPrev = prev[prev.length - 1]
-              // Fast-exit: if the last message is unchanged (same timestamp), nothing new.
-              const lastNewTs = getMsgTs(lastNew)
-              const lastInPrevTs = getMsgTs(lastInPrev)
-              if (lastNewTs > 0 && lastNewTs === lastInPrevTs) return prev
-              // Append only genuinely new messages (by timestamp).
-              const prevTs = new Set(prev.map(m => getMsgTs(m)).filter(ts => ts > 0))
-              const newOnes = msgs.filter(m => {
-                const ts = getMsgTs(m)
-                return ts === 0 || !prevTs.has(ts)
-              })
-              return newOnes.length > 0 ? [...prev, ...newOnes] : prev
-            }
-            // Standard: poll returned at least as many messages as we have.
-            // Fast-exit if the last message (by timestamp) is identical — nothing new.
-            const lastNew = msgs[msgs.length - 1]
-            const lastInPrev = prev[prev.length - 1]
-            if (getMsgTs(lastNew) > 0 && getMsgTs(lastNew) === getMsgTs(lastInPrev) && msgs.length === prev.length) {
-              return prev
-            }
-            return msgs
+
+            return base
           })
           return
         }
 
-        // History response
-        if (msg.type === 'res' && msg.id === reqId && msg.ok) {
+        // History response — match by prefix so load-more requests (sent from a separate effect) are also handled
+        if (msg.type === 'res' && msg.ok && msg.id?.startsWith(`chat-history-${sessionKey}-`)) {
           const msgs = msg.payload?.messages || []
           const lastHB = [...msgs]
             .reverse()
@@ -720,9 +975,16 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
           // Cache so next visit to this session is instant
           if (msgs.length > 0) saveMsgCache(sessionKey, msgs)
           // Show "load older" button if response filled the limit (more messages may exist)
-          setHasMore(msgs.length >= historyLimit)
+          setHasMore(msgs.length >= historyLimitRef.current)
           setMessages((prev) => {
             if (msgs.length === 0) return prev
+            // Guard: never downgrade message count during an active agent run.
+            // History fetches (esp. load-more) lag behind streaming — replacing state would
+            // make messages visually disappear until the agent finishes.
+            if (runActiveRef.current) {
+              const prevServer = prev.filter(m => typeof m.id !== 'number')
+              if (msgs.length < prevServer.length) return prev
+            }
             const pendingOid = pendingOptimisticIdRef.current
             if (pendingOid !== null) {
               const optimisticMsg = prev.find(m => m.id === pendingOid)
@@ -846,7 +1108,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             }
             if (chatMsg.role === 'user') {
               // Replace the specific pending optimistic if it exists.
-              // Guard: only replace when the echo has real content — empty/flush echoes
+              // Guard: only replace when the echo has real content - empty/flush echoes
               // would blank the optimistic and cause a visible "disappear then reappear" flicker.
               const hasContent = !!extractText(chatMsg.content).trim()
               if (hasContent) {
@@ -915,7 +1177,18 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
 
     ws.addEventListener('message', handleMsg)
     return () => ws.removeEventListener('message', handleMsg)
-  }, [sessionKey, ws, connected, send, setCard, historyLimit])
+  }, [sessionKey, ws, connected, send, setCard]) // historyLimitRef used internally — no dep needed
+
+  // Load-more: when historyLimit increases, re-fetch history WITHOUT re-running the full WS effect.
+  // The WS message handler matches by prefix so it picks up the response automatically.
+  const historyLimitPrevRef = useRef(200)
+  useEffect(() => {
+    if (historyLimit === historyLimitPrevRef.current) return
+    historyLimitPrevRef.current = historyLimit
+    if (!sessionKey || !connected || !ws) return
+    if (loadedSessionRef.current !== sessionKey) return // main WS effect handles initial load
+    send({ type: 'req', id: `chat-history-${sessionKey}-${Date.now()}`, method: 'chat.history', params: { sessionKey, limit: historyLimit } })
+  }, [historyLimit, sessionKey, connected, ws, send])
 
   // Auto-refresh on return: if tab was hidden and user comes back, immediately fetch history.
   // Prevents the "no reply after 1h" issue where idle poll was paused while hidden.
@@ -941,7 +1214,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     return () => document.removeEventListener('visibilitychange', handleVisibility)
   }, [sessionKey, ws, connected, send])
 
-  // Polling fallback — two-tier: fast only while waiting for reply, slow otherwise.
+  // Polling fallback - two-tier: fast only while waiting for reply, slow otherwise.
   // Was 2s unconditional per pane: 3 open panes = 90 WS requests/min.
   // Idle: 10s, small payload. Active (isWorking/awaitingRender): 2s, larger payload.
   useEffect(() => {
@@ -955,7 +1228,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     return () => clearInterval(interval)
   }, [sessionKey, ws, connected, send, isWorking, awaitingRender])
 
-  // Fast poll (2s) — only while actively waiting for a reply.
+  // Fast poll (2s) - only while actively waiting for a reply.
   useEffect(() => {
     if (!sessionKey || !ws || !connected) return
     if (!isWorking && !awaitingRender) return
@@ -1022,20 +1295,21 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   }, [autoRename])
 
   useEffect(() => {
-    if (!userScrolledUpRef.current) {
-      if (isInitialScrollRef.current) {
-        // Initial load: use rAF to ensure DOM is fully painted, then jump instantly to bottom
-        requestAnimationFrame(() => {
-          if (scrollContainerRef.current) {
-            scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight
-          }
-          isInitialScrollRef.current = false
-        })
-      } else {
-        bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-      }
+    // Skip auto-scroll when we just loaded older messages (useLayoutEffect handled that)
+    if (wasLoadingOlderRef.current) {
+      wasLoadingOlderRef.current = false
+      return
     }
-  }, [messages])
+    // Skip scroll during initial load — useLayoutEffect already snapped to bottom before paint
+    if (isInitialScrollRef.current) return
+    // Only smooth-scroll new messages when history is fully loaded.
+    // Prevents the "refresh flash" when a history re-fetch (reconnect / end-of-run poll)
+    // replaces messages and triggers an unwanted scroll to bottom.
+    if (loadedKey !== sessionKey) return
+    if (!userScrolledUpRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [messages, loadedKey, sessionKey])
 
   // Extract actual message content from OpenClaw webchat metadata envelope
   function stripBootstrapNoise(text: string): string {
@@ -1290,18 +1564,29 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     // Fire project-context injection on first send (lazy - skips sessions that get archived without messaging)
     const pendingInit = consumePendingProjectInit(sessionKey)
     if (pendingInit) {
-      Promise.resolve(null).then((token: string | null) => {
-        authFetch(`${API}/api/session-init`, {
+      try {
+        await authFetch(`${API}/api/session-init`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ sessionKey, projectSlug: pendingInit }),
-        }).catch(() => {})
-      })
+        })
+      } catch (e) {
+        console.error('[octis] session-init failed:', e)
+      }
     }
     const pendingPrefix = consumePendingProjectPrefix(sessionKey)
     let msg = pendingPrefix && input.trim()
       ? `${pendingPrefix}\n\n${input.trim()}`
       : pendingPrefix || input.trim()
+
+    // Prepend reply context so the agent knows which message is being replied to
+    if (replyingTo) {
+      const roleName = replyingTo.role === 'assistant' ? 'AI' : 'You'
+      const safePreview = replyingTo.preview.replace(/"/g, "'").slice(0, 120)
+      const idPart = replyingTo.id !== undefined ? ` (${replyingTo.id})` : ''
+      msg = `[Replying to ${roleName}${idPart}: "${safePreview}"]\n\n${msg}`
+      setReplyingTo(null)
+    }
 
     // If saveToWorkspace is enabled for any file, upload and append paths
     for (const pf of pendingFiles.filter(f => f.saveToWorkspace)) {
@@ -1368,6 +1653,9 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     setSentQueue(prev => [...prev.slice(-4), queueEntry]) // keep last 5
     // Tell sidebar this session is now working
     if (sessionKey) markSessionStreaming(sessionKey)
+    // Cancel any pending draft-save debounce — otherwise the 300ms timer fires AFTER clearDraft
+    // and re-saves the just-sent text as a new draft (stale draft bug).
+    if (draftTimerRef.current) { clearTimeout(draftTimerRef.current); draftTimerRef.current = null }
     setInput('')
     if (sessionKey) clearDraft(sessionKey)
     setPendingFiles([])
@@ -1425,7 +1713,18 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     void handleAutoRename()
   }, [renameRequested])
   type PendingFile = { dataUrl: string; mimeType: string; name: string; kind: 'image' | 'document' | 'video'; saveToWorkspace: boolean; extractedText?: string; extracting?: boolean; pages?: number; videoObjectUrl?: string; _key?: number }
-  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([])
+  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>(() => {
+    // Initialize from draft on mount — same pattern as input/text
+    if (!sessionKey) return []
+    const data = getDraftData(sessionKey)
+    if (!data.files || data.files.length === 0) return []
+    return data.files.map((f, i) => ({ ...f, _key: Date.now() + i })) as PendingFile[]
+  })
+  // Sync pendingFiles to draft when files are added/removed (safe here — pendingFiles is declared above)
+  useEffect(() => {
+    if (!sessionKey) return
+    setDraft(sessionKey, input, pendingFiles)
+  }, [pendingFiles, sessionKey]) // eslint-disable-line react-hooks/exhaustive-deps
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const extractVideoFrame = (objectUrl: string): Promise<string> =>
@@ -1586,6 +1885,32 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   const handleSave       = () => sendQuickAction(getQuickCommands().save, 'save')
   const handleSteppingAway = () => sendQuickAction(getQuickCommands().away, 'away')
 
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const handleDelete = async () => {
+    if (!sessionKey) return
+    setShowDeleteConfirm(false)
+    // Remove from active panes
+    onClose()
+    setSessions(sessions.filter((s: Session) => s.key !== sessionKey))
+    const { activePanes, pinToPane } = useSessionStore.getState()
+    activePanes.forEach((p: string | null, i: number) => { if (p === sessionKey) pinToPane(i, null) })
+    // Keep session in hidden filter so WS sessions.list broadcast can't revive it
+    useHiddenStore.getState().hide(sessionKey)
+    // Remove from Archives display
+    useSessionStore.getState().setHiddenSessions(
+      useSessionStore.getState().hiddenSessions.filter((s: Session) => s.key !== sessionKey)
+    )
+    // Call server to delete from DB + gateway
+    authFetch(`${API}/api/session-delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionKey }),
+    }).catch(e => console.error('delete failed:', e))
+    // Clear localStorage cache
+    localStorage.removeItem(`octis-msgs-${sessionKey}`)
+    localStorage.removeItem(`octis-draft-${sessionKey}`)
+  }
+
   const handleArchive = () => {
     if (!sessionKey) return
     if (confirm('Save and archive this session?')) {
@@ -1593,7 +1918,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
       const msg = getQuickCommands().archive_msg
       const idempotencyKey = `octis-archive-${Date.now()}-${Math.random().toString(36).slice(2)}`
       sendChat({ sessionKey, message: msg, deliver: false, idempotencyKey })
-      // Hide only — no gateway delete (sessions needed for productivity audits)
+      // Hide only - no gateway delete (sessions needed for productivity audits)
       // Permanently hide from sidebar so gateway sessions.list can't re-surface it
       useHiddenStore.getState().hide(sessionKey)
       setSessions(sessions.filter((s: Session) => s.key !== sessionKey))
@@ -1604,9 +1929,13 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   if (!sessionKey) {
     const handleNewSession = () => {
       const key = `session-${Date.now()}`
-      setSessions([{ key, label: 'New session', sessionKey: key }, ...sessions])
-      const emptyPane = useSessionStore.getState().activePanes.findIndex((p, i) => i < useSessionStore.getState().paneCount && !p)
-      useSessionStore.getState().pinToPane(emptyPane >= 0 ? emptyPane : _paneIndex, key)
+      useAuthStore.getState().claimSession(key)  // claim before setSessions so ownership check passes
+      setSessions([{ key, label: 'New session', sessionKey: key }, ...useSessionStore.getState().sessions])
+      const { activePanes: ap, paneCount: pc, pinToPane: pin, setPaneCount: setPC } = useSessionStore.getState()
+      const emptyPane = ap.findIndex((p: string | null, i: number) => i < pc && !p)
+      if (emptyPane >= 0) { pin(emptyPane, key) }
+      else if (pc < 8) { setPC(pc + 1); pin(pc, key) }
+      else { pin(pc - 1, key) }
     }
     return (
       <div className="flex-1 flex items-center justify-center bg-[#0f1117] border-r border-[#2a3142]">
@@ -1744,7 +2073,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                 </>
               )}
               {runQuiet && (
-                <span className="text-[10px] text-[#f59e0b] shrink-0 truncate max-w-[140px] animate-pulse">Running quietly…</span>
+                <span className="text-[10px] text-[#f59e0b] shrink-0 truncate max-w-[140px] animate-pulse">Running quietly...</span>
               )}
               {!runQuiet && showWorking && workingTool && (
                 <span className="text-[10px] text-[#a855f7] shrink-0 truncate max-w-[120px]">{workingTool}...</span>
@@ -1786,10 +2115,10 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             </button>
             <button
               onClick={handleBriefMe}
-              title="Brief me - 3-sentence status"
+              title="Dev Log — update OCTIS_CHANGES.md"
               className="h-6 w-6 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-sm text-[#6b7280] hover:text-indigo-400"
             >
-              💬
+              📝
             </button>
             <button
               onClick={handleSteppingAway}
@@ -1806,6 +2135,14 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               💾
             </button>
             <button
+              onClick={() => setCardOpen((s) => !s)}
+              title="Session brief"
+              className={`h-6 w-6 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-sm ${sessionCard ? 'text-[#a5b4fc] hover:text-white' : 'text-[#3a4152]'}`}
+            >
+              📋
+            </button>
+            <div className="w-px h-4 bg-[#2a3142] mx-0.5 shrink-0" />
+            <button
               onClick={handleArchive}
               title="Save & archive session"
               className="h-6 w-6 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-sm text-[#6b7280] hover:text-yellow-400"
@@ -1813,11 +2150,11 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               📦
             </button>
             <button
-              onClick={() => setCardOpen((s) => !s)}
-              title="Session brief"
-              className={`h-6 w-6 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-sm ${sessionCard ? 'text-[#a5b4fc] hover:text-white' : 'text-[#3a4152]'}`}
+              onClick={() => setShowDeleteConfirm(true)}
+              title="Delete session permanently"
+              className="h-6 px-1.5 flex items-center justify-center rounded bg-red-900/10 border border-red-900/20 hover:bg-red-900/30 hover:border-red-700/40 transition-colors text-[10px] text-red-400/50 hover:text-red-400 gap-0.5 shrink-0"
             >
-              📋
+              <span>🗑️</span><span className="font-medium">Del</span>
             </button>
           </div>
         </div>
@@ -1868,16 +2205,42 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             // Consider "at bottom" if within 80px of bottom
             const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
             userScrolledUpRef.current = !atBottom
+            // Auto-load older messages when scrolled within 150px of the top
+            if (el.scrollTop < 150 && hasMore && !isLoadingOlderRef.current) {
+              isLoadingOlderRef.current = true
+              savedScrollHeightRef.current = el.scrollHeight
+              setHistoryLimit(prev => prev + 100)
+            }
           }}
         >
           {hasMore && (
             <div className="flex justify-center py-2">
-              <button
-                onClick={() => setHistoryLimit(prev => prev + 100)}
-                className="text-xs text-[#6b7280] hover:text-[#a5b4fc] px-3 py-1 rounded-lg hover:bg-[#2a3142] transition-colors"
-              >
-                ↑ Load older messages
-              </button>
+              {isLoadingOlderRef.current ? (
+                <span className="text-xs text-[#6b7280] animate-pulse">↑ Loading older messages…</span>
+              ) : (
+                <button
+                  onClick={() => {
+                    const el = scrollContainerRef.current
+                    if (el) savedScrollHeightRef.current = el.scrollHeight
+                    isLoadingOlderRef.current = true
+                    setHistoryLimit(prev => prev + 100)
+                  }}
+                  className="text-xs text-[#6b7280] hover:text-[#a5b4fc] px-3 py-1 rounded-lg hover:bg-[#2a3142] transition-colors"
+                >
+                  ↑ Load older messages
+                </button>
+              )}
+            </div>
+          )}
+          {/* Skeleton loader — shown when no messages yet and still loading */}
+          {messages.length === 0 && loadedKey !== sessionKey && sessionKey && (
+            <div className="space-y-3 px-2 py-3 animate-pulse">
+              {[...Array(4)].map((_, i) => (
+                <div key={i} className={`flex gap-2 ${i % 3 === 2 ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`rounded-xl px-3 py-2 ${i % 3 === 2 ? 'bg-[#6366f1]/30 rounded-br-sm' : 'bg-[#1e2330] rounded-bl-sm'}`}
+                    style={{ width: `${[65, 45, 55, 40][i]}%`, height: '2.5rem' }} />
+                </div>
+              ))}
             </div>
           )}
           {(loadedKey === sessionKey || messages.length > 0 ? messages : [])
@@ -1915,18 +2278,31 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             .map((msg, i, arr) => {
               const msgTs = getMsgTs(msg)
               const showTs = msgTs > 0
+              const msgKey = msg.id !== undefined ? String(msg.id) : String(getMsgTs(msg) || `${msg.role}-${i}`)
               return (
-              <>
+              <React.Fragment key={msgKey}>
               <div
-                key={msg.id !== undefined ? String(msg.id) : i}
-                className={`flex gap-2 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                data-msg-key={msgKey}
+                className={`flex gap-2 items-end ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                onMouseEnter={() => setHoveredMsgKey(msgKey)}
+                onMouseLeave={() => setHoveredMsgKey(null)}
               >
+                {/* Reply button — appears left of user messages on hover */}
+                {msg.role === 'user' && (
+                  <button
+                    onClick={() => setReplyingTo({ id: msg.id, role: 'user', preview: stripReplyCtxText(extractText(msg.content)).slice(0, 120) })}
+                    className={`bg-transparent border-0 outline-none text-[#6b7280] hover:text-[#a5b4fc] transition-all duration-150 shrink-0 mb-2 leading-none select-none p-1 ${hoveredMsgKey === msgKey ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+                    style={{ fontFamily: 'inherit' }}
+                    title="Reply"
+                  >{'\u21A9\uFE0E'}</button>
+                )}
                 <div
                   className={`max-w-[85%] px-3 py-2 rounded-xl ${
                     msg.role === 'user'
                       ? 'bg-[#6366f1] text-white rounded-br-sm text-sm'
                       : 'bg-[#1e2330] text-[#e8eaf0] rounded-bl-sm'
                   }`}
+                  style={highlightedMsgKey === msgKey ? { animation: 'octisFlash 1.4s ease-out forwards' } : {}}
                 >
                   {/* Render gateway-stored media attachments (MediaPath/MediaPaths from chat.send) */}
                   {msg.MediaPaths && msg.MediaPaths.length > 0
@@ -1958,11 +2334,49 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                         })()
                       : null
                   }
+                  {/* Reply quote bubble — shown when message starts with reply context */}
+                  {(() => {
+                    const rc = getReplyCtx(msg.content)
+                    if (!rc) return null
+                    const handleJump = () => {
+                      const container = scrollContainerRef.current
+                      if (!container) return
+                      const findEl = (key: string) =>
+                        container.querySelector<HTMLElement>(`[data-msg-key="${key}"]`)
+                      const doScroll = (el: HTMLElement, key: string) => {
+                        el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                        setHighlightedMsgKey(key)
+                        setTimeout(() => setHighlightedMsgKey(null), 1500)
+                      }
+                      // Primary: jump by embedded message ID (scoped to this pane)
+                      if (rc.msgId) {
+                        const el = findEl(rc.msgId)
+                        if (el) { doScroll(el, rc.msgId); return }
+                      }
+                      // Fallback: search messages array chronologically, skip self
+                      const previewSnip = rc.preview.slice(0, 60).toLowerCase()
+                      const visible = messages.filter(m => !isHeartbeatMsg(m) && !(noiseHidden && isNoiseMsg(m)))
+                      for (let idx = 0; idx < visible.length; idx++) {
+                        const m = visible[idx]
+                        if (m === msg) continue
+                        const mText = stripReplyCtxText(extractText(m.content)).toLowerCase()
+                        if (mText.includes(previewSnip)) {
+                          const mKey = m.id !== undefined ? String(m.id) : String(getMsgTs(m) || `${m.role}-${idx}`)
+                          const el = findEl(mKey)
+                          if (el) doScroll(el, mKey)
+                          return
+                        }
+                      }
+                    }
+                    return <ReplyQuoteBubble role={rc.role} preview={rc.preview} isUserMsg={msg.role === 'user'} onJump={handleJump} />
+                  })()}
                   {/* user text-only content gets whitespace-pre-wrap; array (image+text) does not */}
-                  {msg.role === 'user' && typeof msg.content === 'string'
-                    ? <span className="whitespace-pre-wrap">{renderContent(msg.content)}</span>
-                    : renderContent(msg.content)
-                  }
+                  {(() => {
+                    const stripped = stripReplyCtx(msg.content)
+                    return msg.role === 'user' && typeof stripped === 'string'
+                      ? <span className="whitespace-pre-wrap">{renderContent(stripped)}</span>
+                      : renderContent(stripped)
+                  })()}
                   {showTs && (
                     <div className={`text-[10px] mt-1 ${msg.role === 'user' ? 'text-[#a5b4fc] text-right' : 'text-[#4b5563]'}`}>
                       {fmtMsgTs(msgTs)}
@@ -1978,8 +2392,17 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                     />
                   )}
                 </div>
+                {/* Reply button — appears right of assistant messages on hover */}
+                {msg.role === 'assistant' && (
+                  <button
+                    onClick={() => setReplyingTo({ id: msg.id, role: 'assistant', preview: stripReplyCtxText(extractText(msg.content)).slice(0, 120) })}
+                    className={`bg-transparent border-0 outline-none text-[#6b7280] hover:text-[#a5b4fc] transition-all duration-150 shrink-0 mb-2 leading-none select-none p-1 ${hoveredMsgKey === msgKey ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+                    style={{ fontFamily: 'inherit' }}
+                    title="Reply"
+                  >{'\u21A9\uFE0E'}</button>
+                )}
               </div>
-              </>
+              </React.Fragment>
               )
             })}
           {showWorking && (
@@ -1996,7 +2419,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                   <span className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ background: runQuiet ? '#f59e0b' : '#6366f1', animationDelay: '150ms' }} />
                   <span className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ background: runQuiet ? '#f59e0b' : '#6366f1', animationDelay: '300ms' }} />
                 </span>
-                <span>{runQuiet ? 'Running quietly…' : workingTool ? `${workingTool}...` : 'thinking...'}</span>
+                <span>{runQuiet ? 'Running quietly...' : workingTool ? `${workingTool}...` : 'thinking...'}</span>
               </div>
             </div>
           )}
@@ -2028,6 +2451,23 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
 
         {/* Input */}
         <div className="px-3 py-3 border-t border-[#2a3142] bg-[#181c24] shrink-0">
+          {/* Reply preview bar — shown when replying to a message */}
+          {replyingTo && (
+            <div className="mb-2 flex items-center gap-2 bg-[#1a1f2e] border border-[#2a3142] rounded-lg px-2.5 py-1.5">
+              <span className="text-[#6366f1] text-sm shrink-0 leading-none">↩</span>
+              <div className="flex-1 min-w-0">
+                <div className="text-[10px] font-semibold text-[#6366f1] mb-0.5">
+                  Replying to {replyingTo.role === 'assistant' ? 'AI' : 'you'}
+                </div>
+                <div className="text-xs text-[#6b7280] truncate">{replyingTo.preview}</div>
+              </div>
+              <button
+                onClick={() => setReplyingTo(null)}
+                className="text-[#6b7280] hover:text-white shrink-0 w-5 h-5 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-sm"
+                title="Cancel reply"
+              >✕</button>
+            </div>
+          )}
           {/* File preview */}
           {pendingFiles.length > 0 && (
             <div className="mb-2 flex gap-2 overflow-x-auto pb-1">
@@ -2070,6 +2510,13 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               ))}
             </div>
           )}
+          {/* Draft indicator */}
+          {input.trim() && !showWorking && (
+            <div className="flex items-center gap-1 px-1 pb-0.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 opacity-70" />
+              <span className="text-[10px] text-[#6b7280]">Draft saved</span>
+            </div>
+          )}
           <div className="flex gap-2 items-end">
             <input
               ref={fileInputRef}
@@ -2090,16 +2537,17 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               ref={textareaRef}
               className="flex-1 bg-[#0f1117] border border-[#2a3142] rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-[#6366f1] placeholder-[#4b5563] resize-none overflow-y-auto leading-relaxed"
               style={{ minHeight: '38px', maxHeight: '150px' }}
-              placeholder="Message…"
+              placeholder="Message..."
               value={input}
               rows={1}
               onChange={(e) => {
                 const val = e.target.value
+                inputUndo.push(input) // push BEFORE update (input = value before change)
                 setInput(val)
-                // Debounce draft — avoids Zustand re-render on every keystroke
+                // Debounce draft - avoids Zustand re-render on every keystroke
                 if (draftTimerRef.current) clearTimeout(draftTimerRef.current)
-                draftTimerRef.current = setTimeout(() => { if (sessionKey) setDraft(sessionKey, val) }, 300)
-                // Height via rAF — avoids forced layout reflow on every keystroke
+                draftTimerRef.current = setTimeout(() => { if (sessionKey) setDraft(sessionKey, val, pendingFiles) }, 300)
+                // Height via rAF - avoids forced layout reflow on every keystroke
                 const ta = e.target
                 requestAnimationFrame(() => {
                   ta.style.height = 'auto'
@@ -2107,6 +2555,14 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                 })
               }}
               onKeyDown={(e) => {
+                // Escape cancels active reply
+                if (e.key === 'Escape' && replyingTo) { e.preventDefault(); setReplyingTo(null); return }
+                // Undo/redo (Word-style burst coalescing) — must check before Enter
+                if (inputUndo.handleKeyDown(e, input, (v) => {
+                  setInput(v)
+                  if (sessionKey) setDraft(sessionKey, v, pendingFiles)
+                  setTimeout(resizeTextarea, 0)
+                })) return
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault()
                   handleSend()
@@ -2126,6 +2582,13 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
       </div>
 
 
+      {showDeleteConfirm && sessionKey && (
+        <DeleteConfirmModal
+          sessionLabel={getLabel(sessionKey) || sessions.find((s: Session) => s.key === sessionKey)?.label || sessionKey}
+          onConfirm={handleDelete}
+          onCancel={() => setShowDeleteConfirm(false)}
+        />
+      )}
     </div>
   )
 }

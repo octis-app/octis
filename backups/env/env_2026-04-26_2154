@@ -1,0 +1,14 @@
+GATEWAY_URL=wss://kennan-openclaw.duckdns.org/gateway
+GATEWAY_TOKEN=e9a2d458e909d3db75ef2e787ceb7f6022df91e936d06f14
+
+ADMIN_EMAIL=kehoa.ify@gmail.com
+ADMIN_PASSWORD=CaskenAdmin2026!
+
+OCTIS_API_PORT=3747
+OCTIS_WORKSPACE=/home/kehoa/.openclaw/workspace
+
+NODE_ENV=production
+VITE_API_URL=/octis
+
+# Cost tracking — GCP Cloud SQL via cloud-sql-proxy on 15432
+COSTS_DB_URL=postgresql://casken_app:MrS%23qT99V45N6gBGDNMW2%23LENxWq@127.0.0.1:15432/casken

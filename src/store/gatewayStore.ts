@@ -144,6 +144,21 @@ void getOrCreateDevice
 const listeners = new Set<(msg: unknown) => void>()
 const emit = (msg: unknown) => listeners.forEach((fn) => fn(msg))
 
+// ─── Auto-tag helpers ───────────────────────────────────────────────────────
+// Sessions whose keys contain ':slack:' are automatically assigned to the
+// 'Slack' project so they stay out of the main Sessions tab.
+function autoTagSlackSessions(sessions: Session[]): void {
+  // Defer until useProjectStore is initialized (it's defined later in this module)
+  setTimeout(() => {
+    const projectStore = useProjectStore.getState()
+    for (const s of sessions) {
+      if (s.key.includes(':slack:') && !projectStore.tags[s.key]?.project) {
+        projectStore.setTag(s.key, 'Slack')
+      }
+    }
+  }, 0)
+}
+
 // ─── Gateway store ────────────────────────────────────────────────────────────
 
 export const useGatewayStore = create<GatewayState>()(
@@ -374,6 +389,8 @@ export const useGatewayStore = create<GatewayState>()(
             }
           })
           useSessionStore.getState().setSessions(sessions)
+          // Auto-tag Slack sessions to the Slack project
+          autoTagSlackSessions(sessions)
           // Cache to localStorage so next load is instant
           if (msg.id === 'sessions-list-init') {
             const { agentId } = useGatewayStore.getState()
@@ -385,6 +402,7 @@ export const useGatewayStore = create<GatewayState>()(
           const raw: RawSession[] = msg.sessions || []
           const sessions: Session[] = raw.map((s) => ({ ...s, key: s.key || s.sessionKey || '' }))
           useSessionStore.getState().setSessions(sessions)
+          autoTagSlackSessions(sessions)
         }
 
         if (msg.type === 'event' && msg.event === 'chat' && msg.payload?.sessionKey) {
@@ -443,20 +461,160 @@ export const useGatewayStore = create<GatewayState>()(
 
 // ─── Draft store ─────────────────────────────────────────────────────────────
 
+// Drafts persist across reloads (localStorage) AND across devices (server sync).
+
+const DRAFT_LS_KEY = 'octis-drafts-v2'
+const DRAFT_API_BASE = ((import.meta as any).env?.VITE_API_URL as string) || ''
+
+/** Structured draft: text + optional pending image/file attachments */
+export interface DraftData {
+  text: string
+  // Pending files (images, PDFs) — stored as-is so they survive reload.
+  // Only images/docs with dataUrls are persisted; video objectUrls are skipped.
+  files?: Array<{
+    dataUrl: string
+    mimeType: string
+    name: string
+    kind: 'image' | 'document' | 'video'
+    saveToWorkspace: boolean
+    extractedText?: string
+    pages?: number
+    _key?: number
+  }>
+}
+
+function serializeDraft(d: DraftData): string {
+  return JSON.stringify(d)
+}
+function deserializeDraft(raw: string): DraftData {
+  try {
+    const parsed = JSON.parse(raw)
+    if (parsed && typeof parsed === 'object' && 'text' in parsed) return parsed as DraftData
+    // Legacy: plain string
+    if (typeof parsed === 'string') return { text: parsed }
+  } catch {}
+  // Legacy: raw string (not JSON)
+  return { text: raw }
+}
+
+function draftLoadFromLS(): Record<string, string> {
+  try { return JSON.parse(localStorage.getItem(DRAFT_LS_KEY) || '{}') } catch { return {} }
+}
+function draftSaveToLS(drafts: Record<string, string>) {
+  try { localStorage.setItem(DRAFT_LS_KEY, JSON.stringify(drafts)) } catch {}
+}
+async function draftApiCall(path: string, method: string, body?: object) {
+  try {
+    await fetch(`${DRAFT_API_BASE}${path}`, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : {},
+      credentials: 'include',
+      body: body ? JSON.stringify(body) : undefined,
+    })
+  } catch {}
+}
+
 interface DraftState {
-  drafts: Record<string, string>
-  setDraft: (sessionKey: string, text: string) => void
+  drafts: Record<string, string> // serialized DraftData strings
+  _syncTimers: Record<string, ReturnType<typeof setTimeout>>
+  /** Save structured draft (text + optional files) */
+  setDraft: (sessionKey: string, text: string, files?: DraftData['files']) => void
+  /** Get structured draft data */
+  getDraftData: (sessionKey: string) => DraftData
+  /** Convenience: get only text part */
   getDraft: (sessionKey: string) => string
   clearDraft: (sessionKey: string) => void
+  /** Returns true if the draft was intentionally cleared (tombstone present) — prevents server re-restore */
+  isDraftCleared: (sessionKey: string) => boolean
+  hydrateFromServer: () => Promise<void>
 }
 
 export const useDraftStore = create<DraftState>()((set, get) => ({
-  drafts: {},
-  setDraft: (sessionKey, text) =>
-    set((s) => ({ drafts: { ...s.drafts, [sessionKey]: text } })),
-  getDraft: (sessionKey) => get().drafts[sessionKey] || '',
-  clearDraft: (sessionKey) =>
-    set((s) => { const d = { ...s.drafts }; delete d[sessionKey]; return { drafts: d } }),
+  drafts: draftLoadFromLS(),
+  _syncTimers: {},
+
+  setDraft: (sessionKey, text, files?) => {
+    // Omit video files (objectUrls not serializable) and skip saving if both empty
+    const persistFiles = files?.filter(f => f.kind !== 'video' && f.dataUrl) ?? []
+    const hasContent = !!text || persistFiles.length > 0
+    const serialized = hasContent ? serializeDraft({ text, files: persistFiles.length ? persistFiles : undefined }) : ''
+    set((s) => {
+      const newDrafts = serialized
+        ? { ...s.drafts, [sessionKey]: serialized }
+        : (() => { const d = { ...s.drafts }; delete d[sessionKey]; return d })()
+      draftSaveToLS(newDrafts)
+      return { drafts: newDrafts }
+    })
+    // Debounce server sync 1.5s
+    const existing = get()._syncTimers[sessionKey]
+    if (existing) clearTimeout(existing)
+    const timer = setTimeout(() => {
+      void draftApiCall(
+        `/api/drafts/${encodeURIComponent(sessionKey)}`,
+        serialized ? 'PUT' : 'DELETE',
+        serialized ? { text: serialized } : undefined
+      )
+      set(s => { const t = { ...s._syncTimers }; delete t[sessionKey]; return { _syncTimers: t } })
+    }, 1500)
+    set(s => ({ _syncTimers: { ...s._syncTimers, [sessionKey]: timer } }))
+  },
+
+  getDraftData: (sessionKey) => {
+    const raw = get().drafts[sessionKey]
+    if (!raw) return { text: '' }
+    return deserializeDraft(raw)
+  },
+
+  getDraft: (sessionKey) => {
+    const raw = get().drafts[sessionKey]
+    if (!raw) return ''
+    return deserializeDraft(raw).text
+  },
+
+  clearDraft: (sessionKey) => {
+    const existing = get()._syncTimers[sessionKey]
+    if (existing) clearTimeout(existing)
+    set((s) => {
+      const d = { ...s.drafts }; delete d[sessionKey]
+      // Write '' tombstone to localStorage — hydrateFromServer merges:
+      //   localDrafts[k] !== undefined ? localDrafts[k] : serverValue
+      // With the tombstone, '' !== undefined → uses '' (empty) instead of the stale server
+      // draft, preventing it from coming back while the DELETE request is still in-flight.
+      draftSaveToLS({ ...d, [sessionKey]: '' })
+      const t = { ...s._syncTimers }; delete t[sessionKey]
+      return { drafts: d, _syncTimers: t }
+    })
+    void draftApiCall(`/api/drafts/${encodeURIComponent(sessionKey)}`, 'DELETE')
+    // Remove the '' tombstone from localStorage after 10s (server DELETE should be processed by then)
+    setTimeout(() => {
+      const current = draftLoadFromLS()
+      if (current[sessionKey] === '') { delete current[sessionKey]; draftSaveToLS(current) }
+    }, 10000)
+  },
+
+  isDraftCleared: (sessionKey) => {
+    return draftLoadFromLS()[sessionKey] === ''
+  },
+
+  hydrateFromServer: async () => {
+    try {
+      const resp = await fetch(`${DRAFT_API_BASE}/api/drafts`, {
+        credentials: 'include',
+      })
+      const data = await resp.json()
+      if (!data.ok) return
+      const localDrafts = draftLoadFromLS()
+      const merged: Record<string, string> = {}
+      for (const [k, v] of Object.entries(data.drafts as Record<string, { text: string }>)) {
+        if (v?.text) merged[k] = localDrafts[k] !== undefined ? localDrafts[k] : v.text
+      }
+      for (const [k, v] of Object.entries(localDrafts)) {
+        if (v) merged[k] = v
+      }
+      draftSaveToLS(merged)
+      set({ drafts: merged })
+    } catch {}
+  },
 }))
 
 // ─── Label store ──────────────────────────────────────────────────────────────
@@ -540,9 +698,27 @@ export const useHiddenStore = create<HiddenState>()(
 
       hydrateFromServer: async (token?: string) => {
         const keys = await fetchHiddenFromServer(token)
-        // Merge with local state — don't discard in-flight archives that haven't
-        // persisted to server yet (race condition on WS reconnect)
-        set(s => ({ hydrated: true, hidden: new Set([...s.hidden, ...keys]) }))
+        // Server is the source of truth. Replace local Set with server keys,
+        // but preserve any keys that were hidden locally in the last 90s
+        // (in-flight archives not yet persisted — race condition on fast WS reconnect).
+        const serverSet = new Set(keys)
+        set(s => {
+          const preserved = new Set<string>()
+          const cutoff = Date.now() - 90_000
+          s.hidden.forEach(k => {
+            // Keep locally-added keys not on the server only if they are very recent.
+            // We don't have a timestamp per key, so keep ALL local keys that are
+            // absent from the server only if the store was just hydrated < 90s ago.
+            // If already hydrated (second call), trust the server fully.
+            if (!s.hydrated && !serverSet.has(k)) preserved.add(k)
+          })
+          return { hydrated: true, hidden: new Set([...serverSet, ...preserved]) }
+        })
+        // Re-filter sessions so any unarchived sessions immediately reappear.
+        const sessionStore = useSessionStore.getState()
+        if (sessionStore.sessions.length > 0) {
+          sessionStore.setSessions([...sessionStore.sessions])
+        }
       },
 
       hide: (sessionKey) => {
@@ -706,8 +882,8 @@ async function pushProjectTagToServer(sessionKey: string, projectTag: string): P
 interface ProjectState {
   tags: Record<string, ProjectTag>
   hydrated: boolean
-  projectMeta: Record<string, { emoji: string; name: string; color: string }>
-  setProjectMeta: (meta: Record<string, { emoji: string; name: string; color: string }>) => void
+  projectMeta: Record<string, { emoji: string; name: string; color: string; hideFromSessions?: boolean }>
+  setProjectMeta: (meta: Record<string, { emoji: string; name: string; color: string; hideFromSessions?: boolean }>) => void
   getProjectEmoji: (slug: string) => string
   setTag: (sessionKey: string, project: string) => void
   setCard: (sessionKey: string, card: string) => void
@@ -847,15 +1023,8 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
   setHiddenSessions: (sessions) => set({ hiddenSessions: sessions }),
   hydrateHiddenFromServer: async (token?: string) => {
     const fetched = await fetchHiddenSessionDetails(token)
-    if (fetched.length === 0) return
-    set(s => {
-      const existingKeys = new Set(s.hiddenSessions.map((h: Session) => h.key))
-      const merged = [...s.hiddenSessions]
-      for (const fs of fetched) {
-        if (!existingKeys.has(fs.key)) merged.push(fs)
-      }
-      return { hiddenSessions: merged }
-    })
+    // Replace the list entirely so unarchived sessions disappear immediately
+    set({ hiddenSessions: fetched })
   },
 
   setSessions: (sessions) => {
@@ -912,6 +1081,8 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
       // so they accumulate as ghost sessions (same label as real sessions, vanish on reload).
       const pendingLocal = state.sessions.filter((s) => {
         if (!/^session-\d+$/.test(s.key) || seen.has(s.key)) return false
+        // Don't revive sessions that have been permanently deleted or archived
+        if (hiddenStore.isHidden(s.key)) return false
         const ts = parseInt(s.key.split('-')[1], 10)
         return !isNaN(ts) && (now - ts) < 2 * 60 * 1000 // keep for max 2 min
       })
@@ -923,7 +1094,35 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
           newHistory[s.key] = updated
         }
       }
-      return { sessions: [...pendingLocal, ...deduped], costHistory: newHistory, hiddenSessions: hiddenCollected }
+      // Merge WS-known hidden sessions with DB-hydrated sessions that aren't in the WS list.
+      // Without this, old bare-UUID sessions (from hydrateHiddenFromServer) get wiped on every
+      // WS sessions.list update — causing the Sessions-tab ARCHIVED and Projects-tab ARCHIVED
+      // views to diverge (one has full DB list, the other only WS-known subset).
+      const wsKeys = new Set([...deduped.map((s) => s.key), ...hiddenCollected.map((s) => s.key)])
+      const dbOnlyHidden = state.hiddenSessions.filter(
+        (s) => !wsKeys.has(s.key) && hiddenStore.isHidden(s.key)
+      )
+      // Migrate optimistic pane keys (session-<ts>) to real gateway keys (agent:main:session-<ts>).
+      // This is what causes the "lost highlight" + duplicate pane bug: the pane was opened with
+      // the local optimistic key, but after WS sync the session.key is the full gateway key.
+      // activePanes.includes(session.key) returns false → isPinned = false → highlight gone →
+      // re-click opens a second pane with the real key → duplicate window.
+      let panesUpdated = false
+      const updatedActivePanes = state.activePanes.map((pane: string | null) => {
+        if (!pane || !/^session-\d+$/.test(pane)) return pane
+        const realSession = deduped.find((s) => {
+          const m = s.key.match(/^agent:[^:]+:(session-\d+)$/)
+          return m && m[1] === pane
+        })
+        if (realSession) { panesUpdated = true; return realSession.key }
+        return pane
+      })
+      return {
+        sessions: [...pendingLocal, ...deduped],
+        costHistory: newHistory,
+        hiddenSessions: [...hiddenCollected, ...dbOnlyHidden],
+        ...(panesUpdated ? { activePanes: updatedActivePanes } : {}),
+      }
     })
   },
 
@@ -1228,6 +1427,18 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
   },
 }), {
   name: 'octis-session-layout',
+  onRehydrateStorage: () => (state) => {
+    // Deduplicate activePanes on load — stale localStorage can contain the same key twice
+    if (state && state.activePanes) {
+      const seen = new Set<string>()
+      state.activePanes = state.activePanes.map((k: string | null) => {
+        if (!k) return null
+        if (seen.has(k)) return null
+        seen.add(k)
+        return k
+      })
+    }
+  },
   partialize: (s) => ({
     activePanes: s.activePanes,
     paneCount: s.paneCount,
