@@ -417,7 +417,11 @@ function ProjectGroup({ name, slug, sessions, activePanes, paneCount, onPin, onR
   onProjectDrop?: () => void
 }) {
   const { getStatus } = useSessionStore()
-  const [open, setOpen] = useState(true)
+  const storageKey = `octis-group-open-${name}`
+  const [open, setOpen] = useState(() => {
+    const saved = localStorage.getItem(storageKey)
+    return saved === null ? true : saved === 'true'
+  })
 
   // Bubble up highest-urgency status
   const order: SessionStatus[] = ['working', 'stuck', 'active', 'quiet']
@@ -440,7 +444,7 @@ function ProjectGroup({ name, slug, sessions, activePanes, paneCount, onPin, onR
       onDrop={(e) => { e.preventDefault(); onProjectDrop?.() }}
     >
       <button
-        onClick={() => setOpen(o => !o)}
+        onClick={() => setOpen(o => { const next = !o; localStorage.setItem(storageKey, String(next)); return next })}
         className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg transition-colors text-left ${
           isDragOver ? 'bg-[#2a2f5a] text-[#818cf8]' : 'hover:bg-[#1e2330]'
         }`}

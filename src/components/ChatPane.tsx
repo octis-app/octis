@@ -473,6 +473,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   // Per-session message cache - show instantly on switch, refresh silently behind the scenes
   // Uses localStorage so cache survives pane unmount/remount (useRef would die on close)
   const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null)
   const setMessagesAndCache = (updater: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[]), key?: string) => {
     setMessages(prev => {
       const next = typeof updater === 'function' ? updater(prev) : updater
@@ -848,22 +849,48 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             } else {
               // Poll is truncated: keep prev, append only genuinely new messages
               const prevTs = new Set(prevServer.map(m => getMsgTs(m)).filter(ts => ts > 0))
+              const prevIds = new Set(
+                prevServer.filter(m => m.id !== undefined && m.id !== null).map(m => m.id)
+              )
               // For ts=0 messages: use content fingerprint to avoid appending duplicates each poll
               const prevFp = new Set(prevServer.filter(m => getMsgTs(m) === 0).map(m =>
                 `${m.role}:${extractText(m.content).substring(0, 100)}`
               ))
               const newOnes = msgs.filter(m => {
+                // Already present by id — this is a ts-update for a WS-echo that had ts=0, not a new msg
+                if (m.id !== undefined && m.id !== null && prevIds.has(m.id)) return false
                 const ts = getMsgTs(m)
                 if (ts > 0) return !prevTs.has(ts)
                 return !prevFp.has(`${m.role}:${extractText(m.content).substring(0, 100)}`)
               })
+              // Patch real timestamps onto ts=0 entries that the poll now has ts for.
+              // WS echoes often lack timestamps; without patching, the message stays ts=0
+              // and every subsequent poll re-adds it as "new", eventually landing after
+              // assistant replies that already have timestamps.
+              const patched = prevServer.map(m => {
+                if (getMsgTs(m) === 0 && m.id !== undefined && m.id !== null) {
+                  const pm = msgs.find(p => p.id === m.id)
+                  if (pm && getMsgTs(pm) > 0) return { ...m, ...pm }
+                }
+                return m
+              })
               // Fast-exit: last message unchanged and nothing new — skip re-render
               if (newOnes.length === 0) {
                 const lastPollTs = getMsgTs(msgs[msgs.length - 1])
-                const lastPrevTs = getMsgTs(prevServer[prevServer.length - 1])
+                const lastPrevTs = getMsgTs(patched[patched.length - 1])
                 if (lastPollTs > 0 && lastPollTs === lastPrevTs) return prev
               }
-              base = newOnes.length > 0 ? [...prevServer, ...newOnes] : prevServer
+              if (newOnes.length > 0) {
+                // Sort by timestamp so out-of-order arrivals land in the right spot.
+                // Both ta and tb must be > 0 to sort; ts=0 preserves relative order.
+                base = [...patched, ...newOnes].sort((a, b) => {
+                  const ta = getMsgTs(a), tb = getMsgTs(b)
+                  if (!ta || !tb) return 0
+                  return ta - tb
+                })
+              } else {
+                base = patched
+              }
             }
 
             // ── Step 2: Fast-exit for standard case (no optimistics, nothing new) ─────
@@ -1352,6 +1379,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     // OpenClaw native format: {type:'image', data:..., mimeType:...}
     const directData = block.data as string | undefined
     const directMime = (block.mimeType || block.media_type) as string | undefined
+    const API_BASE = (window as {VITE_API_URL?: string}).VITE_API_URL || import.meta.env.VITE_API_URL || ''
     let imgSrc = ''
     if (src?.type === 'base64' && src.data) {
       imgSrc = `data:${src.media_type || 'image/png'};base64,${src.data}`
@@ -1359,10 +1387,24 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
       imgSrc = src.url
     } else if (directData) {
       imgSrc = `data:${directMime || 'image/png'};base64,${directData}`
+    } else if (src?.type === 'file' && (src as Record<string,unknown>).path) {
+      const filePath = (src as Record<string,unknown>).path as string
+      const filename = filePath.split('/').pop() || ''
+      imgSrc = `${API_BASE}/api/media/${encodeURIComponent(filename)}`
+    } else if ((block.path || block.file_path) as string | undefined) {
+      const filePath = (block.path || block.file_path) as string
+      const filename = filePath.split('/').pop() || ''
+      imgSrc = `${API_BASE}/api/media/${encodeURIComponent(filename)}`
     }
-    return imgSrc
-      ? <img key={key} src={imgSrc} alt="image" className="max-w-full rounded-lg my-1 max-h-64 object-contain" />
-      : <span key={key} className="text-[#6b7280] text-xs italic">[Image]</span>
+    if (!imgSrc) return null
+    return (
+      <div key={key} className="my-1 cursor-pointer rounded-xl overflow-hidden inline-block" style={{ maxWidth: 220, maxHeight: 180 }}
+        onClick={() => setLightboxSrc(imgSrc)}>
+        <img src={imgSrc} alt="image" className="w-full h-full object-cover hover:opacity-90 transition-opacity"
+          style={{ maxWidth: 220, maxHeight: 180 }}
+          onError={(e) => { (e.target as HTMLImageElement).parentElement!.style.display = 'none' }} />
+      </div>
+    )
   }
 
   const API = (window as {VITE_API_URL?: string}).VITE_API_URL ||
@@ -1534,7 +1576,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
         return <div className="flex items-center gap-2 bg-[#2a3142] rounded-lg px-3 py-2 my-1 max-w-xs"><span className="text-2xl">📄</span><span className="text-xs text-[#6b7280]">PDF attachment</span></div>
       }
       if (hasImageBlock) {
-        return <span className="text-[#6b7280] text-xs italic">[Image attachment]</span>
+        return null  // content-block image — MediaPaths render handles the actual preview
       }
       return <span className="text-[#6b7280] text-xs italic">[Attachment]</span>
     }
@@ -1843,23 +1885,25 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     }
   }
 
-  // Helper: send a quick-action message without adding an optimistic to the local state.
-  // The poll will surface the message naturally. The thinking indicator confirms it was sent.
+  // Helper: send a quick-action message with an optimistic entry so it appears immediately.
+  // Same pattern as handleSend — the poll/WS echo will confirm + replace it.
   const sendQuickAction = (msg: string, prefix: string) => {
     if (!sessionKey) return
-    sendChat({ sessionKey, message: msg, deliver: false, idempotencyKey: `octis-${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}` })
-    const ok = true // sendChat handles WS + HTTP fallback
-    if (ok) {
-      setIsWorking(true)
-      setWorkingTool(null)
-      setLastRole(sessionKey, 'user')
-      lastSentRef.current = Date.now()
-      preSendCountRef.current = messages.filter(m => typeof m.id !== 'number').length
-      preSendCostRef.current = sessions.find((s: Session) => s.key === sessionKey)?.estimatedCostUsd || 0
-      if (sessionKey) markSessionStreaming(sessionKey)
-      if (workingTimeoutRef.current) clearTimeout(workingTimeoutRef.current)
-      workingTimeoutRef.current = setTimeout(() => { setIsWorking(false); setWorkingTool(null) }, 90000)
-    }
+    const idempotencyKey = `octis-${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    sendChat({ sessionKey, message: msg, deliver: false, idempotencyKey })
+    // Add optimistic so message is visible immediately (avoids "message missing" race)
+    const optimisticId = Date.now()
+    pendingOptimisticIdRef.current = optimisticId
+    setMessages(prev => [...prev, { role: 'user', content: msg, id: optimisticId }])
+    setIsWorking(true)
+    setWorkingTool(null)
+    setLastRole(sessionKey, 'user')
+    lastSentRef.current = Date.now()
+    preSendCountRef.current = messages.filter(m => typeof m.id !== 'number').length
+    preSendCostRef.current = sessions.find((s: Session) => s.key === sessionKey)?.estimatedCostUsd || 0
+    if (sessionKey) markSessionStreaming(sessionKey)
+    if (workingTimeoutRef.current) clearTimeout(workingTimeoutRef.current)
+    workingTimeoutRef.current = setTimeout(() => { setIsWorking(false); setWorkingTool(null) }, 90000)
   }
 
   const handleBriefMe    = () => sendQuickAction(getQuickCommands().brief, 'brief')
@@ -2272,13 +2316,13 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                 <div
                   className={`max-w-[85%] px-3 py-2 rounded-xl ${
                     msg.role === 'user'
-                      ? 'bg-[#6366f1] text-white rounded-br-sm text-sm'
+                      ? 'bg-[#6366f1] text-white rounded-br-sm text-sm octis-user-bubble'
                       : 'bg-[#1e2330] text-[#e8eaf0] rounded-bl-sm'
                   }`}
                   style={highlightedMsgKey === msgKey ? { animation: 'octisFlash 1.4s ease-out forwards' } : {}}
                 >
                   {/* Render gateway-stored media attachments (MediaPath/MediaPaths from chat.send) */}
-                  {msg.MediaPaths && msg.MediaPaths.length > 0
+                  {(msg.MediaPaths && msg.MediaPaths.length > 0
                     ? msg.MediaPaths.map((p, i) => {
                         const filename = p.split('/').pop() || ''
                         const mime = (msg.MediaTypes?.[i] || msg.MediaType || '')
@@ -2289,24 +2333,33 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                               <span className="text-2xl">📄</span>
                               <span className="text-xs text-white truncate">{filename}</span>
                             </a>
-                          : <img key={i} src={src} alt="attachment" className="max-w-full rounded-lg my-1 max-h-64 object-contain"
-                              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
+                          : <div key={i} className="my-1 cursor-pointer rounded-xl overflow-hidden inline-block" style={{ maxWidth: 220, maxHeight: 180 }}
+                              onClick={() => setLightboxSrc(src)}>
+                              <img src={src} alt="attachment" className="w-full h-full object-cover hover:opacity-90 transition-opacity"
+                                style={{ maxWidth: 220, maxHeight: 180 }}
+                                onError={(e) => { (e.target as HTMLImageElement).parentElement!.style.display = 'none' }} />
+                            </div>
                       })
                     : msg.MediaPath
                       ? (() => {
                           const filename = msg.MediaPath.split('/').pop() || ''
                           const src = `${API}/api/media/${encodeURIComponent(filename)}`
-                          return (msg.MediaType || '').includes('pdf')
-                            ? <a href={src} target="_blank" rel="noopener noreferrer"
-                                className="flex items-center gap-2 bg-[#4f51c0] rounded-lg px-3 py-2 my-1 max-w-xs no-underline">
-                                <span className="text-2xl">📄</span>
-                                <span className="text-xs text-white truncate">{filename}</span>
-                              </a>
-                            : <img src={src} alt="attachment" className="max-w-full rounded-lg my-1 max-h-64 object-contain"
-                                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
+                          if ((msg.MediaType || '').includes('pdf')) {
+                            return <a href={src} target="_blank" rel="noopener noreferrer"
+                              className="flex items-center gap-2 bg-[#4f51c0] rounded-lg px-3 py-2 my-1 max-w-xs no-underline">
+                              <span className="text-2xl">📄</span>
+                              <span className="text-xs text-white truncate">{filename}</span>
+                            </a>
+                          }
+                          return <div className="my-1 cursor-pointer rounded-xl overflow-hidden inline-block" style={{ maxWidth: 220, maxHeight: 180 }}
+                            onClick={() => setLightboxSrc(src)}>
+                            <img src={src} alt="attachment" className="w-full h-full object-cover hover:opacity-90 transition-opacity"
+                              style={{ maxWidth: 220, maxHeight: 180 }}
+                              onError={(e) => { (e.target as HTMLImageElement).parentElement!.style.display = 'none' }} />
+                          </div>
                         })()
                       : null
-                  }
+                  )}
                   {/* Reply quote bubble — shown when message starts with reply context */}
                   {(() => {
                     const rc = getReplyCtx(msg.content)
@@ -2561,6 +2614,39 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
           onConfirm={handleDelete}
           onCancel={() => setShowDeleteConfirm(false)}
         />
+      )}
+
+      {/* ─ Image lightbox ──────────────────────────────────────────────────────── */}
+      {lightboxSrc && (
+        <div
+          className="fixed inset-0 z-[300] bg-black/90 flex items-center justify-center"
+          onClick={() => setLightboxSrc(null)}
+          onKeyDown={(e) => { if (e.key === 'Escape') setLightboxSrc(null) }}
+          tabIndex={-1}
+          ref={(el) => el?.focus()}
+        >
+          {/* Close button */}
+          <button
+            className="absolute top-4 right-4 z-10 w-9 h-9 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 text-white text-xl transition-colors"
+            onClick={() => setLightboxSrc(null)}
+            title="Close (Esc)"
+          >×</button>
+          {/* Image — click stops propagation so clicking image itself doesn’t close */}
+          <img
+            src={lightboxSrc}
+            alt="Full size"
+            className="max-h-[90vh] max-w-[90vw] object-contain rounded-lg shadow-2xl select-none"
+            onClick={(e) => e.stopPropagation()}
+          />
+          {/* Open in new tab */}
+          <a
+            href={lightboxSrc}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="absolute bottom-4 right-4 text-xs text-white/50 hover:text-white/80 transition-colors"
+            onClick={(e) => e.stopPropagation()}
+          >↗ open in new tab</a>
+        </div>
       )}
     </div>
   )
