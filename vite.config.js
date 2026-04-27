@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 
 export default defineConfig({
+  base: '/octis/',
   plugins: [
     react(),
     VitePWA({
@@ -27,13 +28,13 @@ export default defineConfig({
       injectRegister: 'auto',
       workbox: {
         navigateFallbackDenylist: [/^\/dev\//],
-        importScripts: ['/sw-push.js'],
+        importScripts: ['sw-push.js'],
         skipWaiting: true,  // Activate new SW immediately on install — users get new code on next refresh
         clientsClaim: true,  // New SW takes control of all open tabs immediately after activation
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
         runtimeCaching: [
           {
-            urlPattern: /^\/api\//,
+            urlPattern: /\/api\//,
             handler: 'NetworkFirst',
             options: {
               cacheName: 'api-cache',

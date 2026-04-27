@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import LoginPage from './components/LoginPage'
-import { useGatewayStore, useSessionStore, useLabelStore, useProjectStore, useHiddenStore, Session } from './store/gatewayStore'
+import { useGatewayStore, useSessionStore, useLabelStore, useProjectStore, useHiddenStore, useDraftStore, Session } from './store/gatewayStore'
 import { useAuthStore } from './store/authStore'
 import Sidebar from './components/Sidebar'
 import ChatPane from './components/ChatPane'
@@ -87,13 +87,14 @@ function AuthenticatedApp({ preloadedConfig }: { preloadedConfig?: GatewayConfig
   const getToken = async () => null
   const { connected, gatewayUrl, connect, setCredentials } = useGatewayStore()
   const { setAuth, fetchOwnedSessions } = useAuthStore()
-  const { activePanes, pinToPane, sessions, setSessions, paneLayout, setPaneLayout } = useSessionStore()
+  const { activePanes, pinToPane, paneCount, setPaneCount, sessions, setSessions, paneLayout, setPaneLayout } = useSessionStore()
 
   // Background preload: cache chat history for top 10 sessions on connect
   useSessionPreloader()
   const { labels, setLabel } = useLabelStore()
   const { hydrateFromServer: hydrateProjects } = useProjectStore()
   const { hydrateFromServer: hydrateHidden, hide: hideSession } = useHiddenStore()
+  const { hydrateFromServer: hydrateDrafts } = useDraftStore()
   const [showConnect, setShowConnect] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showIssueReporter, setShowIssueReporter] = useState(false)
@@ -111,7 +112,16 @@ function AuthenticatedApp({ preloadedConfig }: { preloadedConfig?: GatewayConfig
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [showStatusMenu])
-  const [activeNav, setActiveNav] = useState('projects')
+  const VALID_NAV = ['projects', 'sessions', 'costs', 'memory']
+  const [activeNav, setActiveNav] = useState(() => {
+    // Hash first (refresh preserves it), sessionStorage as fallback (PWA home screen strips hash)
+    const h = window.location.hash.replace('#', '')
+    if (VALID_NAV.includes(h)) return h
+    const s = sessionStorage.getItem('octis-active-nav')
+    if (s && VALID_NAV.includes(s)) return s
+    return 'projects'
+  })
+  const isPopStateRef = useRef(false)
   const [sessionSidebarCollapsed, setSessionSidebarCollapsed] = useState(false)
   const [activeProject, setActiveProject] = useState<Project | null>(null)
   const [userRole, setUserRole] = useState<string | null>(null)
@@ -189,6 +199,7 @@ function AuthenticatedApp({ preloadedConfig }: { preloadedConfig?: GatewayConfig
         
         void hydrateProjects()
         void hydrateHidden()
+        void hydrateDrafts()
         void useSessionStore.getState().hydrateHiddenFromServer()
       } catch (e) {
         console.error('[octis] Failed to fetch gateway config:', e)
@@ -208,12 +219,52 @@ function AuthenticatedApp({ preloadedConfig }: { preloadedConfig?: GatewayConfig
             connect()
             void hydrateProjects()
             void hydrateHidden()
+            void hydrateDrafts()
             void useSessionStore.getState().hydrateHiddenFromServer()
           } catch { setShowConnect(true) }
         }, 3000)
       }
     }
     void fetchConfig()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Persist active nav in URL hash + sessionStorage (belt-and-suspenders — PWA strips hash on launch)
+  useEffect(() => {
+    sessionStorage.setItem('octis-active-nav', activeNav)
+    if (isPopStateRef.current) { isPopStateRef.current = false; return }
+    const hash = window.location.hash.replace('#', '')
+    if (hash !== activeNav) {
+      const stateObj = { nav: activeNav, view: 'tab' }
+      const targetUrl = '#' + activeNav
+      // If there's no existing hash, replace the current entry so the back button
+      // can never land on a hashless URL (which would send the user to the default page on refresh).
+      if (!hash) {
+        history.replaceState(stateObj, '', targetUrl)
+      } else {
+        history.pushState(stateObj, '', targetUrl)
+      }
+    }
+  }, [activeNav])
+
+  // Handle browser back/forward — update nav and clear project if needed
+  useEffect(() => {
+    const handlePop = (e: PopStateEvent) => {
+      isPopStateRef.current = true
+      const state = e.state as { nav?: string; view?: string; projectSlug?: string } | null
+      const hash = window.location.hash.replace('#', '')
+      if (state?.view === 'project' || (state?.projectSlug && state.projectSlug !== 'null')) {
+        // Navigating forward into a project — restore it (rare, forward nav)
+        setActiveNav('projects')
+      } else {
+        // Tab change or clearing project
+        setActiveProject(null)
+        const nav = state?.nav || hash
+        if (VALID_NAV.includes(nav)) setActiveNav(nav)
+      }
+    }
+    window.addEventListener('popstate', handlePop)
+    return () => window.removeEventListener('popstate', handlePop)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -228,6 +279,7 @@ function AuthenticatedApp({ preloadedConfig }: { preloadedConfig?: GatewayConfig
         hydrateTimer = setTimeout(() => {
           void hydrateProjects()
           void hydrateHidden()
+          void hydrateDrafts()
           void useSessionStore.getState().hydrateHiddenFromServer()
         }, 2000)
       }
@@ -237,7 +289,7 @@ function AuthenticatedApp({ preloadedConfig }: { preloadedConfig?: GatewayConfig
       document.removeEventListener('visibilitychange', onVisible)
       if (hydrateTimer) clearTimeout(hydrateTimer)
     }
-  }, [hydrateProjects, hydrateHidden])
+  }, [hydrateProjects, hydrateHidden, hydrateDrafts])
 
   // Seed session labels from DB on mount
   useEffect(() => {
@@ -298,7 +350,8 @@ function AuthenticatedApp({ preloadedConfig }: { preloadedConfig?: GatewayConfig
 
   if (isMobile) return <MobileApp />
 
-  const visiblePanes = activePanes.filter(Boolean)
+  // Deduplicate: activePanes should never have the same session twice, but guard defensively
+const visiblePanes = activePanes.filter((key, idx) => !!key && activePanes.indexOf(key) === idx)
 
   // ── Hotkeys ───────────────────────────────────────────────────────────────
   // N            → new session (bare key, ignores inputs)
@@ -314,10 +367,21 @@ function AuthenticatedApp({ preloadedConfig }: { preloadedConfig?: GatewayConfig
   const handleNewSessionHotkey = useCallback(() => {
     if (activeNav !== 'sessions') setActiveNav('sessions')
     const key = `session-${Date.now()}`
-    setSessions([{ key, label: 'New session', sessionKey: key } as Session, ...sessions])
-    const emptyPane = activePanes.findIndex((p) => !p)
-    pinToPane(emptyPane >= 0 ? emptyPane : 0, key)
-  }, [activeNav, sessions, activePanes, setSessions, pinToPane])
+    // Claim before setSessions so the ownership check in setSessions passes immediately
+    useAuthStore.getState().claimSession(key)
+    setSessions([{ key, label: 'New session', sessionKey: key } as Session, ...useSessionStore.getState().sessions])
+    // Auto-expand panes up to 8, then replace last (synchronous — no await, so no race)
+    const { activePanes: ap, paneCount: pc } = useSessionStore.getState()
+    const emptyPane = ap.findIndex((p: string | null, i: number) => i < pc && !p)
+    if (emptyPane >= 0) {
+      pinToPane(emptyPane, key)
+    } else if (pc < 8) {
+      setPaneCount(pc + 1)
+      pinToPane(pc, key)
+    } else {
+      pinToPane(pc - 1, key)
+    }
+  }, [activeNav, setSessions, pinToPane, setPaneCount])
 
   const handleArchiveHotkey = useCallback(() => {
     const fi = focusedPaneRef.current
@@ -516,7 +580,11 @@ function AuthenticatedApp({ preloadedConfig }: { preloadedConfig?: GatewayConfig
 
       {/* Projects grid — only shown when on projects tab with no active project */}
       {activeNav === 'projects' && !activeProject && (
-        <ProjectsGrid onOpenProject={(p) => { setActiveProject(p); setActiveNav('projects') }} />
+        <ProjectsGrid onOpenProject={(p) => {
+          setActiveProject(p)
+          setActiveNav('projects')
+          history.pushState({ nav: 'projects', view: 'project', projectSlug: p.slug }, '', '#projects')
+        }} />
       )}
 
       {/* ProjectView — kept mounted whenever a project is active; hidden (not unmounted) on other tabs */}
@@ -524,7 +592,7 @@ function AuthenticatedApp({ preloadedConfig }: { preloadedConfig?: GatewayConfig
         <div className={`flex flex-1 overflow-hidden ${activeNav === 'projects' ? '' : 'hidden'}`}>
           <ProjectView
             project={activeProject}
-            onBack={() => setActiveProject(null)}
+            onBack={() => { isPopStateRef.current = true; setActiveProject(null); history.back() }}
           />
         </div>
       )}

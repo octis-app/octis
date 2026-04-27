@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS octis_projects (
   description TEXT DEFAULT '',
   memory_file TEXT DEFAULT '',
   position INTEGER DEFAULT 0,
+  hide_from_sessions INTEGER DEFAULT 0,
   created_at INTEGER DEFAULT (unixepoch()),
   updated_at INTEGER DEFAULT (unixepoch())
 );
@@ -59,6 +60,14 @@ CREATE TABLE IF NOT EXISTS octis_session_ownership (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   created_at INTEGER DEFAULT (unixepoch()),
   PRIMARY KEY (session_key, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS user_settings (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,
+  updated_at INTEGER DEFAULT (unixepoch()),
+  PRIMARY KEY (user_id, key)
 );
 
 CREATE TABLE IF NOT EXISTS push_subscriptions (

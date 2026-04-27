@@ -1,12 +1,13 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
-import { useGatewayStore, useSessionStore, useProjectStore, useLabelStore, useDraftStore, Session } from '../store/gatewayStore'
+import { useGatewayStore, useSessionStore, useProjectStore, useLabelStore, useDraftStore, Session, DraftData } from '../store/gatewayStore'
 import { authFetch } from '../lib/authFetch'
+import { useTextareaUndo } from '../hooks/useTextareaUndo'
 import { useAuthStore } from '../store/authStore'
 import DecisionButtons from './DecisionButtons'
 
 // Quick Commands helpers
 const QUICK_COMMAND_DEFAULTS = {
-  brief: "Give me a 3-sentence status update: (1) what you last did, (2) what you're working on now, (3) what's next. No fluff.",
+  brief: "If you're a session that modified Octis app code, keep OCTIS_CHANGES.md updated with only relevant development work since the last log update. Record every code modification, bug fix, config/schema/API change, dependency change, important decision, known issue, and testing/verification result.",
   away: "I'm stepping away for a while. Please do the following:\n1. Summarize what you're currently working on (1-2 sentences).\n2. List anything you're blocked on or need from me before I go - be specific (credentials, a decision, a file, etc.).\n3. List everything you CAN do autonomously while I'm gone, in order.\n4. Estimate how long you can run without me.\nBe concise. I'll read this on my phone.",
   save: "💾 checkpoint - save any key decisions, context, or tasks from this session to MEMORY.md and TODOS.md now. One-line ack only.",
   archive_msg: "💾 Final save - write any remaining decisions, tasks, or context to MEMORY.md and TODOS.md. Reply with NO_REPLY only.",
@@ -186,7 +187,55 @@ function renderTextWithMedia(text: string, key: number): React.ReactNode {
       </span>
     )
   }
-  return <span key={key} style={{ whiteSpace: 'pre-wrap' }}>{text}</span>
+  // Handle bare data URI images (e.g. base64 QR codes)
+  if (/^data:image\/(png|jpeg|gif|webp);base64,/.test(text.trim())) {
+    return <img key={key} src={text.trim()} alt="image"
+      className="max-w-full rounded-lg my-1 max-h-64 object-contain"
+      style={{ maxWidth: '100%', borderRadius: '8px' }}
+      onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
+  }
+
+  // Render text with clickable URLs and inline images
+  const lines = text.split('\n')
+  const rendered = lines.flatMap((line, li) => {
+    // Markdown image: ![alt](url)
+    const mdImg = line.match(/^!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)$/)
+    if (mdImg) {
+      return [<img key={`img-${li}`} src={mdImg[2]} alt={mdImg[1]}
+        className="max-w-full rounded-lg my-1 max-h-64 object-contain"
+        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />]
+    }
+    // MEDIA:<url> directive
+    const mediaLine = line.match(/^MEDIA:(https?:\/\/\S+)$/)
+    if (mediaLine) {
+      const mUrl = mediaLine[1]
+      const isImg = /\.(png|jpg|jpeg|gif|webp)(\?|$)/i.test(mUrl)
+      return [isImg
+        ? <img key={`m-${li}`} src={mUrl} alt="image"
+            className="max-w-full rounded-lg my-1 max-h-64 object-contain"
+            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
+        : <a key={`m-${li}`} href={mUrl} target="_blank" rel="noopener noreferrer"
+            className="text-[#818cf8] underline break-all">{mUrl}</a>]
+    }
+    // Data URI image on its own line
+    if (/^data:image\/(png|jpeg|gif|webp);base64,/.test(line.trim())) {
+      return [<img key={`di-${li}`} src={line.trim()} alt="image"
+        className="max-w-full rounded-lg my-1 max-h-64 object-contain"
+        style={{ maxWidth: '100%', borderRadius: '8px' }}
+        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />]
+    }
+
+    // Split by URLs to make them clickable
+    const urlParts = line.split(/(https?:\/\/[^\s<>"{}|\\^`\[\]*]+)/g)
+    const lineNodes = urlParts.map((p, pi) =>
+      /^https?:\/\//.test(p)
+        ? <a key={pi} href={p} target="_blank" rel="noopener noreferrer"
+            className="text-[#818cf8] underline break-all">{p}</a>
+        : <span key={pi}>{p}</span>
+    )
+    return [<span key={`line-${li}`}>{lineNodes}{li < lines.length - 1 ? '\n' : ''}</span>]
+  })
+  return <span key={key} style={{ whiteSpace: 'pre-wrap' }}>{rendered}</span>
 }
 
 function renderMessageContent(content: MessageContent): React.ReactNode {
@@ -274,6 +323,61 @@ function isNoiseMsg(msg: ChatMessage): boolean {
 
 const API = (import.meta.env.VITE_API_URL as string) || ''
 
+// ─── Reply helpers (mirrors ChatPane) ──────────────────────────────────────────────
+
+function getMobileReplyCtx(content: MessageContent): { role: string; preview: string; msgId?: string } | null {
+  const text = extractText(content)
+  const m = text.match(/^\[Replying to ([^(:]+?)(?:\s*\(([^)]+)\))?:\s*"([^"]{0,150})"\]\n\n/)
+  if (!m) return null
+  return { role: m[1].trim(), preview: m[3], msgId: m[2] || undefined }
+}
+
+function stripMobileReplyCtxText(text: string): string {
+  return text.replace(/^\[Replying to [^:]+: "[^"]{0,150}"\]\n\n/, '')
+}
+
+function stripMobileReplyCtx(content: MessageContent): MessageContent {
+  if (typeof content === 'string') return stripMobileReplyCtxText(content)
+  if (Array.isArray(content)) {
+    const arr = content as ContentBlock[]
+    const firstTextIdx = arr.findIndex(b => b.type === 'text')
+    if (firstTextIdx === -1) return content
+    const ft = arr[firstTextIdx] as ContentBlock & { text: string }
+    const stripped = stripMobileReplyCtxText(ft.text)
+    if (stripped === ft.text) return content
+    const updated = [...arr]
+    updated[firstTextIdx] = { ...ft, text: stripped }
+    return updated
+  }
+  return content
+}
+
+function MobileReplyQuoteBubble({ role, preview, isUserMsg, onJump }: { role: string; preview: string; isUserMsg: boolean; onJump?: () => void }) {
+  return (
+    <div
+      className={`mb-1.5 px-2 py-1 rounded-lg border-l-2 text-xs max-w-full ${
+        isUserMsg ? 'bg-[#4f51c0]/30 border-[#a5b4fc]/70' : 'bg-[#0f1117]/60 border-[#4b5563]'
+      } ${onJump ? 'active:opacity-70' : ''}`}
+      style={{ opacity: onJump ? 0.9 : undefined }}
+      onPointerDown={e => onJump && e.stopPropagation()}
+      onClick={onJump}
+      title={onJump ? 'Jump to message' : undefined}
+    >
+      <div className={`text-[10px] font-semibold mb-0.5 flex items-center gap-1 ${
+        isUserMsg ? 'text-[#c7d2fe]' : 'text-[#6b7280]'
+      }`}>
+        {role === 'AI' ? '🤖 AI' : '👤 You'}
+        {onJump && <span className="opacity-50 text-[9px]">↗</span>}
+      </div>
+      <div className={`line-clamp-2 leading-tight opacity-80 ${
+        isUserMsg ? 'text-[#e0e7ff]' : 'text-[#9ca3af]'
+      }`}>
+        {preview}
+      </div>
+    </div>
+  )
+}
+
 // Strip OpenClaw message envelope from user messages stored in chat history.
 // Format: "Sender (untrusted metadata):\n{...}\n\n[Day YYYY-MM-DD HH:MM UTC] <actual content>"
 function stripBootstrapNoise(text: string): string {
@@ -317,9 +421,9 @@ async function compressImage(dataUrl: string, mimeType: string): Promise<{ dataU
 // Cache utilities
 const CACHE_PREFIX = 'octis-msg-cache-'
 const MAX_CACHED_SESSIONS = 20
-const MAX_MESSAGES_PER_SESSION = 50
-const DEFAULT_HISTORY_LIMIT = 50
-const LOAD_MORE_INCREMENT = 50
+const MAX_MESSAGES_PER_SESSION = 200
+const DEFAULT_HISTORY_LIMIT = 200
+const LOAD_MORE_INCREMENT = 100
 
 function getMsgCache(sessionKey: string): ChatMessage[] | null {
   try {
@@ -352,10 +456,15 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     return (cached && cached.length > 0) ? cached : []
   })
   const [loadedKey, setLoadedKey] = useState<string | null>(session?.key && getMsgCache(session.key) ? session.key : null)
-  const { getDraft, setDraft, clearDraft } = useDraftStore()
-  const [input, setInput] = useState(() => getDraft(session?.key || ''))
+  const { getDraft, getDraftData, setDraft, clearDraft, hydrateFromServer: hydrateDraftsFromServer } = useDraftStore()
+  const [input, setInput] = useState(() => getDraftData(session?.key || '').text)
   type PendingFile = { dataUrl: string; mimeType: string; name: string; kind: 'image' | 'document' | 'video'; saveToWorkspace: boolean; extractedText?: string; extracting?: boolean; pages?: number; videoObjectUrl?: string; _key?: number }
-  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([])
+  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>(() => {
+    // Initialize from draft on mount — same pattern as input/text above
+    const data = getDraftData(session?.key || '')
+    if (!data.files || data.files.length === 0) return []
+    return data.files.map((f, i) => ({ ...f, _key: Date.now() + i })) as PendingFile[]
+  })
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [sending, _setSending] = useState(false)
   const sendingRef = useRef(false)
@@ -381,8 +490,54 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
   const [autoRenaming, setAutoRenaming] = useState(false)
   const [historyLimit, setHistoryLimit] = useState(DEFAULT_HISTORY_LIMIT)
   const [hasMore, setHasMore] = useState(false)
+  // Sync pendingFiles to draft when files change (images persist in draft)
+  useEffect(() => {
+    if (!session?.key) return
+    setDraft(session.key, input, pendingFiles)
+  }, [pendingFiles, session?.key]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep historyLimitRef in sync so WS closures always see the latest value
+  // (useState closures capture stale values; refs don't)
+  useEffect(() => { historyLimitRef.current = historyLimit }, [historyLimit])
+
+  // When hasMore becomes true and we're already near the visual top (high scrollTop in
+  // flex-col-reverse), auto-trigger load without waiting for another scroll event.
+  useEffect(() => {
+    if (!hasMore || isLoadingMoreRef.current || loadedKey !== session?.key) return
+    const el = scrollRef.current
+    if (!el) return
+    const nearTop = el.scrollTop >= el.scrollHeight - el.clientHeight - 150
+    if (nearTop) {
+      isLoadingMoreRef.current = true
+      const newLimit = historyLimitRef.current + LOAD_MORE_INCREMENT
+      historyLimitRef.current = newLimit
+      setHistoryLimit(newLimit)
+      setHasMore(false)
+      const reqId = `chat-history-loadmore-${session?.key}-${Date.now()}`
+      currentHistoryReqIdRef.current = reqId
+      send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey: session?.key, limit: newLimit } })
+    }
+  }, [hasMore])
+
+  // Cache-sync: write full server messages to cache whenever they update.
+  // Never let poll writes (truncated) overwrite full history — the effect always
+  // sees the post-merge state (guard ensures prev is never downgraded).
+  useEffect(() => {
+    if (!session?.key || messages.length === 0 || loadedKey !== session.key) return
+    const serverMsgs = messages.filter(m => typeof m.id !== 'number')
+    if (serverMsgs.length > 0) setMsgCache(session.key, serverMsgs)
+  }, [messages, session?.key, loadedKey])
+
+  // Clear reply state when session changes
+  useEffect(() => {
+    setReplyingTo(null)
+    setHighlightedMsgKey(null)
+  }, [session?.key]) // eslint-disable-line react-hooks/exhaustive-deps
   const [showArchiveSheet, setShowArchiveSheet] = useState(false)
   const [copiedMsgId, setCopiedMsgId] = useState<string | number | null>(null)
+  // Reply state
+  const [replyingTo, setReplyingTo] = useState<{ id: string | number | undefined; role: 'user' | 'assistant'; preview: string } | null>(null)
+  const [highlightedMsgKey, setHighlightedMsgKey] = useState<string | null>(null)
   const [swipeHint, setSwipeHint] = useState<string | null>(null)
   const touchStartX = useRef(0)
   const touchStartY = useRef(0)
@@ -390,6 +545,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
   const isDraggingRef = useRef(false)
   const isScrollingRef = useRef(false)
   const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const inputUndo = useTextareaUndo()
   const renameInputRef = useRef<HTMLInputElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -405,6 +561,9 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
 
   // Track the latest history reqId so we can match responses from re-sent requests
   const currentHistoryReqIdRef = useRef<string>('')
+  const historyLimitRef = useRef(DEFAULT_HISTORY_LIMIT) // always up-to-date in WS closures
+  const isLoadingMoreRef = useRef(false) // prevents double-trigger on rapid scroll
+  const wasLoadingMoreRef = useRef(false) // set before setMessages, consumed in useLayoutEffect to block scroll-to-bottom
 
   // Stable refs so the swipe useEffect never re-registers mid-gesture.
   // recentSessions + onSwitch get new references on every MobileApp render (slice, arrow fn);
@@ -430,6 +589,8 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     const onStart = (e: TouchEvent) => {
       // Don't intercept touches starting inside the recent sessions strip — let it scroll freely
       if (stripRef.current?.contains(e.target as Node)) return
+      // Don't intercept left-edge swipes (iOS back gesture starts within 20px of left edge)
+      if (e.touches[0].clientX < 20) return
       startX = e.touches[0].clientX
       startY = e.touches[0].clientY
       startTime = Date.now()
@@ -542,6 +703,19 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const outerRef = useRef<HTMLDivElement>(null)
 
+  // ResizeObserver: re-compute textarea height when container width changes
+  useEffect(() => {
+    const ta = inputRef.current
+    if (!ta) return
+    const ro = new ResizeObserver(() => {
+      if (!ta.value) return
+      ta.style.height = 'auto'
+      ta.style.height = Math.min(ta.scrollHeight, 120) + 'px'
+    })
+    ro.observe(ta)
+    return () => ro.disconnect()
+  }, [])
+
   // HTTP history fetch — declared EARLY (before its first useEffect dep array) to avoid TDZ on iOS.
   // Must be declared before any useEffect that lists it in deps, or React evaluates dep array
   // during render before the const is initialized → "Cannot access before initialization".
@@ -639,8 +813,49 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
   useEffect(() => {
     if (!session?.key || !ws) return
 
-    // Load draft for new session (no longer remounting on switch)
-    setInput(getDraft(session.key))
+    // Load draft for new session
+    inputUndo.reset() // new session = fresh undo history
+    const localDraftData = getDraftData(session.key)
+    setInput(localDraftData.text)
+    if (localDraftData.files && localDraftData.files.length > 0) {
+      setPendingFiles(localDraftData.files.map((f, i) => ({ ...f, _key: Date.now() + i })) as PendingFile[])
+    } else if (!localDraftData.text) {
+      setPendingFiles([]) // clear files on session switch if no draft
+    }
+    // Resize textarea to fit draft content after DOM updates
+    if (localDraftData.text) {
+      requestAnimationFrame(() => {
+        if (!inputRef.current) return
+        inputRef.current.style.height = 'auto'
+        inputRef.current.style.height = Math.min(inputRef.current.scrollHeight, 120) + 'px'
+      })
+    }
+    // If no local draft, check server for cross-device draft
+    if (!localDraftData.text && !localDraftData.files?.length) {
+      void (async () => {
+        try {
+          const resp = await authFetch(`${API}/api/drafts/${encodeURIComponent(session.key)}`)
+          if (!resp.ok) return
+          const data = await resp.json()
+          // Guard: skip if we already have any local draft (text or files)
+          const currentData = getDraftData(session.key)
+          if (data.text && !currentData.text && !(currentData.files?.length)) {
+            const parsed: DraftData = (() => {
+              try { const p = JSON.parse(data.text); if (p && typeof p === 'object' && 'text' in p) return p } catch {}
+              return { text: data.text as string }
+            })()
+            setDraft(session.key, parsed.text, parsed.files)
+            setInput(parsed.text)
+            if (parsed.files?.length) setPendingFiles(parsed.files.map((f, i) => ({ ...f, _key: Date.now() + i })) as PendingFile[])
+            requestAnimationFrame(() => {
+              if (!inputRef.current) return
+              inputRef.current.style.height = 'auto'
+              inputRef.current.style.height = Math.min(inputRef.current.scrollHeight, 120) + 'px'
+            })
+          }
+        } catch {}
+      })()
+    }
     // Only reset sending state on an actual session switch, NOT on WS reconnect.
     // Resetting on reconnect kills the thinking indicator and stops the fast poll
     // mid-response, causing replies to not appear without a hard refresh.
@@ -669,6 +884,8 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     }
     // Reset limit + hasMore on session switch
     setHistoryLimit(DEFAULT_HISTORY_LIMIT)
+    historyLimitRef.current = DEFAULT_HISTORY_LIMIT
+    isLoadingMoreRef.current = false
     setHasMore(false)
 
     // Use proper req/method format (not old type-based format)
@@ -730,18 +947,38 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
             localStorage.removeItem(`octis-pending-${session.key}`)
           }
 
-          // Always apply server messages. Preserve optimistic messages (number IDs) until
-          // the server content-confirms them — avoids visible flicker on every poll.
+          // Apply server messages. Guard: never downgrade loaded history with a shorter poll.
+          // Old code returned [...msgs, ...optimistics] where msgs was the 30-msg poll result,
+          // collapsing 200-msg history to 30 whenever an optimistic message was active.
           setMessages((prev) => {
+            if (msgs.length === 0) return prev
+            // Compute base: keep prev if poll is truncated, appending only new messages
+            const prevServer = prev.filter(m => typeof m.id !== 'number')
+            let base: ChatMessage[]
+            if (msgs.length >= prevServer.length) {
+              base = msgs
+            } else {
+              const prevTs = new Set(prevServer.map(m => getMsgTs(m)).filter(ts => ts > 0))
+              const prevFp = new Set(prevServer.filter(m => getMsgTs(m) === 0).map(m =>
+                `${m.role}:${extractText(m.content).substring(0, 100)}`
+              ))
+              const newOnes = msgs.filter(m => {
+                const ts = getMsgTs(m)
+                if (ts > 0) return !prevTs.has(ts)
+                return !prevFp.has(`${m.role}:${extractText(m.content).substring(0, 100)}`)
+              })
+              base = newOnes.length > 0 ? [...prevServer, ...newOnes] : prevServer
+            }
+            // Preserve optimistic messages until server confirms
             const optimistics = prev.filter(m => typeof m.id === 'number')
             if (optimistics.length > 0 && !serverHasUserMsg) {
-              return [...msgs, ...optimistics]
+              return [...base, ...optimistics]
             }
-            return msgs
+            return base
           })
 
-          // Update cache on every poll so next open shows fresh messages instantly
-          if (msgs.length > 0) setMsgCache(session.key, msgs)
+          // Cache is written by the cache-sync effect below (not here), because poll
+          // results are truncated (30 msgs) and would overwrite the full 200-msg cache.
 
           // Clear sending only when server confirmed our user message AND assistant replied.
           // This prevents clearing against the previous exchange’s assistant reply.
@@ -792,10 +1029,15 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
           // Don't clear sending here — the poll handler and streaming handler own that.
           // Clearing on every history load (when pendingRaw is null) kills the thinking
           // indicator and stops the fast poll mid-response.
+          // Signal useLayoutEffect to NOT scroll to visual bottom (user was scrolled up reading history).
+          // Must be set BEFORE setMessages so the layout effect sees it during this commit.
+          wasLoadingMoreRef.current = true
+          isLoadingMoreRef.current = false
           setMessages(finalMsgs)
           setLoadedKey(session.key)
           // Show load-more button if we got a full page (more may exist)
-          setHasMore(finalMsgs.length >= historyLimit)
+          // Use ref instead of state to avoid stale closure (historyLimit may have changed since request)
+          setHasMore(finalMsgs.length >= historyLimitRef.current)
           // Write to cache after receiving fresh history
           setMsgCache(session.key, finalMsgs)
         }
@@ -902,6 +1144,12 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     const hadNewMessage = newCount > lastMsgCountRef.current
     lastMsgCountRef.current = newCount
     if (!hadNewMessage) return
+    // When loading older messages, NEVER scroll to visual bottom regardless of userScrolledUpRef.
+    // wasLoadingMoreRef is set by the WS handler before setMessages, consumed here once.
+    if (wasLoadingMoreRef.current) {
+      wasLoadingMoreRef.current = false
+      return
+    }
     // Only scroll if user hasn't scrolled up to read history.
     // Don't force-scroll on background poll refreshes — that jerks the view away from history.
     // Force-scroll only when the user is actively in a conversation (not scrolled up).
@@ -1001,6 +1249,15 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     }
     let msg = effectiveInput.trim()
 
+    // Prepend reply context so the agent knows which message is being replied to
+    if (replyingTo && !overrideMsg) {
+      const roleName = replyingTo.role === 'assistant' ? 'AI' : 'You'
+      const safePreview = replyingTo.preview.replace(/"/g, "'").slice(0, 120)
+      const idPart = replyingTo.id !== undefined ? ` (${replyingTo.id})` : ''
+      msg = `[Replying to ${roleName}${idPart}: "${safePreview}"]\n\n${msg}`
+      setReplyingTo(null)
+    }
+
     // Save to workspace if toggled for any file
     for (const pf of pendingFiles.filter(f => f.saveToWorkspace)) {
       try {
@@ -1020,13 +1277,15 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     // Fire project-context injection on first send (lazy)
     const pendingInit = consumePendingProjectInit(session.key)
     if (pendingInit) {
-      Promise.resolve(null).then((token: string | null) => {
-        authFetch(`${API}/api/session-init`, {
+      try {
+        await authFetch(`${API}/api/session-init`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ sessionKey: session.key, projectSlug: pendingInit }),
-        }).catch(() => {})
-      })
+        })
+      } catch (e) {
+        console.error('[octis-mobile] session-init failed:', e)
+      }
     }
     // PDFs: inject extracted text inline (gateway strips non-image attachments)
     for (const pf of pendingFiles.filter(f => f.kind === 'document' && f.extractedText !== undefined)) {
@@ -1289,7 +1548,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
         {(() => {
           const qc = getQuickCommands()
           const quickActions = [
-            { icon: '💬', label: 'Brief', msg: qc.brief },
+            { icon: '📝', label: 'Dev Log', msg: qc.brief },
             { icon: '🚪', label: 'Away', msg: qc.away },
             { icon: '💾', label: 'Save', msg: qc.save },
           ]
@@ -1386,10 +1645,12 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
           // With flex-col-reverse, scrollTop=0 is the bottom. User scrolled up = scrollTop > 80
           userScrolledUpRef.current = el.scrollTop > 80
           // Auto-trigger load-more when user scrolls near the top (visual top = high scrollTop in col-reverse)
-          if (hasMore && loadedKey === session?.key && !sending) {
-            const nearTop = el.scrollTop >= el.scrollHeight - el.clientHeight - 120
+          if (hasMore && loadedKey === session?.key && !isLoadingMoreRef.current) {
+            const nearTop = el.scrollTop >= el.scrollHeight - el.clientHeight - 150
             if (nearTop) {
-              const newLimit = historyLimit + LOAD_MORE_INCREMENT
+              isLoadingMoreRef.current = true
+              const newLimit = historyLimitRef.current + LOAD_MORE_INCREMENT
+              historyLimitRef.current = newLimit
               setHistoryLimit(newLimit)
               setHasMore(false)
               const reqId = `chat-history-loadmore-${session?.key}-${Date.now()}`
@@ -1411,9 +1672,20 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
           </div>
         )}
         {loadedKey !== session?.key && messages.length === 0 && (
-          <div className="flex flex-col items-center justify-center gap-3 py-16 text-[#4b5563]">
-            <div className="w-6 h-6 border-2 border-[#4b5563] border-t-[#6366f1] rounded-full animate-spin" />
-            {!connected && <span className="text-xs">Reconnecting…</span>}
+          <div className="flex flex-col gap-3 px-4 py-4 animate-pulse">
+            {[...Array(4)].map((_, i) => (
+              <div key={i} className={`flex ${i % 3 === 2 ? 'justify-end' : 'justify-start'}`}>
+                <div
+                  className={`rounded-2xl ${i % 3 === 2 ? 'bg-[#6366f1]/30' : 'bg-[#1e2330]'}`}
+                  style={{ width: `${[62, 48, 55, 38][i]}%`, height: '2.8rem' }}
+                />
+              </div>
+            ))}
+            {!connected && (
+              <div className="flex justify-center mt-4">
+                <span className="text-xs text-[#4b5563]">Reconnecting…</span>
+              </div>
+            )}
           </div>
         )}
         {/* Show messages from cache while loading (when loadedKey doesn't match yet) */}
@@ -1428,14 +1700,26 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
             {reversed.map((msg, i) => (
             <div
               key={msg.id !== undefined ? String(msg.id) : i}
-              className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+              data-msg-key={msg.id !== undefined ? String(msg.id) : String(getMsgTs(msg) || i)}
+              className={`flex items-end gap-1 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
             >
+              {/* Reply button — left of user messages (always visible, subtle) */}
+              {msg.role === 'user' && (
+                <button
+                  onPointerDown={e => e.stopPropagation()}
+                  onClick={e => { e.stopPropagation(); setReplyingTo({ id: msg.id, role: 'user', preview: stripMobileReplyCtxText(extractText(msg.content)).slice(0, 120) }) }}
+                  className="bg-transparent border-0 outline-none text-[#4b5563]/50 active:text-[#a5b4fc] shrink-0 mb-2 leading-none text-sm select-none p-1.5 -mr-1"
+                  style={{ fontFamily: 'inherit', WebkitAppearance: 'none' }}
+                  title="Reply"
+                >{'\u21A9\uFE0E'}</button>
+              )}
               <div
                 className={`max-w-[85%] px-3 py-2.5 rounded-2xl text-sm whitespace-pre-wrap break-words leading-relaxed ${
                   msg.role === 'user'
                     ? 'bg-[#6366f1] text-white rounded-br-sm'
                     : 'bg-[#1e2330] text-[#e8eaf0] rounded-bl-sm'
                 }`}
+                style={highlightedMsgKey === (msg.id !== undefined ? String(msg.id) : String(getMsgTs(msg) || i)) ? { animation: 'octisFlash 1.4s ease-out forwards' } : {}}
               >
                 {msg.MediaPaths && msg.MediaPaths.length > 0
                   ? msg.MediaPaths.map((p: string, i: number) => {
@@ -1470,7 +1754,43 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
                       })()
                     : null
                 }
-                {renderMessageContent(msg.content)}
+                {/* Reply quote bubble */}
+                {(() => {
+                  const rc = getMobileReplyCtx(msg.content)
+                  if (!rc) return null
+                  const handleJump = () => {
+                    const container = scrollRef.current
+                    if (!container) return
+                    const findEl = (key: string) =>
+                      container.querySelector<HTMLElement>(`[data-msg-key="${key}"]`)
+                    const doScroll = (el: HTMLElement, key: string) => {
+                      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                      setHighlightedMsgKey(key)
+                      setTimeout(() => setHighlightedMsgKey(null), 1500)
+                    }
+                    // Primary: jump by embedded message ID (scoped to this pane)
+                    if (rc.msgId) {
+                      const el = findEl(rc.msgId)
+                      if (el) { doScroll(el, rc.msgId); return }
+                    }
+                    // Fallback: search messages array chronologically, skip self
+                    const previewSnip = rc.preview.slice(0, 60).toLowerCase()
+                    const visible = messages.filter(m => !isHeartbeatMsg(m) && !(noiseHidden && isNoiseMsg(m)))
+                    for (let idx = 0; idx < visible.length; idx++) {
+                      const m = visible[idx]
+                      if (m === msg) continue
+                      const mText = stripMobileReplyCtxText(extractText(m.content)).toLowerCase()
+                      if (mText.includes(previewSnip)) {
+                        const mKey = m.id !== undefined ? String(m.id) : String(getMsgTs(m) || idx)
+                        const el = findEl(mKey)
+                        if (el) doScroll(el, mKey)
+                        return
+                      }
+                    }
+                  }
+                  return <MobileReplyQuoteBubble role={rc.role} preview={rc.preview} isUserMsg={msg.role === 'user'} onJump={handleJump} />
+                })()}
+                {renderMessageContent(stripMobileReplyCtx(msg.content))}
                 {(() => {
                   const ts = getMsgTs(msg)
                   const isInFlight = msg.role === 'user' && sentQueue.some(e => e.id === msg.id)
@@ -1526,24 +1846,41 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
                   />
                 )}
               </div>
+              {/* Reply button — right of assistant messages */}
+              {msg.role === 'assistant' && (
+                <button
+                  onPointerDown={e => e.stopPropagation()}
+                  onClick={e => { e.stopPropagation(); setReplyingTo({ id: msg.id, role: 'assistant', preview: stripMobileReplyCtxText(extractText(msg.content)).slice(0, 120) }) }}
+                  className="bg-transparent border-0 outline-none text-[#4b5563]/50 active:text-[#a5b4fc] shrink-0 mb-2 leading-none text-sm select-none p-1.5 -ml-1"
+                  style={{ fontFamily: 'inherit', WebkitAppearance: 'none' }}
+                  title="Reply"
+                >{'\u21A9\uFE0E'}</button>
+              )}
             </div>
           ))}
             {/* Load-more: LAST in DOM = visual TOP in flex-col-reverse */}
             {hasMore && loadedKey === session?.key && (
               <div className="flex justify-center py-3">
-                <button
-                  onClick={() => {
-                    const newLimit = historyLimit + LOAD_MORE_INCREMENT
-                    setHistoryLimit(newLimit)
-                    setHasMore(false)
-                    const reqId = `chat-history-loadmore-${session?.key}-${Date.now()}`
-                    currentHistoryReqIdRef.current = reqId
-                    send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey: session?.key, limit: newLimit } })
-                  }}
-                  className="text-xs text-[#6366f1] bg-[#1e2330] px-4 py-2 rounded-full border border-[#6366f1]/30 active:opacity-70"
-                >
-                  ↑ Load older
-                </button>
+                {isLoadingMoreRef.current ? (
+                  <span className="text-xs text-[#6b7280] animate-pulse">↑ Loading older messages…</span>
+                ) : (
+                  <button
+                    onClick={() => {
+                      if (isLoadingMoreRef.current) return
+                      isLoadingMoreRef.current = true
+                      const newLimit = historyLimitRef.current + LOAD_MORE_INCREMENT
+                      historyLimitRef.current = newLimit
+                      setHistoryLimit(newLimit)
+                      setHasMore(false)
+                      const reqId = `chat-history-loadmore-${session?.key}-${Date.now()}`
+                      currentHistoryReqIdRef.current = reqId
+                      send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey: session?.key, limit: newLimit } })
+                    }}
+                    className="text-xs text-[#6366f1] bg-[#1e2330] px-4 py-2 rounded-full border border-[#6366f1]/30 active:opacity-70"
+                  >
+                    ↑ Load older
+                  </button>
+                )}
               </div>
             )}
           </>)
@@ -1554,6 +1891,23 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
       <div
         className="px-3 pt-2 pb-2 bg-[#181c24] border-t border-[#2a3142] shrink-0"
       >
+        {/* Reply preview bar — shown when replying to a message */}
+        {replyingTo && (
+          <div className="mb-2 flex items-center gap-2 bg-[#1a1f2e] border border-[#2a3142] rounded-xl px-3 py-2">
+            <span className="text-[#6366f1] text-base shrink-0 leading-none">↩</span>
+            <div className="flex-1 min-w-0">
+              <div className="text-[10px] font-semibold text-[#6366f1] mb-0.5">
+                Replying to {replyingTo.role === 'assistant' ? 'AI' : 'you'}
+              </div>
+              <div className="text-xs text-[#6b7280] truncate">{replyingTo.preview}</div>
+            </div>
+            <button
+              onPointerDown={e => e.stopPropagation()}
+              onClick={() => setReplyingTo(null)}
+              className="text-[#6b7280] active:text-white shrink-0 w-6 h-6 flex items-center justify-center rounded-full active:bg-[#2a3142] text-sm"
+            >✕</button>
+          </div>
+        )}
         {/* Queued message indicator */}
         {queuedMessage && (
           <div className="px-1 pb-2 flex items-center gap-2">
@@ -1626,15 +1980,29 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
             style={{ maxHeight: '120px', overflowY: 'auto', fontSize: '16px', height: 'auto' }}
             onChange={(e) => {
               const val = e.target.value
+              inputUndo.push(input) // push BEFORE update
               setInput(val)
               // Debounce draft save — writing Zustand on every keystroke causes re-renders
               if (draftTimerRef.current) clearTimeout(draftTimerRef.current)
-              draftTimerRef.current = setTimeout(() => setDraft(session.key, val), 300)
+              draftTimerRef.current = setTimeout(() => setDraft(session.key, val, pendingFiles), 300)
               // Height via rAF — avoids forced layout reflow (height='auto' flushes layout) on every key
               const el = e.target
               requestAnimationFrame(() => {
                 el.style.height = 'auto'
                 el.style.height = Math.min(el.scrollHeight, 120) + 'px'
+              })
+            }}
+            onKeyDown={(e) => {
+              // Escape cancels active reply
+              if (e.key === 'Escape' && replyingTo) { e.preventDefault(); setReplyingTo(null); return }
+              inputUndo.handleKeyDown(e, input, (v) => {
+                setInput(v)
+                setDraft(session.key, v)
+                requestAnimationFrame(() => {
+                  if (!inputRef.current) return
+                  inputRef.current.style.height = 'auto'
+                  inputRef.current.style.height = Math.min(inputRef.current.scrollHeight, 120) + 'px'
+                })
               })
             }}
           />
