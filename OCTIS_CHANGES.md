@@ -1395,6 +1395,115 @@ bash scripts/push-changes.sh major "what changed"
 | v2.01 | Descriptive commit messages in push-changes.sh + WhatsApp tag in autoTagSlack helper |
 
 ### Known issues / needs review before merge
-- `apply-local-patches.cjs` exists now but has not been audited to confirm it covers all 67 patches (especially patches 27–45). Should be verified before next upstream pull.
-- `dev.octis` (`merge/kennan-upstream-sync`) was built before the patch restore — it may need a re-merge and rebuild now that `kennan-local-changes` has the full patch set properly committed.
+- `apply-local-patches.cjs` exists now but has not been audited to confirm all patches are covered (especially patches 27–45). Should be verified before next upstream pull.
+- `dev.octis` (`merge/kennan-upstream-sync`) was built before the patch restore — may need a re-merge and rebuild.
 - README does not document `ANTHROPIC_API_KEY` env requirement for fresh deployments.
+
+---
+
+## Session: 2026-04-27 (04:50–21:30 UTC) — Clickable Links, Inline Images, WhatsApp Channel
+
+### Context
+Long session focused on two areas: (1) Octis UI improvements — clickable links and inline image rendering in chat messages for both desktop and mobile; (2) WhatsApp channel setup for OpenClaw including troubleshooting a persistent "can't link device" error.
+
+---
+
+### 1. Clickable URLs in chat — `src/components/ChatPane.tsx` + `src/components/MobileFullChat.tsx`
+
+**Problem:** URLs in chat messages rendered as plain text — not clickable, no link styling.
+
+**Fix — `ChatPane.tsx` `renderInline()`:**
+- Split each text segment on `/(https?:\/\/[^\s<>"{}|\\^`\[\]*]+)/g` (note: `*` excluded to avoid swallowing trailing markdown bold markers)
+- URL segments rendered as `<a href={url} target="_blank" rel="noopener noreferrer">` with indigo/purple color and underline
+- Non-URL segments continue through the existing bold/italic/code inline parser
+
+**Fix — `MobileFullChat.tsx` `renderTextWithMedia()`:**
+- Full rewrite of the final text-render fallback
+- Splits text line-by-line; each line checked for: data URI image, MEDIA: directive, markdown image `![alt](url)`, then URL-containing text
+- URL regex: `/(https?:\/\/[^\s<>"{}|\\^`\[\]*]+)/g` (same `*` exclusion)
+- Rendered as `<a>` with same styling
+
+**Bug found & fixed:** When I wrote `👉 **https://example.com**` in a message, the regex captured `https://example.com**` (asterisks included). Fixed by adding `*` to the excluded character class in both components.
+
+**Verified:** Links in both desktop and mobile chat are clickable; asterisk-wrapped URLs render correctly.
+
+---
+
+### 2. Inline image rendering — `src/components/ChatPane.tsx` + `src/components/MobileFullChat.tsx`
+
+**Problem:** Base64 data URI images (e.g. QR codes) rendered as raw text on mobile; markdown `![alt](url)` syntax not rendered; `MEDIA:<url>` directive not rendered.
+
+**Fix — `ChatPane.tsx` line-by-line loop (already had `renderBase64Image`):**
+- Added detection for `![alt](url)` markdown image syntax → renders as `<img>`
+- Added detection for `MEDIA:<url>` lines → renders as `<img>` for image URLs, `<a>` otherwise
+- `renderBase64Image` (existing) handles bare `data:image/...;base64,...` lines
+
+**Fix — `MobileFullChat.tsx` `renderTextWithMedia()`:**
+- Added data URI detection at top: if entire text starts with `data:image/(png|jpeg|gif|webp);base64,` → renders as `<img>` directly
+- Per-line: data URI lines → `<img>`, markdown images → `<img>`, MEDIA: → `<img>` or `<a>`
+
+**Root cause of mobile blank image:** OpenClaw truncates chat history message content at 8,000 characters (default). A 7,000+ char base64 QR code was being cut mid-string, producing an invalid `src`. Fixed by setting `gateway.webchat.chatHistoryMaxChars = 200000` in openclaw.json.
+
+**Note:** The `chatHistoryMaxChars` setting is configured directly in `/root/.openclaw/openclaw.json` (cannot be set via `config.patch` — it's a protected path in the gateway's patch API). Value confirmed via `grep chatHistoryMaxChars` in the gateway source.
+
+**Verified:** Build clean. Desktop renders QR codes. Mobile renders inline images. Truncation eliminated.
+
+---
+
+### 3. User bubble link visibility — `src/index.css`
+
+**Problem:** Clickable links inside user message bubbles (purple/indigo background) were rendered in the default link color (indigo) — invisible against the purple background.
+
+**Fix:** Added CSS class `.octis-user-bubble a` with `color: rgba(255,255,255,0.9)` and `text-decoration: underline`. Hover state: full white.
+
+**Note:** Requires that user message bubble `<div>` has class `octis-user-bubble` applied. Verified in ChatPane's message rendering markup.
+
+---
+
+### 4. Sidebar group open/close persistence — `src/components/Sidebar.tsx`
+
+**Problem:** Sidebar project/group sections reset to open on every page reload.
+
+**Fix:** `CollapsibleGroup` component's `open` state initialised from `localStorage.getItem('octis-group-open-{name}')` (default: `true` if not set). Toggle writes back to localStorage.
+
+**Verified:** Collapse state survives page reload.
+
+---
+
+### 5. Mobile group collapse persistence — `src/components/MobileApp.tsx`
+
+**Problem:** Collapsed project groups on mobile reset on reload.
+
+**Fix:** `collapsedGroups` state initialised from `localStorage.getItem('octis-mobile-collapsed-groups')` (JSON-serialised Set). Writes back on every toggle.
+
+**Verified:** Collapse state persists on mobile.
+
+---
+
+### 6. `apply-local-patches.cjs` — patches 26 & 27 registered
+
+Added patch sentinel markers:
+- **Patch 26:** `ChatPane.tsx` — clickable links + inline images (desktop)
+- **Patch 27:** `MobileFullChat.tsx` — clickable links + inline images (mobile)
+
+---
+
+### WhatsApp channel (OpenClaw infra — not Octis code)
+
+Not an Octis change, but recorded for completeness:
+- OpenClaw WhatsApp plugin installed (`@openclaw/whatsapp` bundled)
+- Linked to Kennan's personal number (+1 514-245-7588) via custom Baileys pairing code script (after repeated QR failures due to WhatsApp rate-limiting from too many scan attempts)
+- Config: `dmPolicy: allowlist`, `allowFrom: ["+15142457588"]`, `groupPolicy: allowlist` — bot ignores all messages except from Kennan's own number
+- Verified: `openclaw channels status` confirms `linked, running, connected`
+
+---
+
+### Versions this session
+- Started: v2.02
+- Ending: v2.03 (pending commit)
+
+### Known issues / needs review before merge
+- `apply-local-patches.cjs` patch coverage should be audited end-to-end before next upstream pull.
+- `chatHistoryMaxChars: 200000` is set in `/root/.openclaw/openclaw.json` directly (not via config.patch). If the gateway config is reset, this needs to be re-applied manually.
+- User bubble link visibility fix (`index.css`) depends on `octis-user-bubble` class being present on the user message bubble element — confirm this class is applied consistently in ChatPane and MobileFullChat.
+- README still does not document `ANTHROPIC_API_KEY` env requirement.
