@@ -71,3 +71,10 @@ html { -webkit-text-size-adjust: 100%; }
 .chat-scroll:hover::-webkit-scrollbar-thumb:hover {
   background: #6366f1;
 }
+
+/* Reply quote jump flash animation */
+@keyframes octisFlash {
+  0%   { box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.75); }
+  60%  { box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.35); }
+  100% { box-shadow: 0 0 0 0px rgba(99, 102, 241, 0); }
+}

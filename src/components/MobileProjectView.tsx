@@ -118,6 +118,13 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
       .catch(() => {})
   }, [])
 
+  // Re-hydrate project tags whenever this view mounts (catches timing issues
+  // where the user opens a project before initial hydrateAll completes)
+  useEffect(() => {
+    const { hydrateFromServer } = useProjectStore.getState()
+    getToken().then(token => hydrateFromServer(token || undefined)).catch(() => {})
+  }, [])
+
   const handleTodoNewSession = async (text: string) => {
     const key = `session-${Date.now()}`
     const newSession: Session = { key, label: text.slice(0, 40), sessionKey: key } as Session

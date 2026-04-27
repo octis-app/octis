@@ -95,21 +95,28 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectSessions.length])
 
-  // Open a session in the next available local pane slot — no duplicates
+  // Toggle a session pane: if already open, close it; otherwise open in next available slot.
+  // NOTE: localPanes is read directly (not via functional update) so this must be in deps.
   const openInNextPane = useCallback((key: string) => {
-    setLocalPanes(prev => {
-      if (prev.some(p => p === key)) {
-        setActiveSession(key)
-        return prev
-      }
-      const next = [...prev]
-      const empty = next.findIndex(p => !p)
-      const target = empty === -1 ? 0 : empty
-      next[target] = key
-      setActiveSession(key)
-      return next
-    })
-  }, [])
+    const existingIdx = localPanes.findIndex(p => p === key)
+    if (existingIdx !== -1) {
+      // Already open — close it (toggle off)
+      const next = [...localPanes]
+      next[existingIdx] = null
+      const remaining = next.filter(Boolean) as string[]
+      setLocalPanes(next)
+      setActiveSession(remaining[0] ?? null)
+      return
+    }
+    // Not open — open in next available slot
+    const next = [...localPanes]
+    const empty = next.findIndex(p => !p)
+    const target = empty === -1 ? 0 : empty
+    next[target] = key
+    setLocalPanes(next)
+    setActiveSession(key)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [localPanes])
 
   // Close a pane and compact remaining (no gaps)
   const handleClosePane = useCallback((i: number) => {
@@ -301,11 +308,11 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
                 return (
                   <div
                     key={s.key}
-                    className={`group relative w-full text-left px-3 py-2.5 mx-1 rounded-lg transition-colors ${
-                      isOpen ? 'bg-[#1e2330] cursor-default' : 'hover:bg-[#111520] cursor-pointer'
+                    className={`group relative w-full text-left px-3 py-2.5 mx-1 rounded-lg transition-colors cursor-pointer ${
+                      isOpen ? 'bg-[#1e2330] hover:bg-[#252b3d]' : 'hover:bg-[#111520]'
                     }`}
                     style={{ width: 'calc(100% - 8px)' }}
-                    onClick={() => { if (editingSessionKey !== s.key && !isOpen) handleSelectSession(s) }}
+                    onClick={() => { if (editingSessionKey !== s.key) handleSelectSession(s) }}
                   >
                     {editingSessionKey === s.key ? (
                       <input
