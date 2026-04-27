@@ -71,6 +71,23 @@ db.pragma('foreign_keys = ON')
 const __serverDir = path.dirname(new URL(import.meta.url).pathname)
 const schema = readFileSync(path.join(__serverDir, '..', 'db', 'schema.sql'), 'utf8')
 db.exec(schema)
+// Migrations
+try { db.exec('ALTER TABLE octis_projects ADD COLUMN hide_from_sessions INTEGER DEFAULT 0') } catch {}
+try { db.exec('ALTER TABLE octis_hidden_sessions ADD COLUMN deleted INTEGER DEFAULT 0') } catch {}
+try { db.exec(`CREATE TABLE IF NOT EXISTS user_settings (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,
+  updated_at INTEGER DEFAULT (unixepoch()),
+  PRIMARY KEY (user_id, key)
+)`) } catch {}
+try { db.exec(`CREATE TABLE IF NOT EXISTS octis_drafts (
+  session_key TEXT NOT NULL,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  text TEXT NOT NULL DEFAULT '',
+  updated_at INTEGER DEFAULT (unixepoch()),
+  PRIMARY KEY (session_key, user_id)
+)`) } catch {}
 
 // First-run: create admin account if users table empty
 const userCount = db.prepare('SELECT COUNT(*) as n FROM users').get()
@@ -96,6 +113,7 @@ if (COSTS_DB_URL) {
 // ─── Express setup ───────────────────────────────────────────────────────────
 
 const app = express()
+app.set('trust proxy', 1)  // trust Caddy reverse proxy
 app.use(helmet({ contentSecurityPolicy: false }))
 app.use(cors())
 app.use(cookieParser())
@@ -129,7 +147,7 @@ function requireAuth(req, res, next) {
 
 // ─── Auth routes ─────────────────────────────────────────────────────────────
 
-const loginLimiter = rateLimit({ windowMs: 60_000, max: 10, message: { error: 'Too many attempts' } })
+const loginLimiter = rateLimit({ windowMs: 60_000, max: 10, message: { error: 'Too many attempts' }, validate: { xForwardedForHeader: false } })
 
 app.get('/api/auth/me', requireAuth, (req, res) => {
   res.json({ id: req.user.id, email: req.user.email, role: req.user.role, autoAuth: AUTO_AUTH })
@@ -206,8 +224,33 @@ function adminGwCall(calls) {
 
 // ─── Utilities ───────────────────────────────────────────────────────────────
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function sessionIdToFriendlyLabel(sessionId) {
+  if (!sessionId) return 'Session'
+  const id = sessionId.replace(/^agent:main:/, '')
+  if (id.startsWith('slack:direct:')) return 'Slack DM'
+  if (id.startsWith('slack:channel:')) {
+    const threadMatch = id.match(/thread:(\d+)/)
+    if (threadMatch) return 'Slack Thread'
+    return 'Slack'
+  }
+  if (id.startsWith('session-')) {
+    const ts = parseInt(id.replace('session-', ''))
+    if (!isNaN(ts) && ts > 1e12) {
+      const d = new Date(ts)
+      return `Session ${d.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' })}`
+    }
+    return 'Session'
+  }
+  if (id.startsWith('webchat-')) return 'Webchat'
+  return id.slice(0, 16) + '…'
+}
+
 function cleanSessionLabel(raw, sessionId) {
   let label = (raw || '').trim()
+  // If first_message is a bare UUID (device ID artifact from sync), ignore it
+  if (UUID_RE.test(label)) label = ''
   const slackDmMatch = label.match(/Slack DM from [^:]+:\s*(.+)/i)
   if (slackDmMatch) {
     label = slackDmMatch[1]
@@ -226,7 +269,7 @@ function cleanSessionLabel(raw, sessionId) {
     .replace(/\[.*?\]/g, '')
     .trim()
     .slice(0, 70)
-  return label || (sessionId ? sessionId.slice(0, 16) + '…' : 'Session')
+  return label || sessionIdToFriendlyLabel(sessionId)
 }
 
 // ─── Health ───────────────────────────────────────────────────────────────────
@@ -408,9 +451,9 @@ app.post('/api/session-autoname', async (req, res) => {
     if (!Array.isArray(messages) || messages.length === 0)
       return res.status(400).json({ error: 'No messages provided' })
 
-    // Use OpenRouter for autoname — Gemini Flash is faster and cheaper for 30-token labels
-    const openrouterKey = process.env.OPENROUTER_API_KEY || ''
-    if (!openrouterKey) return res.status(500).json({ error: 'No OpenRouter API key found' })
+    // Use Anthropic (claude-haiku) for autoname
+    const anthropicKey = process.env.ANTHROPIC_API_KEY
+    if (!anthropicKey) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not set' })
 
     const excerpt = messages
       .filter(m => m.role === 'user' || m.role === 'assistant')
@@ -430,29 +473,16 @@ app.post('/api/session-autoname', async (req, res) => {
 
     const prompt = `Generate a 3-5 word session title for this conversation. Reply with ONLY the title — no quotes, no punctuation, no explanation.\nExamples: Octis Sidebar Layout Fixes | Sage GL Batch Push | Centurion Deal Analysis\n\n${excerpt}\n\nTitle:`
 
-    // Get agent config to determine the renaming model
-    const agentsFile = path.join(__serverDir, 'config', 'agents.json')
-    let renameModel = process.env.OCTIS_RENAME_MODEL || 'openrouter/google/gemini-2.5-flash'
-    try {
-      const agentsConfig = JSON.parse(readFileSync(agentsFile, 'utf8'))
-      const renameId = agentsConfig.renameAgentId || 'fast'
-      // Look up model from openclaw.json
-      const clawConfig = JSON.parse(readFileSync(path.join(HOME, '.openclaw', 'openclaw.json'), 'utf8'))
-      const renameAgent = (clawConfig.agents?.list || []).find(a => a.id === renameId)
-      if (renameAgent?.model) renameModel = typeof renameAgent.model === 'string' ? renameAgent.model : (renameAgent.model?.primary || renameModel)
-    } catch {}
-
-    // openclaw stores models as 'openrouter/provider/model' but OpenRouter API expects 'provider/model'
-    const apiModel = renameModel.startsWith('openrouter/') ? renameModel.slice('openrouter/'.length) : renameModel
-    const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    // Use Anthropic Haiku for autoname (no OpenRouter key on this deployment)
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${openrouterKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: apiModel, max_tokens: 20, messages: [{ role: 'user', content: prompt }] }),
+      headers: { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-haiku-4-5', max_tokens: 30, messages: [{ role: 'user', content: prompt }] }),
       signal: AbortSignal.timeout(8000),
     })
     const data = await r.json()
-    // OpenRouter returns OpenAI-format: choices[0].message.content
-    const raw = (data?.choices?.[0]?.message?.content || '').trim()
+    // Anthropic format: content[0].text
+    const raw = (data?.content?.[0]?.text || '').trim()
     const label = raw.split('\n')[0].replace(/^['"`*\-•]+|['"`*\-•]+$/g, '').trim().slice(0, 60)
     if (!label) return res.status(500).json({ error: 'Empty label from model' })
     res.json({ label })
@@ -555,15 +585,16 @@ app.post('/api/projects', requireAuth, (req, res) => {
 
 app.patch('/api/projects/:id', requireAuth, (req, res) => {
   const { id } = req.params
-  const { name, emoji, color, description, memory_file, position } = req.body
+  const { name, emoji, color, description, memory_file, position, hide_from_sessions } = req.body
   const sets = []
   const vals = []
-  if (name !== undefined)        { sets.push('name=?');         vals.push(name) }
-  if (emoji !== undefined)       { sets.push('emoji=?');        vals.push(emoji) }
-  if (color !== undefined)       { sets.push('color=?');        vals.push(color) }
-  if (description !== undefined) { sets.push('description=?');  vals.push(description) }
-  if (memory_file !== undefined) { sets.push('memory_file=?');  vals.push(memory_file) }
-  if (position !== undefined)    { sets.push('position=?');     vals.push(position) }
+  if (name !== undefined)               { sets.push('name=?');                vals.push(name) }
+  if (emoji !== undefined)              { sets.push('emoji=?');               vals.push(emoji) }
+  if (color !== undefined)              { sets.push('color=?');               vals.push(color) }
+  if (description !== undefined)        { sets.push('description=?');         vals.push(description) }
+  if (memory_file !== undefined)        { sets.push('memory_file=?');         vals.push(memory_file) }
+  if (position !== undefined)           { sets.push('position=?');            vals.push(position) }
+  if (hide_from_sessions !== undefined) { sets.push('hide_from_sessions=?');  vals.push(hide_from_sessions ? 1 : 0) }
   if (!sets.length) return res.status(400).json({ error: 'nothing to update' })
   sets.push('updated_at=unixepoch()')
   vals.push(id)
@@ -598,15 +629,33 @@ app.post('/api/hidden-sessions/unhide', requireAuth, (req, res) => {
 })
 
 app.get('/api/hidden-session-details', requireAuth, (req, res) => {
-  const hiddenKeys = db.prepare('SELECT session_key FROM octis_hidden_sessions').all().map(r => r.session_key)
-  const details = hiddenKeys.map(key => {
-    const labelRow = db.prepare('SELECT label, updated_at FROM octis_session_labels WHERE session_key = ?').get(key)
+  // Only return archived sessions (deleted=0), not permanently deleted ones
+  const hiddenRows = db.prepare('SELECT session_key, hidden_at FROM octis_hidden_sessions WHERE (deleted IS NULL OR deleted = 0) ORDER BY hidden_at DESC').all()
+  const getLabel = db.prepare('SELECT label, updated_at FROM octis_session_labels WHERE session_key = ?')
+  const getFuzzy = db.prepare("SELECT label, updated_at FROM octis_session_labels WHERE session_key LIKE '%' || ? ORDER BY updated_at DESC LIMIT 1")
+  const details = hiddenRows.map(({ session_key: key, hidden_at }) => {
+    // 1. Exact match
+    let labelRow = getLabel.get(key)
+    // 2. For bare UUIDs, try agent:main:dashboard:{uuid}
+    if (!labelRow?.label && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(key)) {
+      labelRow = getLabel.get('agent:main:dashboard:' + key) || labelRow
+    }
+    // 3. For full agent:main:session-xxx keys, try bare session-xxx form
+    if (!labelRow?.label) {
+      const shortKey = key.match(/(session-\d+)$/)?.[1]
+      if (shortKey) labelRow = getLabel.get(shortKey) || labelRow
+    }
+    // 4. Fuzzy suffix match as last resort
+    if (!labelRow?.label) {
+      labelRow = getFuzzy.get(key) || labelRow
+    }
     return {
       key,
       id: key,
       sessionId: key,
       label: labelRow?.label || null,
       lastActivity: labelRow?.updated_at ? new Date(labelRow.updated_at * 1000).toISOString() : null,
+      hiddenAt: hidden_at ? new Date(hidden_at * 1000).toISOString() : null,
       status: 'quiet'
     }
   })
@@ -751,9 +800,9 @@ app.post('/api/session-init', requireAuth, async (req, res) => {
     const project = db.prepare('SELECT * FROM octis_projects WHERE slug = ?').get(projectSlug)
     if (!project) return res.json({ error: 'Project not found' })
     const { name, emoji, description, memory_file } = project
-    const contextNote = `📁 **${emoji} ${name}** — You are working in the ${name} project.${
-      memory_file ? ` Context file: memory/${memory_file}` : ''
-    }${description ? '\n' + description : ''}`
+    const descLine = description ? `\n${description}` : ''
+    const memLine = memory_file ? `\nContext file: memory/${memory_file}` : ''
+    const contextNote = `[Octis Project Context]\nThis session is filed under the **${name}** project in Octis.${descLine}${memLine}\n\nWhen the user asks which project this session is under, answer: **${name}**.`
     // Try to set label; if taken, append a numeric suffix until it succeeds
     let labelSet = false
     let baseLabel = `${emoji} ${name}`.trim()
@@ -803,7 +852,7 @@ app.get('/api/chat-history', requireAuth, async (req, res) => {
     if (!sessionKey) return res.status(400).json({ ok: false, error: 'sessionKey required' })
     const [result] = await adminGwCall([{
       method: 'chat.history',
-      params: { sessionKey, limit: Math.min(Number(limit), 100) }
+      params: { sessionKey, limit: Math.min(Number(limit), 300) }
     }])
     res.json({ ok: true, messages: result?.messages || [] })
   } catch (err) {
@@ -893,10 +942,15 @@ app.get('/api/sessions/history', async (req, res) => {
     `)
     const savedLabels = db.prepare('SELECT session_key, label FROM octis_session_labels').all()
     const labelMap = {}
-    for (const r of savedLabels) labelMap[r.session_key] = r.label
+    for (const r of savedLabels) {
+      labelMap[r.session_key] = r.label
+      // Also index without 'agent:main:' prefix so Postgres session_ids match
+      const stripped = r.session_key.replace(/^agent:main:/, '')
+      if (stripped !== r.session_key) labelMap[stripped] = r.label
+    }
     res.json(rows.map(r => ({
       session_key: r.session_key,
-      label: labelMap[r.session_key] || cleanSessionLabel(r.session_label, r.session_key),
+      label: labelMap[r.session_key] || labelMap['agent:main:' + r.session_key] || cleanSessionLabel(r.session_label, r.session_key),
       sender_name: r.sender_name,
       cost: parseFloat(r.cost),
       first_date: r.first_date,
@@ -998,6 +1052,86 @@ app.patch('/api/todos/:id/complete', requireAuth, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
+})
+
+// ─── User settings (persistent key/value per user) ─────────────────────────
+app.get('/api/settings', requireAuth, (req, res) => {
+  const rows = db.prepare('SELECT key, value FROM user_settings WHERE user_id = ?').all(req.user.id)
+  const settings = {}
+  for (const r of rows) {
+    try { settings[r.key] = JSON.parse(r.value) } catch { settings[r.key] = r.value }
+  }
+  res.json({ ok: true, settings })
+})
+
+app.patch('/api/settings', requireAuth, (req, res) => {
+  const updates = req.body // { key: value, ... }
+  if (!updates || typeof updates !== 'object') return res.status(400).json({ error: 'Invalid body' })
+  const upsert = db.prepare(`INSERT INTO user_settings (user_id, key, value, updated_at)
+    VALUES (?, ?, ?, unixepoch())
+    ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value, updated_at=unixepoch()`)
+  const tx = db.transaction((entries) => {
+    for (const [k, v] of entries) upsert.run(req.user.id, k, JSON.stringify(v))
+  })
+  tx(Object.entries(updates))
+  res.json({ ok: true })
+})
+
+// ─── Drafts (per-session, per-user, cross-device) ────────────────────────────
+app.get('/api/drafts', requireAuth, (req, res) => {
+  const rows = db.prepare('SELECT session_key, text, updated_at FROM octis_drafts WHERE user_id = ?').all(req.user.id)
+  const drafts = {}
+  for (const r of rows) {
+    if (r.text) drafts[r.session_key] = { text: r.text, updatedAt: r.updated_at }
+  }
+  res.json({ ok: true, drafts })
+})
+
+app.get('/api/drafts/:sessionKey', requireAuth, (req, res) => {
+  const { sessionKey } = req.params
+  const row = db.prepare('SELECT text FROM octis_drafts WHERE session_key = ? AND user_id = ?').get(sessionKey, req.user.id)
+  res.json({ ok: true, text: row?.text || null })
+})
+
+app.put('/api/drafts/:sessionKey', requireAuth, (req, res) => {
+  const { sessionKey } = req.params
+  const { text } = req.body
+  if (typeof text !== 'string') return res.status(400).json({ error: 'text required' })
+  if (!text.trim()) {
+    db.prepare('DELETE FROM octis_drafts WHERE session_key = ? AND user_id = ?').run(sessionKey, req.user.id)
+    return res.json({ ok: true })
+  }
+  db.prepare(`INSERT INTO octis_drafts (session_key, user_id, text, updated_at)
+    VALUES (?, ?, ?, unixepoch())
+    ON CONFLICT(session_key, user_id) DO UPDATE SET text=excluded.text, updated_at=unixepoch()`
+  ).run(sessionKey, req.user.id, text)
+  res.json({ ok: true })
+})
+
+// Permanently delete session from DB + gateway
+app.post('/api/session-delete', requireAuth, async (req, res) => {
+  const { sessionKey } = req.body
+  if (!sessionKey) return res.status(400).json({ error: 'sessionKey required' })
+  try {
+    db.prepare('DELETE FROM octis_session_labels WHERE session_key = ?').run(sessionKey)
+    db.prepare('DELETE FROM octis_session_projects WHERE session_key = ?').run(sessionKey)
+    // Mark as deleted in hidden_sessions — keeps it in isHidden() filter so WS sessions.list can't revive it
+    db.prepare('INSERT INTO octis_hidden_sessions (session_key, deleted) VALUES (?, 1) ON CONFLICT(session_key) DO UPDATE SET deleted=1').run(sessionKey)
+    db.prepare('DELETE FROM octis_pinned_sessions WHERE session_key = ?').run(sessionKey)
+    db.prepare('DELETE FROM octis_session_ownership WHERE session_key = ?').run(sessionKey)
+    db.prepare('DELETE FROM octis_drafts WHERE session_key = ?').run(sessionKey)
+  } catch (e) { console.error('session-delete DB error:', e) }
+  // Best-effort gateway deletion
+  try {
+    await adminGwCall([{ method: 'sessions.delete', params: { sessionKey } }])
+  } catch (e) { console.error('session-delete gateway error:', e) }
+  res.json({ ok: true })
+})
+
+app.delete('/api/drafts/:sessionKey', requireAuth, (req, res) => {
+  const { sessionKey } = req.params
+  db.prepare('DELETE FROM octis_drafts WHERE session_key = ? AND user_id = ?').run(sessionKey, req.user.id)
+  res.json({ ok: true })
 })
 
 // ─── Media / uploads ──────────────────────────────────────────────────────────

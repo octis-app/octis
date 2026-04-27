@@ -3,6 +3,7 @@ import { useSessionStore, useGatewayStore, useProjectStore, useLabelStore, useHi
 import { useAuthStore } from '../store/authStore'
 import { authFetch } from '../lib/authFetch'
 import { AgentPicker } from './AgentPicker'
+import { DeleteConfirmModal } from './DeleteConfirmModal'
 
 // ─── Health Circle ─────────────────────────────────────────────────────────────
 function HealthCircle({ session }: { session: Session }) {
@@ -142,20 +143,23 @@ function ProjectPicker({ sessionKey, current, onClose }: { sessionKey: string; c
 }
 
 // ─── Single session row ───────────────────────────────────────────────────────
-function SessionItem({ session, isPinned, onPin, onRename, onArchive, onContinue, selected, onSelect, onDragStart, onDragOver, onDrop, isDragOver }: {
+function SessionItem({ session, isPinned, onPin, onRename, onArchive, onUnarchive, onDelete, onContinue, selected, onSelect, onDragStart, onDragOver, onDrop, onDragEnd, isDragOver }: {
   session: Session; isPinned: boolean; onPin: () => void
   onRename: (key: string, label: string) => void
   onArchive: (key: string) => void
+  onUnarchive?: (key: string) => void
+  onDelete?: (key: string) => void
   onContinue: (session: Session) => void
   selected: boolean
   onSelect: (key: string, e: React.MouseEvent) => void
   onDragStart?: (key: string) => void
   onDragOver?: (key: string) => void
   onDrop?: (key: string) => void
+  onDragEnd?: () => void
   isDragOver?: boolean
 }) {
   const { getStatus, getLastActivityMs, getUnreadCount } = useSessionStore()
-  const { getTag, getProjectEmoji } = useProjectStore()
+  const { getTag, getProjectEmoji, projectMeta } = useProjectStore()
   const { getLabel, setLabel: saveLabel } = useLabelStore()
   const { mainAgentId } = useAuthStore()
   const lastMs = getLastActivityMs(session)
@@ -166,24 +170,47 @@ function SessionItem({ session, isPinned, onPin, onRename, onArchive, onContinue
   const [showProjectPicker, setShowProjectPicker] = useState(false)
   const [editing, setEditing] = useState(false)
   // Use local override first, then gateway label, then a readable fallback from the key
-  function formatFallbackLabel(key: string): string {
-    // agent:main:slack:direct:u08ml4w30jw:1776060160.265889 → "Slack · Apr 13 6:02am"
+  function formatFallbackLabel(key: string, s?: Session): string {
+    // Slack thread: agent:main:slack:direct:... or :channel:...:thread:ts → "DM · Apr 13 6:02am"
+    const slackTs = key.match(/:thread:([\d.]+)$/)
+    if (slackTs) {
+      const d = new Date(parseFloat(slackTs[1]) * 1000)
+      const mon = d.toLocaleString('en', { month: 'short' })
+      const day = d.getDate()
+      const h = d.getHours(), m = d.getMinutes()
+      const time = `${h % 12 || 12}:${String(m).padStart(2,'0')}${h < 12 ? 'am' : 'pm'}`
+      const ch = key.includes(':direct:') ? 'DM' : 'Slack'
+      return `${ch} · ${mon} ${day} ${time}`
+    }
+    // Legacy: any trailing unix/epoch timestamp (e.g. agent:main:session-ts)
     const parts = key.split(':')
-    const channel = parts[2] || ''
     const threadTs = parts[parts.length - 1] || ''
     const tsNum = parseFloat(threadTs)
-    if (!isNaN(tsNum) && tsNum > 0) {
+    if (!isNaN(tsNum) && tsNum > 0 && tsNum < 2e12) {
       const d = new Date(tsNum * 1000)
       const mon = d.toLocaleString('en', { month: 'short' })
       const day = d.getDate()
       const h = d.getHours(), m = d.getMinutes()
       const time = `${h % 12 || 12}:${String(m).padStart(2,'0')}${h < 12 ? 'am' : 'pm'}`
-      const ch = channel ? channel.charAt(0).toUpperCase() + channel.slice(1) : 'Session'
-      return `${ch} · ${mon} ${day} ${time}`
+      return `Session · ${mon} ${day} ${time}`
+    }
+    // Bare UUID with no label — use archive date if available, else generic
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-/.test(key)) {
+      const hiddenAt = (s as any)?.hiddenAt
+      if (hiddenAt) {
+        const d = new Date(hiddenAt)
+        return `Archived ${d.toLocaleString('en', { month: 'short', day: 'numeric' })}`
+      }
+      return 'Unnamed session'
     }
     return key.slice(0, 40)
   }
-  const displayLabel = getLabel(session.key, session.label || formatFallbackLabel(session.key))
+  // Try expanded key formats for bare UUIDs before falling back
+  const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(session.key)
+  const displayLabel = getLabel(session.key)
+    || (isUUID ? getLabel('agent:main:dashboard:' + session.key) : '')
+    || session.label
+    || formatFallbackLabel(session.key, session)
   const [label, setLabel] = useState(displayLabel)
 
   const handleRename = () => {
@@ -203,12 +230,20 @@ function SessionItem({ session, isPinned, onPin, onRename, onArchive, onContinue
       onDragStart={() => onDragStart?.(session.key)}
       onDragOver={(e) => { e.preventDefault(); onDragOver?.(session.key) }}
       onDrop={(e) => { e.preventDefault(); onDrop?.(session.key) }}
-      className={`mx-2 px-3 py-2.5 rounded-lg mb-0.5 group transition-colors relative cursor-grab active:cursor-grabbing ${
+      onDragEnd={() => onDragEnd?.()}
+      className={`mx-2 pl-6 pr-3 py-2.5 rounded-lg mb-0.5 group transition-colors relative cursor-pointer ${
         isDragOver ? 'border-t-2 border-t-[#6366f1]' :
         selected ? 'bg-[#2a1f5e] border border-[#6366f1]' : isPinned ? 'bg-[#1e2330] border border-[#2a3142]' : 'hover:bg-[#1e2330]'
       }`}
-      onClick={(e) => { if (e.ctrlKey || e.metaKey || e.shiftKey) { e.preventDefault(); onSelect(session.key, e) } }}
+      onClick={(e) => {
+        if (e.ctrlKey || e.metaKey || e.shiftKey) { e.preventDefault(); onSelect(session.key, e) }
+        else onPin()
+      }}
     >
+      {/* Drag handle — only this area shows the grab cursor */}
+      <div className="absolute left-1 inset-y-0 w-4 flex items-center justify-center opacity-0 group-hover:opacity-100 select-none cursor-grab active:cursor-grabbing" title="Drag to reorder">
+        <span className="text-[#4b5563] text-[10px] leading-none">⠿</span>
+      </div>
       <div className="flex items-center gap-2">
         {/* Selection checkbox - always visible when selected, hover otherwise */}
         <div
@@ -239,7 +274,7 @@ function SessionItem({ session, isPinned, onPin, onRename, onArchive, onContinue
         ) : (
           <span
             className="text-[13px] text-white truncate flex-1 cursor-pointer leading-snug flex items-baseline gap-1"
-            onClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) onPin() }}
+            onClick={(e) => { e.stopPropagation(); if (!e.ctrlKey && !e.metaKey && !e.shiftKey) onPin() }}
             onDoubleClick={() => setEditing(true)}
             title={displayLabel}
           >
@@ -279,11 +314,7 @@ function SessionItem({ session, isPinned, onPin, onRename, onArchive, onContinue
         {unread > 0 && (
           <span className="text-[10px] text-[#6366f1]">{unread} new</span>
         )}
-        {tag.project && (
-          <span className="text-[10px] bg-[#2a3142] text-[#a5b4fc] px-1.5 py-0.5 rounded font-medium">
-            {tag.project}
-          </span>
-        )}
+
         {lastSeen && (
           <span className="text-[10px] text-[#4b5563] ml-auto" title="Last activity">{lastSeen}</span>
         )}
@@ -314,10 +345,24 @@ function SessionItem({ session, isPinned, onPin, onRename, onArchive, onContinue
             <button className="w-full px-3 py-1.5 text-xs text-left text-[#e8eaf0] hover:bg-[#2a3142]" onClick={() => { onContinue(session); setShowMenu(false) }}>▶ Continue</button>
           )}
           <div className="border-t border-[#2a3142] my-1" />
-          <button className="w-full px-3 py-1.5 text-xs text-left text-red-400 hover:bg-[#2a3142] flex items-center justify-between" onClick={() => { onArchive(session.key); setShowMenu(false) }}>
-            <span>🗑 Archive</span>
-            <span className="text-[9px] opacity-50 font-mono bg-white/5 rounded px-1 py-0.5 leading-none">E</span>
-          </button>
+          {onUnarchive ? (
+            <button className="w-full px-3 py-1.5 text-xs text-left text-indigo-400 hover:bg-[#2a3142] flex items-center justify-between" onClick={() => { onUnarchive(session.key); setShowMenu(false) }}>
+              <span>↩ Unarchive</span>
+            </button>
+          ) : (
+            <button className="w-full px-3 py-1.5 text-xs text-left text-red-400 hover:bg-[#2a3142] flex items-center justify-between" onClick={() => { onArchive(session.key); setShowMenu(false) }}>
+              <span>🗑 Archive</span>
+              <span className="text-[9px] opacity-50 font-mono bg-white/5 rounded px-1 py-0.5 leading-none">E</span>
+            </button>
+          )}
+          {onDelete && (
+            <>
+              <div className="border-t border-[#2a3142] my-0.5" />
+              <button className="w-full px-3 py-1.5 text-xs text-left text-red-600 hover:bg-[#2a3142] flex items-center gap-1.5" onClick={() => { onDelete(session.key); setShowMenu(false) }}>
+                <span>🗑️ Delete permanently</span>
+              </button>
+            </>
+          )}
         </div>
       )}
 
@@ -355,14 +400,21 @@ function OwnerBadge({ owner }: { owner: string | null }) {
   )
 }
 
-function ProjectGroup({ name, sessions, activePanes, paneCount, onPin, onRename, onArchive, onContinue, selected, onSelect }: {
-  name: string; sessions: Session[]; activePanes: (string | null)[]; paneCount: number
+function ProjectGroup({ name, slug, sessions, activePanes, paneCount, onPin, onRename, onArchive, onDelete, onContinue, selected, onSelect, isDragOver, onSessionDragStart, onSessionDragEnd, onProjectDragOver, onProjectDragLeave, onProjectDrop }: {
+  name: string; slug?: string; sessions: Session[]; activePanes: (string | null)[]; paneCount: number
   onPin: (key: string) => void
   onRename: (key: string, label: string) => void
   onArchive: (key: string) => void
+  onDelete?: (key: string) => void
   onContinue: (session: Session) => void
   selected: Set<string>
   onSelect: (key: string, e: React.MouseEvent) => void
+  isDragOver?: boolean
+  onSessionDragStart?: (key: string) => void
+  onSessionDragEnd?: () => void
+  onProjectDragOver?: () => void
+  onProjectDragLeave?: () => void
+  onProjectDrop?: () => void
 }) {
   const { getStatus } = useSessionStore()
   const [open, setOpen] = useState(true)
@@ -378,14 +430,25 @@ function ProjectGroup({ name, sessions, activePanes, paneCount, onPin, onRename,
   const st = STATUS[topStatus] ?? STATUS.quiet
 
   return (
-    <div className="mx-2 mb-2">
+    <div
+      className={`mx-2 mb-2 rounded-lg transition-colors ${isDragOver ? 'bg-[#1a1f3a] ring-1 ring-[#6366f1] ring-inset' : ''}`}
+      onDragOver={(e) => { e.preventDefault(); onProjectDragOver?.() }}
+      onDragLeave={(e) => {
+        // Only clear if leaving the group entirely (not entering a child)
+        if (!e.currentTarget.contains(e.relatedTarget as Node)) onProjectDragLeave?.()
+      }}
+      onDrop={(e) => { e.preventDefault(); onProjectDrop?.() }}
+    >
       <button
         onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-[#1e2330] transition-colors text-left"
+        className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg transition-colors text-left ${
+          isDragOver ? 'bg-[#2a2f5a] text-[#818cf8]' : 'hover:bg-[#1e2330]'
+        }`}
       >
         <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: st.color }} />
-        <span className="text-xs font-semibold text-[#a5b4fc] flex-1">{name}</span>
-        <span className="text-[10px] text-[#4b5563]">{sessions.length}</span>
+        <span className={`text-xs font-semibold flex-1 ${isDragOver ? 'text-[#818cf8]' : 'text-[#a5b4fc]'}`}>{name}</span>
+        {isDragOver && <span className="text-[10px] text-[#6366f1] animate-pulse">drop here</span>}
+        {!isDragOver && <span className="text-[10px] text-[#4b5563]">{sessions.length}</span>}
         <span className="text-[#4b5563] text-[10px]">{open ? '▲' : '▼'}</span>
       </button>
       {open && (
@@ -398,10 +461,12 @@ function ProjectGroup({ name, sessions, activePanes, paneCount, onPin, onRename,
               onPin={() => onPin(session.key)}
               onRename={onRename}
               onArchive={onArchive}
+              onDelete={onDelete}
               onContinue={onContinue}
               selected={selected.has(session.key)}
               onSelect={(k, e) => onSelect(k, e)}
-
+              onDragStart={onSessionDragStart}
+              onDragEnd={onSessionDragEnd}
             />
           ))}
         </div>
@@ -420,11 +485,20 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     return () => clearInterval(t)
   }, [])
   const { connected, send, agentId } = useGatewayStore()
-  const { getTag, getProjects } = useProjectStore()
+  const { getTag, getProjects, projectMeta, setProjectMeta } = useProjectStore()
   const { getLabel } = useLabelStore()
-  const { hide: hideSession } = useHiddenStore()
+  const { hide: hideSession, unhide: unhideSession } = useHiddenStore()
+  const { hiddenSessions, hydrateHiddenFromServer } = useSessionStore()
   const { mainAgentId } = useAuthStore()
   const [sidebarView, setSidebarView] = useState('sessions') // 'sessions' | 'projects' | 'archives'
+  // pendingPaneKey: deferred pane open — useEffect fires AFTER React commits the setSessions update
+  const [pendingPaneKey, setPendingPaneKey] = useState<string | null>(null)
+  useEffect(() => {
+    if (!pendingPaneKey) return
+    openInBestPane(pendingPaneKey)
+    setPendingPaneKey(null)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingPaneKey])
   const [filter, setFilter] = useState('all')
   const [search, setSearch] = useState('')
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -440,8 +514,21 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     if (mainAgentId && !selectedAgentId) setSelectedAgentId(mainAgentId)
   }, [mainAgentId])
 
+  // Load projectMeta on mount so hide_from_sessions filter works even before Projects tab is visited
+  useEffect(() => {
+    fetch(`${API}/api/projects`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(d => {
+        const list = d.projects || []
+        const meta: Record<string, { emoji: string; name: string; color: string; hideFromSessions?: boolean }> = {}
+        for (const p of list) meta[p.slug] = { emoji: p.emoji || '📁', name: p.name, color: p.color || '#6366f1', hideFromSessions: !!p.hide_from_sessions }
+        setProjectMeta(meta)
+      })
+      .catch(() => {})
+  }, [])
+
   const AGENT_DISPLAY: Record<string, { emoji: string; name: string }> = {
-    main: { emoji: '🦞', name: 'Byte' },
+    main: { emoji: '👻', name: 'Ghosty' },
     haiku: { emoji: '⚡', name: 'Haiku' },
     minimax: { emoji: '🔧', name: 'MiniMax' },
     gemini: { emoji: '✨', name: 'Gemini' },
@@ -483,7 +570,24 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
 
   useEffect(() => {
     if (sidebarView === 'archives') void loadArchives()
+    // Re-hydrate project tags when switching to Projects view (catches timing issues)
+    if (sidebarView === 'projects') {
+      void useProjectStore.getState().hydrateFromServer()
+    }
   }, [sidebarView, loadArchives])
+
+  // Clear archive selection when leaving archives view
+  useEffect(() => {
+    if (sidebarView !== 'archives') setSelectedArchive(new Set())
+  }, [sidebarView])
+
+  // Fetch hidden sessions whenever Archives tab is opened (data may not be ready on first switch)
+  const [archivesLoaded, setArchivesLoaded] = useState(false)
+  useEffect(() => {
+    if (sidebarView !== 'archives') return
+    setArchivesLoaded(false)
+    hydrateHiddenFromServer().finally(() => setArchivesLoaded(true))
+  }, [sidebarView])
 
   // Close new-session project picker on outside click
   useEffect(() => {
@@ -506,6 +610,19 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     const t = setInterval(poll, 30_000)
     return () => clearInterval(t)
   }, [connected, send])
+
+  const [dragOverProject, setDragOverProject] = useState<string | null>(null)
+
+  const handleProjectDrop = (targetSlug: string | undefined) => {
+    const key = dragKey
+    setDragKey(null)
+    setDragOverProject(null)
+    if (!key) return
+    const currentSlug = getTag(key).project || ''
+    const target = targetSlug ?? ''
+    if (currentSlug === target) return // already in this project
+    useProjectStore.getState().setTag(key, target)
+  }
 
   const handleDragStart = (key: string) => setDragKey(key)
   const handleDragOver = (key: string) => setDragOverKey(key)
@@ -558,20 +675,30 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     setSelected(new Set())
   }
 
-  const handlePin = (sessionKey: string) => {
-    const alreadyAt = activePanes.indexOf(sessionKey)
-    if (alreadyAt >= 0 && alreadyAt < paneCount) return
-    const emptyPane = activePanes.findIndex((p, i) => i < paneCount && !p)
+  // Open a session in the best available pane — expands pane count up to 8, then replaces last.
+  // Does NOT toggle (use handlePin for click-to-toggle behaviour).
+  const openInBestPane = (sessionKey: string) => {
+    const { activePanes: ap, paneCount: pc } = useSessionStore.getState()
+    const emptyPane = ap.findIndex((p, i) => i < pc && !p)
     if (emptyPane >= 0) {
       pinToPane(emptyPane, sessionKey)
-    } else if (paneCount < 8) {
-      // Auto-expand: add a new pane for this session (up to 8)
-      setPaneCount(paneCount + 1)
-      pinToPane(paneCount, sessionKey)
+    } else if (pc < 8) {
+      setPaneCount(pc + 1)
+      pinToPane(pc, sessionKey)
     } else {
-      // At max auto-expand — replace the last pane
-      pinToPane(paneCount - 1, sessionKey)
+      pinToPane(pc - 1, sessionKey)
     }
+  }
+
+  const handlePin = (sessionKey: string) => {
+    // Always read fresh store state to avoid stale-closure duplicates
+    const { activePanes: ap } = useSessionStore.getState()
+    // Toggle: if session is already open in any pane, close it (remove from all slots)
+    if (ap.indexOf(sessionKey) >= 0) {
+      ap.forEach((p, i) => { if (p === sessionKey) pinToPane(i, null) })
+      return
+    }
+    openInBestPane(sessionKey)
   }
 
   const handleRename = (sessionKey: string, newLabel: string) => {
@@ -597,6 +724,89 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     }
   }
 
+  const [deleteConfirmKey, setDeleteConfirmKey] = useState<string | null>(null)
+  const handleDeleteRequest = (sessionKey: string) => setDeleteConfirmKey(sessionKey)
+  const handleDeleteConfirm = async () => {
+    const sessionKey = deleteConfirmKey
+    if (!sessionKey) return
+    setDeleteConfirmKey(null)
+    // Remove from local state immediately
+    setSessions(sessions.filter(s => s.key !== sessionKey))
+    activePanes.forEach((p, i) => { if (p === sessionKey) pinToPane(i, null) })
+    // Keep session in hidden filter so WS sessions.list broadcast can't revive it
+    // (server marks it deleted=1 in octis_hidden_sessions, so isHidden() still returns true)
+    useHiddenStore.getState().hide(sessionKey)
+    // Remove from Archives display (so it doesn't appear in Archives tab)
+    useSessionStore.getState().setHiddenSessions(
+      useSessionStore.getState().hiddenSessions.filter(s => s.key !== sessionKey)
+    )
+    // Call server to delete from DB + gateway
+    authFetch(`${API}/api/session-delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionKey }),
+    }).catch(e => console.error('delete failed:', e))
+    // Clear localStorage cache for this session
+    localStorage.removeItem(`octis-msgs-${sessionKey}`)
+    localStorage.removeItem(`octis-draft-${sessionKey}`)
+  }
+
+  // ── Archive multi-select ──────────────────────────────────────────────────
+  const [selectedArchive, setSelectedArchive] = useState<Set<string>>(new Set())
+
+  const handleArchiveSelect = (key: string) => {
+    setSelectedArchive(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key); else next.add(key)
+      return next
+    })
+  }
+
+  const handleArchiveSelectAll = () => {
+    if (selectedArchive.size === hiddenSessions.length) setSelectedArchive(new Set())
+    else setSelectedArchive(new Set(hiddenSessions.map(s => s.key)))
+  }
+
+  const restoreSessionWithProject = async (key: string) => {
+    unhideSession(key)
+    try {
+      const r = await authFetch(`${API}/api/session-projects`)
+      if (r.ok) {
+        const rows: { session_key: string; project: string }[] = await r.json()
+        const row = rows.find(r => r.session_key === key)
+        if (row?.project) useProjectStore.getState().setTag(key, row.project)
+      }
+    } catch { /* best-effort */ }
+  }
+
+  const handleBulkArchiveRestore = async () => {
+    const keys = Array.from(selectedArchive)
+    setSelectedArchive(new Set())
+    for (const key of keys) await restoreSessionWithProject(key)
+    void hydrateHiddenFromServer()
+  }
+
+  const handleBulkArchiveDelete = () => {
+    if (!confirm(`Delete ${selectedArchive.size} session(s) permanently? This cannot be undone.`)) return
+    const keys = Array.from(selectedArchive)
+    setSelectedArchive(new Set())
+    for (const key of keys) {
+      // Keep in hidden filter, remove from Archives display
+      useHiddenStore.getState().hide(key)
+      useSessionStore.getState().setHiddenSessions(
+        useSessionStore.getState().hiddenSessions.filter(s => s.key !== key)
+      )
+      authFetch(`${API}/api/session-delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionKey: key }),
+      }).catch(e => console.error('bulk delete failed:', e))
+      localStorage.removeItem(`octis-msgs-${key}`)
+      localStorage.removeItem(`octis-draft-${key}`)
+    }
+    void hydrateHiddenFromServer()
+  }
+
   // Continue: create new session pre-seeded with last thread's card
   const handleContinue = (session: Session) => {
     const tag = getTag(session.key)
@@ -610,17 +820,16 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
 
     send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey: newKey, message: seedMsg, idempotencyKey: `octis-continue-${Date.now()}-${Math.random().toString(36).slice(2)}` } })
 
-    // Add to sessions list locally
-    setSessions([{ key: newKey, label: `↪ ${prevLabel}`, sessionKey: newKey }, ...sessions])
+    // Add to sessions list locally (use fresh store sessions to avoid stale closure)
+    setSessions([{ key: newKey, label: `↪ ${prevLabel}`, sessionKey: newKey }, ...useSessionStore.getState().sessions])
 
     // Assign same project tag
     if (project) {
       useProjectStore.getState().setTag(newKey, project)
     }
 
-    // Open in pane
-    const emptyPane = activePanes.findIndex((p, i) => i < paneCount && !p)
-    pinToPane(emptyPane >= 0 ? emptyPane : paneCount - 1, newKey)
+    // Open in pane after React commits the sessions update
+    setPendingPaneKey(newKey)
   }
 
   const handleTodoNewSession = (text: string, project: string) => {
@@ -630,8 +839,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     setTimeout(() => {
       send({ type: 'req', id: `chat-send-${Date.now()}`, method: 'chat.send', params: { sessionKey: newKey, message: text, idempotencyKey: `octis-todo-${Date.now()}-${Math.random().toString(36).slice(2)}` } })
     }, 300)
-    const emptyPane = activePanes.findIndex((p, i) => i < paneCount && !p)
-    pinToPane(emptyPane >= 0 ? emptyPane : paneCount - 1, newKey)
+    setPendingPaneKey(newKey)
   }
 
   const hideHeartbeat = localStorage.getItem('octis-show-heartbeat-sessions') !== 'true'
@@ -660,10 +868,24 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
   }
 
   const sorted = getSortedSessions()
+  // Sessions in projects with hide_from_sessions=true are excluded from the Sessions tab
+  // Compute once per render: slugs of all hidden-from-sessions projects
+  const hiddenProjectSlugs = Object.entries(projectMeta)
+    .filter(([, m]) => m.hideFromSessions)
+    .map(([slug]) => slug.toLowerCase())
+  const isHiddenByProject = (s: Session) => {
+    const tag = getTag(s.key)
+    // Tag-based check (sessions already tagged)
+    if (tag.project && projectMeta[tag.project]?.hideFromSessions) return true
+    // Key-pattern check — catches new sessions before autoTagSlackSessions fires
+    if (hiddenProjectSlugs.includes('slack') && s.key.includes(':slack:')) return true
+    return false
+  }
   const filtered = sorted.filter((s: Session) => {
     if (hideHeartbeat && isHeartbeatSession(s)) return false
     if (hideCron && isCronSession(s)) return false
     if (hideAgentSessions && isAgentSession(s)) return false
+    if (isHiddenByProject(s)) return false
     const status = getStatus(s)
     if (filter !== 'all' && status !== filter) return false
     if (search) {
@@ -680,6 +902,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     if (hideHeartbeat && isHeartbeatSession(s)) return false
     if (hideCron && isCronSession(s)) return false
     if (hideAgentSessions && isAgentSession(s)) return false
+    if (isHiddenByProject(s)) return false
     return true
   })
 
@@ -833,31 +1056,67 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
       <div className="flex-1 overflow-y-auto py-2 session-scroll">
 
         {/* ── SESSIONS VIEW ── */}
-        {sidebarView === 'sessions' && (
-          <>
-            {filtered.length === 0 && (
-              <div className="px-4 py-3 text-xs text-[#6b7280]">No sessions found.</div>
-            )}
-            {filtered.map(session => (
-              <SessionItem
-                key={session.key}
-                session={session}
-                isPinned={activePanes.includes(session.key)}
-                onPin={() => handlePin(session.key)}
-                onRename={handleRename}
-                onArchive={handleArchive}
-                onContinue={handleContinue}
-                selected={selected.has(session.key)}
-                onSelect={(k, e) => handleSelect(k, e, filtered)}
-                onDragStart={handleDragStart}
-                onDragOver={handleDragOver}
-                onDrop={handleDrop}
-                isDragOver={dragOverKey === session.key && dragKey !== session.key}
-
-              />
-            ))}
-          </>
-        )}
+        {sidebarView === 'sessions' && (() => {
+          if (filtered.length === 0) return <div className="px-4 py-3 text-xs text-[#6b7280]">No sessions found.</div>
+          // Group filtered sessions by project
+          const groups: Record<string, Session[]> = {}
+          const ungrouped: Session[] = []
+          for (const s of filtered) {
+            const p = getTag(s.key).project
+            if (p) { if (!groups[p]) groups[p] = []; groups[p].push(s) }
+            else ungrouped.push(s)
+          }
+          const groupNames = Object.keys(groups).sort()
+          return (
+            <>
+              {groupNames.map(name => (
+                <ProjectGroup
+                  key={name}
+                  slug={name}
+                  name={projectMeta[name]?.name || name}
+                  sessions={groups[name]}
+                  activePanes={activePanes}
+                  paneCount={paneCount}
+                  onPin={handlePin}
+                  onRename={handleRename}
+                  onArchive={handleArchive}
+                  onDelete={handleDeleteRequest}
+                  onContinue={handleContinue}
+                  selected={selected}
+                  onSelect={(k, e) => handleSelect(k, e, groups[name])}
+                  isDragOver={dragOverProject === name}
+                  onSessionDragStart={setDragKey}
+                  onSessionDragEnd={() => { setDragKey(null); setDragOverProject(null) }}
+                  onProjectDragOver={() => setDragOverProject(name)}
+                  onProjectDragLeave={() => setDragOverProject(null)}
+                  onProjectDrop={() => handleProjectDrop(name)}
+                />
+              ))}
+              {ungrouped.length > 0 && (
+                <ProjectGroup
+                  name="Untagged"
+                  slug=""
+                  sessions={ungrouped}
+                  activePanes={activePanes}
+                  paneCount={paneCount}
+                  onPin={handlePin}
+                  onRename={handleRename}
+                  onArchive={handleArchive}
+                  onDelete={handleDeleteRequest}
+                  onContinue={handleContinue}
+                  selected={selected}
+                  onSelect={(k, e) => handleSelect(k, e, ungrouped)}
+                  isDragOver={dragOverProject === ''}
+                  onSessionDragStart={setDragKey}
+                  onSessionDragEnd={() => { setDragKey(null); setDragOverProject(null) }}
+                  onProjectDragOver={() => setDragOverProject('')}
+                  onProjectDragLeave={() => setDragOverProject(null)}
+                  onProjectDrop={() => handleProjectDrop('')}
+                />
+              )}
+            </>
+          )
+        })()}
 
         {/* ── PROJECTS VIEW ── */}
         {sidebarView === 'projects' && (
@@ -873,6 +1132,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
               return (
                 <ProjectGroup
                   key={name}
+                  slug={name}
                   name={name}
                   sessions={projectSessions}
                   activePanes={activePanes}
@@ -880,91 +1140,125 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
                   onPin={handlePin}
                   onRename={handleRename}
                   onArchive={handleArchive}
+                  onDelete={handleDeleteRequest}
                   onContinue={handleContinue}
                   selected={selected}
                   onSelect={(k, e) => handleSelect(k, e, projectSessions)}
+                  isDragOver={dragOverProject === name}
+                  onSessionDragStart={setDragKey}
+                  onSessionDragEnd={() => { setDragKey(null); setDragOverProject(null) }}
+                  onProjectDragOver={() => setDragOverProject(name)}
+                  onProjectDragLeave={() => setDragOverProject(null)}
+                  onProjectDrop={() => handleProjectDrop(name)}
                 />
               )
             })}
 
             {untaggedSessions.length > 0 && (
-              <div className="mx-2 mt-2">
-                <div className="px-2 py-1 text-[10px] text-[#4b5563] uppercase tracking-wider">Untagged ({untaggedSessions.length})</div>
-                {untaggedSessions.map(session => (
-                  <SessionItem
-                    key={session.key}
-                    session={session}
-                    isPinned={activePanes.includes(session.key)}
-                    onPin={() => handlePin(session.key)}
-                    onRename={handleRename}
-                    onArchive={handleArchive}
-                    onContinue={handleContinue}
-                    selected={selected.has(session.key)}
-                    onSelect={(k, e) => handleSelect(k, e, untaggedSessions)}
-
-                  />
-                ))}
-              </div>
+              <ProjectGroup
+                name="Untagged"
+                slug=""
+                sessions={untaggedSessions}
+                activePanes={activePanes}
+                paneCount={paneCount}
+                onPin={handlePin}
+                onRename={handleRename}
+                onArchive={handleArchive}
+                  onDelete={handleDeleteRequest}
+                onContinue={handleContinue}
+                selected={selected}
+                onSelect={(k, e) => handleSelect(k, e, untaggedSessions)}
+                isDragOver={dragOverProject === ''}
+                onSessionDragStart={setDragKey}
+                onSessionDragEnd={() => { setDragKey(null); setDragOverProject(null) }}
+                onProjectDragOver={() => setDragOverProject('')}
+                onProjectDragLeave={() => setDragOverProject(null)}
+                onProjectDrop={() => handleProjectDrop('')}
+              />
             )}
           </>
         )}
         {/* ── ARCHIVES VIEW ── */}
         {sidebarView === 'archives' && (
           <div className="px-2 py-2">
-            <div className="flex items-center gap-2 mb-3">
-              <span className="text-[10px] text-[#6b7280] uppercase tracking-wider flex-1">History</span>
-              <select
-                value={archiveDays}
-                onChange={e => setArchiveDays(Number(e.target.value))}
-                className="bg-[#0f1117] border border-[#2a3142] text-xs text-[#e8eaf0] rounded px-1.5 py-0.5 outline-none"
-              >
-                <option value={7}>7d</option>
-                <option value={30}>30d</option>
-                <option value={90}>90d</option>
-              </select>
+            {/* Header row */}
+            <div className="flex items-center gap-2 mb-2">
+              <input
+                type="checkbox"
+                checked={hiddenSessions.length > 0 && selectedArchive.size === hiddenSessions.length}
+                ref={el => { if (el) el.indeterminate = selectedArchive.size > 0 && selectedArchive.size < hiddenSessions.length }}
+                onChange={handleArchiveSelectAll}
+                className="w-3.5 h-3.5 rounded border border-[#3a4152] accent-[#6366f1] cursor-pointer shrink-0"
+                title="Select all"
+              />
+              <span className="text-[10px] text-[#6b7280] uppercase tracking-wider flex-1">
+                Archived ({hiddenSessions.length}){selectedArchive.size > 0 ? ` · ${selectedArchive.size} selected` : ''}
+              </span>
               <button
-                onClick={() => void loadArchives()}
+                onClick={() => void hydrateHiddenFromServer()}
                 className="text-xs text-[#6b7280] hover:text-white px-1.5 py-0.5 rounded hover:bg-[#2a3142] transition-colors"
                 title="Refresh"
               >↻</button>
             </div>
 
-            {archiveLoading && <div className="text-xs text-[#6b7280] py-2">Loading…</div>}
-
-            {!archiveLoading && archiveRows.length === 0 && (
-              <div className="text-xs text-[#6b7280] py-2">No archived sessions found.</div>
+            {/* Bulk actions bar */}
+            {selectedArchive.size > 0 && (
+              <div className="flex items-center gap-1.5 mb-2 px-2 py-1.5 bg-[#1e2330] rounded-lg border border-[#2a3142]">
+                <span className="text-[10px] text-[#6b7280] flex-1">{selectedArchive.size} selected</span>
+                <button
+                  onClick={handleBulkArchiveRestore}
+                  className="px-2.5 py-1 rounded-md text-[11px] font-medium bg-indigo-600/20 border border-indigo-600/30 text-indigo-400 hover:bg-indigo-600/30 transition-colors"
+                >
+                  ↩ Restore
+                </button>
+                <button
+                  onClick={handleBulkArchiveDelete}
+                  className="px-2.5 py-1 rounded-md text-[11px] font-medium bg-red-900/20 border border-red-800/30 text-red-400 hover:bg-red-900/30 transition-colors"
+                >
+                  🗑️ Delete
+                </button>
+              </div>
             )}
 
-            {!archiveLoading && archiveRows
-              .filter(r => !search || r.label.toLowerCase().includes(search.toLowerCase()))
-              .map(r => {
-                const lastMs = r.last_activity ? new Date(r.last_activity).getTime() : null
-                const ago = lastMs ? timeAgo(lastMs) : null
-                const isActive = sessions.some(s => s.key === r.session_key)
-                return (
-                  <div
-                    key={r.session_key}
-                    className="px-3 py-2 rounded-lg mb-0.5 hover:bg-[#1e2330] transition-colors"
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="text-[11px] text-[#6b7280] shrink-0">
-                        {isActive ? '🟢' : '📁'}
-                      </span>
-                      <span
-                        className="text-xs text-white truncate flex-1 leading-snug"
-                        title={r.session_key}
-                      >
-                        {r.label}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2 mt-0.5 pl-5">
-                      <span className="text-[10px] text-[#4b5563]">{r.sender_name}</span>
-                      {ago && <span className="text-[10px] text-[#4b5563]">{ago}</span>}
-                      {r.cost != null && <span className="text-[10px] text-[#4b5563] ml-auto">${(r.cost as number).toFixed(3)}</span>}
-                    </div>
+            {!archivesLoaded && hiddenSessions.length === 0 && (
+              <div className="text-xs text-[#6b7280] py-2">Loading…</div>
+            )}
+            {archivesLoaded && hiddenSessions.length === 0 && (
+              <div className="text-xs text-[#6b7280] py-2">No archived sessions. Archive a session from the ⋯ menu.</div>
+            )}
+
+            {hiddenSessions
+              .filter(s => !search || (getLabel(s.key) || s.label || s.key).toLowerCase().includes(search.toLowerCase()))
+              .map(s => (
+                <div key={s.key} className="flex items-start gap-1">
+                  <div className="pt-3 pl-1 shrink-0">
+                    <input
+                      type="checkbox"
+                      checked={selectedArchive.has(s.key)}
+                      onChange={() => handleArchiveSelect(s.key)}
+                      onClick={e => e.stopPropagation()}
+                      className="w-3.5 h-3.5 rounded border border-[#3a4152] accent-[#6366f1] cursor-pointer"
+                    />
                   </div>
-                )
-              })
+                  <div className="flex-1 min-w-0">
+                    <SessionItem
+                      session={s}
+                      isPinned={activePanes.includes(s.key)}
+                      onPin={() => handlePin(s.key)}
+                      onRename={handleRename}
+                      onArchive={() => {}}
+                      onUnarchive={async (key) => {
+                        await restoreSessionWithProject(key)
+                        void hydrateHiddenFromServer()
+                      }}
+                      onDelete={handleDeleteRequest}
+                      onContinue={handleContinue}
+                      selected={selectedArchive.has(s.key)}
+                      onSelect={(k) => handleArchiveSelect(k)}
+                    />
+                  </div>
+                </div>
+              ))
             }
           </div>
         )}
@@ -980,11 +1274,11 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
               onClick={async () => {
                 try {
                   const key = await createSessionKey(selectedAgentId)
-                  setSessions([{ key, label: 'New session', sessionKey: key }, ...sessions])
-                  const emptyPane = activePanes.findIndex((p, i) => i < paneCount && !p)
-                  pinToPane(emptyPane >= 0 ? emptyPane : paneCount - 1, key)
-                  setShowNewSessionPicker(false)
+                  // Use fresh store sessions to avoid stale closure after async createSessionKey
+                  setSessions([{ key, label: 'New session', sessionKey: key }, ...useSessionStore.getState().sessions])
+                  setPendingPaneKey(key)
                 } catch (e) { console.error('Failed to create session:', e) }
+                finally { setShowNewSessionPicker(false) }  // always close picker
               }}
               className="w-full text-left px-3 py-2 text-xs text-[#9ca3af] hover:bg-[#2a3142] hover:text-white transition-colors flex items-center gap-2"
             >
@@ -996,17 +1290,17 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
                 onClick={async () => {
                   try {
                     const key = await createSessionKey(selectedAgentId)
-                    setSessions([{ key, label: 'New session', sessionKey: key }, ...sessions])
+                    setSessions([{ key, label: 'New session', sessionKey: key }, ...useSessionStore.getState().sessions])
                     useProjectStore.getState().setTag(key, p.slug)
+                    useSessionStore.getState().setPendingProjectInit(key, p.slug)
                     authFetch(`${API}/api/session-projects`, {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({ sessionKey: key, projectTag: p.slug }),
                     }).catch(() => {})
-                    const emptyPane = activePanes.findIndex((pn, i) => i < paneCount && !pn)
-                    pinToPane(emptyPane >= 0 ? emptyPane : paneCount - 1, key)
-                    setShowNewSessionPicker(false)
+                    setPendingPaneKey(key)
                   } catch (e) { console.error('Failed to create session:', e) }
+                  finally { setShowNewSessionPicker(false) }  // always close picker
                 }}
                 className="w-full text-left px-3 py-2 text-xs text-[#e8eaf0] hover:bg-[#2a3142] transition-colors flex items-center gap-2"
               >
@@ -1070,6 +1364,17 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
           onClose={() => setShowAgentPickerModal(false)}
         />
       )}
+      {deleteConfirmKey && (() => {
+        const s = [...sessions, ...hiddenSessions].find(s => s.key === deleteConfirmKey)
+        const label = getLabel(deleteConfirmKey) || s?.label || deleteConfirmKey
+        return (
+          <DeleteConfirmModal
+            sessionLabel={label}
+            onConfirm={handleDeleteConfirm}
+            onCancel={() => setDeleteConfirmKey(null)}
+          />
+        )
+      })()}
     </aside>
   )
 }
