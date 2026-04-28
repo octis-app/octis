@@ -793,13 +793,29 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
   }
 
   const restoreSessionWithProject = async (key: string) => {
+    // Grab session data BEFORE unhide removes it from hiddenSessions
+    const hiddenSession = useSessionStore.getState().hiddenSessions.find(s => s.key === key)
     unhideSession(key)
+    // Re-insert session into the visible sessions list.
+    // unhideSession only removes it from the hidden set — it doesn't move it back into sessions[].
+    const currentSessions = useSessionStore.getState().sessions
+    const alreadyVisible = currentSessions.some(s => s.key === key)
+    if (!alreadyVisible) {
+      const sessionToAdd = hiddenSession || ({ key } as Session)
+      useSessionStore.getState().setSessions([sessionToAdd, ...currentSessions])
+    }
+    // Restore project tag. API returns a map { sessionKey: projectSlug }, NOT an array.
     try {
       const r = await authFetch(`${API}/api/session-projects`)
       if (r.ok) {
-        const rows: { session_key: string; project: string }[] = await r.json()
-        const row = rows.find(r => r.session_key === key)
-        if (row?.project) useProjectStore.getState().setTag(key, row.project)
+        const map = await r.json() as Record<string, string>
+        const project = map[key]
+        if (project) {
+          useProjectStore.getState().setTag(key, project)
+        } else {
+          // No stored project — clear any stale tag so session lands in "untagged"
+          useProjectStore.getState().setTag(key, '')
+        }
       }
     } catch { /* best-effort */ }
   }

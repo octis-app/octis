@@ -356,16 +356,31 @@ export default function MobileApp() {
 
   const handleUnarchive = useCallback(async (session: Session) => {
     const { unhide } = useHiddenStore.getState()
+    // Grab session data BEFORE unhide removes it from hiddenSessions
+    const hiddenSession = useSessionStore.getState().hiddenSessions.find(s => s.key === session.key)
     unhide(session.key)
     if (session.id) unhide(session.id)
     if (session.sessionId) unhide(session.sessionId)
-    // Restore project tag from DB
+    // Re-insert session into the visible sessions list.
+    // unhide only removes it from the hidden set — it doesn't move it back into sessions[].
+    const currentSessions = useSessionStore.getState().sessions
+    const alreadyVisible = currentSessions.some(s => s.key === session.key)
+    if (!alreadyVisible) {
+      const sessionToAdd = hiddenSession || session
+      useSessionStore.getState().setSessions([sessionToAdd, ...currentSessions])
+    }
+    // Restore project tag. API returns a map { sessionKey: projectSlug }, NOT an array.
     try {
       const r = await authFetch(`${API}/api/session-projects`)
       if (r.ok) {
-        const rows: { session_key: string; project: string }[] = await r.json()
-        const row = rows.find(r => r.session_key === session.key)
-        if (row?.project) useProjectStore.getState().setTag(session.key, row.project)
+        const map = await r.json() as Record<string, string>
+        const project = map[session.key]
+        if (project) {
+          useProjectStore.getState().setTag(session.key, project)
+        } else {
+          // No stored project — clear any stale tag so session lands in "untagged"
+          useProjectStore.getState().setTag(session.key, '')
+        }
       }
     } catch { /* best-effort */ }
     setArchiveToast(`↩ Unarchived: ${labels[session.key] || session.label || 'Session'}`)
