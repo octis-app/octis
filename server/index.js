@@ -725,6 +725,80 @@ app.get('/api/sessions-list', requireAuth, async (req, res) => {
   }
 })
 
+// ─── Enrich image blocks stripped by gateway chat.history ───────────────────
+// The gateway strips base64 data from image blocks for bandwidth efficiency.
+// This helper reads the local JSONL to restore image data for user messages.
+async function enrichImageBlocks(sessionKey, messages) {
+  // Find user messages with image blocks that have empty data
+  const needsEnrich = messages.some(m =>
+    m.role === 'user' && Array.isArray(m.content) &&
+    m.content.some(b => b.type === 'image' && !b.data)
+  )
+  if (!needsEnrich) return messages
+
+  try {
+    // Resolve session UUID from sessions.json
+    const sessionsPath = `${HOME}/.openclaw/agents/main/sessions/sessions.json`
+    let sessionsJson = '{}'
+    try { sessionsJson = await fs.readFile(sessionsPath, 'utf8') } catch {}
+    const sessions = JSON.parse(sessionsJson)
+    const sessionInfo = sessions[sessionKey]
+    const sessionUUID = sessionInfo?.sessionId
+    if (!sessionUUID) return messages
+
+    // Read the JSONL file and build timestamp→content map for image messages
+    const jsonlPath = `${HOME}/.openclaw/agents/main/sessions/${sessionUUID}.jsonl`
+    let jsonlContent = ''
+    try { jsonlContent = await fs.readFile(jsonlPath, 'utf8') } catch { return messages }
+
+    // Build match key from text content — more reliable than timestamp format mismatch
+    // JSONL stores the full OpenClaw envelope (Sender metadata + timestamp prefix),
+    // but chat.history returns only the stripped message text. Strip the envelope first.
+    const stripEnvelope = (text) => {
+      if (!text.includes('Sender (untrusted metadata):')) return text
+      const m = text.match(/\[\w+\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+UTC\]\s*([\s\S]*)$/)
+      return m ? m[1].trim() : text
+    }
+    const textKey = (content, stripEnv = false) => {
+      if (!Array.isArray(content)) {
+        const t = String(content || '')
+        return (stripEnv ? stripEnvelope(t) : t).substring(0, 120)
+      }
+      return content.filter(b => b.type === 'text')
+        .map(b => { const t = String(b.text || ''); return (stripEnv ? stripEnvelope(t) : t).substring(0, 120) })
+        .join('|')
+    }
+
+    const imageMap = new Map() // textKey → full content array with image data
+    for (const line of jsonlContent.split('\n')) {
+      if (!line.trim()) continue
+      try {
+        const evt = JSON.parse(line)
+        if (evt.message?.role === 'user' && Array.isArray(evt.message.content)) {
+          const hasImgData = evt.message.content.some(b => b.type === 'image' && b.data)
+          if (hasImgData) {
+            const key = textKey(evt.message.content, true) // strip envelope for matching
+            if (key) imageMap.set(key, evt.message.content)
+          }
+        }
+      } catch {}
+    }
+    if (imageMap.size === 0) return messages
+
+    return messages.map(m => {
+      if (m.role !== 'user' || !Array.isArray(m.content)) return m
+      const hasEmptyImage = m.content.some(b => b.type === 'image' && !b.data)
+      if (!hasEmptyImage) return m
+      const key = textKey(m.content)
+      const richContent = key && imageMap.get(key)
+      return richContent ? { ...m, content: richContent } : m
+    })
+  } catch (e) {
+    console.error('[octis] enrichImageBlocks error:', e.message)
+    return messages
+  }
+}
+
 // ─── HTTP fallback for chat.history ─────────────────────────────────────
 app.get('/api/chat-history', requireAuth, async (req, res) => {
   try {
@@ -734,7 +808,9 @@ app.get('/api/chat-history', requireAuth, async (req, res) => {
       method: 'chat.history',
       params: { sessionKey, limit: Math.min(Number(limit), 300) }
     }])
-    res.json({ ok: true, messages: result?.messages || [] })
+    const raw = result?.messages || []
+    const messages = await enrichImageBlocks(sessionKey, raw)
+    res.json({ ok: true, messages })
   } catch (err) {
     console.error('[octis] chat-history HTTP error:', err.message)
     res.status(502).json({ ok: false, error: err.message })
@@ -1098,3 +1174,4 @@ app.listen(PORT, () => {
   console.log(`[octis] Gateway: ${GATEWAY_URL} | token: ${GATEWAY_TOKEN.slice(0, 8)}...`)
   console.log(`[octis] Data: ${path.join(DATA_DIR, 'octis.db')}`)
 })
+
