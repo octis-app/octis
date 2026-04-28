@@ -1375,9 +1375,9 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     }).catch(() => { /* silently fail - label stays as session key */ })
   }, [autoRenamed, sessionKey, messages, send, setSessions])
 
-  useEffect(() => {
-    autoRename()
-  }, [autoRename])
+  // Auto-rename is intentionally NOT fired automatically here.
+  // It must be triggered manually via the ✨ star button in the pane header.
+  // Removing the auto-fire useEffect prevents silent token burns on every session open.
 
   useEffect(() => {
     // Skip auto-scroll when we just loaded older messages (useLayoutEffect handled that)

@@ -796,6 +796,13 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     // Grab session data BEFORE unhide removes it from hiddenSessions
     const hiddenSession = useSessionStore.getState().hiddenSessions.find(s => s.key === key)
     unhideSession(key)
+    // Remove from hiddenSessions immediately — do NOT wait for a server round-trip.
+    // Calling hydrateHiddenFromServer() right after unhide races with pushHideToServer
+    // (async, not awaited), causing the server to return the session as still-hidden,
+    // which adds it back to hiddenSessions and makes Archives re-show it instantly.
+    useSessionStore.setState(s => ({
+      hiddenSessions: s.hiddenSessions.filter(h => h.key !== key)
+    }))
     // Re-insert session into the visible sessions list.
     // unhideSession only removes it from the hidden set — it doesn't move it back into sessions[].
     const currentSessions = useSessionStore.getState().sessions
@@ -824,7 +831,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     const keys = Array.from(selectedArchive)
     setSelectedArchive(new Set())
     for (const key of keys) await restoreSessionWithProject(key)
-    void hydrateHiddenFromServer()
+    // restoreSessionWithProject handles hiddenSessions cleanup; no hydrateHiddenFromServer needed.
   }
 
   const handleBulkArchiveDelete = () => {
@@ -1289,7 +1296,9 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
                       onArchive={() => {}}
                       onUnarchive={async (key) => {
                         await restoreSessionWithProject(key)
-                        void hydrateHiddenFromServer()
+                        // NOTE: do NOT call hydrateHiddenFromServer() here — it races with
+                        // pushHideToServer (async) and adds the session back to Archives.
+                        // restoreSessionWithProject already removes it from hiddenSessions directly.
                       }}
                       onDelete={handleDeleteRequest}
                       onContinue={handleContinue}
