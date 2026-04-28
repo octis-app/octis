@@ -339,6 +339,8 @@ function isHeartbeatTrigger(content: MessageContent): boolean {
   // Async exec completion notifications injected by OpenClaw - always hide
   if (text.trimStart().startsWith('System (untrusted):') || text.trimStart().startsWith('System:') ||
       text.includes('An async command you ran earlier has completed')) return true
+  // System-injected lifecycle messages (memory flush, compaction, etc.) — hide from chat
+  if (text.startsWith('Pre-compaction memory flush') || text.startsWith('Pre-compaction context flush')) return true
   return false
 }
 
@@ -725,6 +727,15 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     }
   }, [globalStreaming])
 
+  // Clear ALL remaining queue entries a few seconds after agent finishes
+  // (catches rapid-send orphans that never got individual confirmation)
+  useEffect(() => {
+    if (!isWorking && !globalStreaming) {
+      const t = setTimeout(() => setSentQueue([]), 3000)
+      return () => clearTimeout(t)
+    }
+  }, [isWorking, globalStreaming])
+
   // ── Phase 1: show cached messages immediately, no WS needed ──────────────
   useEffect(() => {
     if (!sessionKey) return
@@ -845,7 +856,21 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             let base: ChatMessage[]
             if (msgs.length >= prevServer.length) {
               // Poll covers everything we have — use directly
-              base = msgs
+              // Preserve local image content if server stripped the base64
+              base = msgs.map(serverMsg => {
+                if (serverMsg.role !== 'user' || !Array.isArray(serverMsg.content)) return serverMsg
+                const blocks = serverMsg.content as ContentBlock[]
+                const hasEmptyImage = blocks.some(b => b.type === 'image' && !(b as Record<string,unknown>).data)
+                if (!hasEmptyImage) return serverMsg
+                const localMsg = prevServer.find(m =>
+                  (m.id !== undefined && m.id === serverMsg.id) ||
+                  (getMsgTs(m) > 0 && getMsgTs(m) === getMsgTs(serverMsg))
+                )
+                if (!localMsg || !Array.isArray(localMsg.content)) return serverMsg
+                const localBlocks = localMsg.content as ContentBlock[]
+                const localHasImageData = localBlocks.some(b => b.type === 'image' && !!(b as Record<string,unknown>).data)
+                return localHasImageData ? { ...serverMsg, content: localMsg.content } : serverMsg
+              })
             } else {
               // Poll is truncated: keep prev, append only genuinely new messages
               const prevTs = new Set(prevServer.map(m => getMsgTs(m)).filter(ts => ts > 0))
@@ -868,9 +893,23 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               // and every subsequent poll re-adds it as "new", eventually landing after
               // assistant replies that already have timestamps.
               const patched = prevServer.map(m => {
-                if (getMsgTs(m) === 0 && m.id !== undefined && m.id !== null) {
+                if (m.id !== undefined && m.id !== null) {
                   const pm = msgs.find(p => p.id === m.id)
-                  if (pm && getMsgTs(pm) > 0) return { ...m, ...pm }
+                  if (pm) {
+                    // Merge fresh server data: fills in ts and MediaPaths that WS echo may have lacked
+                    const hasMissingTs = getMsgTs(m) === 0 && getMsgTs(pm) > 0
+                    const hasMissingMedia = !m.MediaPath && !m.MediaPaths && (pm.MediaPath || pm.MediaPaths)
+                    if (hasMissingTs || hasMissingMedia) {
+                      // Don't overwrite content when local has image data and server stripped it
+                      const localHasImgData = Array.isArray(m.content) &&
+                        (m.content as ContentBlock[]).some(b => b.type === 'image' && !!(b as Record<string,unknown>).data)
+                      const serverHasEmptyImg = Array.isArray(pm.content) &&
+                        (pm.content as ContentBlock[]).some(b => b.type === 'image' && !(b as Record<string,unknown>).data)
+                      return localHasImgData && serverHasEmptyImg
+                        ? { ...m, ...pm, content: m.content }
+                        : { ...m, ...pm }
+                    }
+                  }
                 }
                 return m
               })
@@ -920,7 +959,15 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                      extractText(m.content).substring(0, 80).trim() === optimisticText
               )
               if (!serverAlreadyHasMsg) {
-                return [...base, optimistic] // keep optimistic on top of full history
+                // Also preserve other rapid-send messages (earlier optimistics that became "orphans"
+                // because pendingOptimisticIdRef only tracks the latest send)
+                const pendingOrphans = prev.filter(m => typeof m.id === 'number' && m.id !== oid).filter(o => {
+                  const oText = extractText(o.content).substring(0, 80).trim()
+                  if (!oText) return true // image-only: keep, can't match by text
+                  return !base.some(bm => bm.role === 'user' && typeof bm.id !== 'number' &&
+                    extractText(bm.content).substring(0, 80).trim() === oText)
+                })
+                return [...base, ...pendingOrphans, optimistic]
               }
               // Server confirmed — drop optimistic
               confirmedOptimisticRef.current = oid
@@ -948,7 +995,26 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
 
         // History response — match by prefix so load-more requests (sent from a separate effect) are also handled
         if (msg.type === 'res' && msg.ok && msg.id?.startsWith(`chat-history-${sessionKey}-`)) {
-          const msgs = msg.payload?.messages || []
+          let msgs: ChatMessage[] = msg.payload?.messages || []
+          // WS chat.history strips base64 from image blocks.
+          // Restore from: 1) current state 2) localStorage cache 3) async HTTP (server enriches from JSONL)
+          const hasEmptyImages = msgs.some(m =>
+            m.role === 'user' && Array.isArray(m.content) &&
+            (m.content as ContentBlock[]).some(b => b.type === 'image' && !(b as Record<string,unknown>).data)
+          )
+          if (hasEmptyImages) {
+            // WS chat.history strips base64 from image blocks (gateway optimization).
+            // Re-fetch via HTTP: the Octis server enriches image blocks from the JSONL.
+            authFetch(`${API}/api/chat-history?sessionKey=${encodeURIComponent(sessionKey)}&limit=${historyLimitRef.current}`)
+              .then(r => r.json())
+              .then((d: { ok?: boolean; messages?: ChatMessage[] }) => {
+                if (!d.ok || !d.messages?.length) return
+                // Replace state with enriched HTTP response and update cache
+                setMessages(d.messages)
+                saveMsgCache(sessionKey, d.messages)
+              })
+              .catch(() => {})
+          }
           const lastHB = [...msgs]
             .reverse()
             .find((m) => m.role === 'assistant' && isHeartbeatResponse(m.content))
@@ -1126,8 +1192,17 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                 if (oid !== null) {
                   const optimisticIdx = prev.findIndex((m) => m.id === oid)
                   if (optimisticIdx >= 0) {
+                    const optimistic = prev[optimisticIdx]
+                    // If WS echo lacks MediaPaths but optimistic had image blocks (base64 preview),
+                    // keep the optimistic content so the image stays visible until poll confirms MediaPath.
+                    const echoHasImages = (chatMsg.MediaPaths?.length || 0) > 0 || !!chatMsg.MediaPath
+                    const optimisticHasImages = !echoHasImages && Array.isArray(optimistic.content) &&
+                      (optimistic.content as ContentBlock[]).some(b => (b as {type:string}).type === 'image')
+                    const mergedMsg = optimisticHasImages
+                      ? { ...chatMsg, content: optimistic.content } // preserve base64 until poll patches MediaPath
+                      : chatMsg
                     const next = [...prev]
-                    next[optimisticIdx] = chatMsg
+                    next[optimisticIdx] = mergedMsg
                     pendingOptimisticIdRef.current = null
                     return next
                   }
@@ -2308,10 +2383,9 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                 {msg.role === 'user' && (
                   <button
                     onClick={() => setReplyingTo({ id: msg.id, role: 'user', preview: stripReplyCtxText(extractText(msg.content)).slice(0, 120) })}
-                    className={`bg-transparent border-0 outline-none text-[#6b7280] hover:text-[#a5b4fc] transition-all duration-150 shrink-0 mb-2 leading-none select-none p-1 ${hoveredMsgKey === msgKey ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
-                    style={{ fontFamily: 'inherit' }}
+                    className={`bg-transparent border-0 outline-none text-[#a0aec0] hover:text-white transition-all duration-100 shrink-0 mb-2 leading-none select-none p-0 text-base ${hoveredMsgKey === msgKey ? 'opacity-70 hover:opacity-100' : 'opacity-0 pointer-events-none'}`}
                     title="Reply"
-                  >{'\u21A9\uFE0E'}</button>
+                  >{'\u21A9'}</button>
                 )}
                 <div
                   className={`max-w-[85%] px-3 py-2 rounded-xl ${
@@ -2322,44 +2396,42 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                   style={highlightedMsgKey === msgKey ? { animation: 'octisFlash 1.4s ease-out forwards' } : {}}
                 >
                   {/* Render gateway-stored media attachments (MediaPath/MediaPaths from chat.send) */}
-                  {(msg.MediaPaths && msg.MediaPaths.length > 0
-                    ? msg.MediaPaths.map((p, i) => {
-                        const filename = p.split('/').pop() || ''
-                        const mime = (msg.MediaTypes?.[i] || msg.MediaType || '')
-                        const src = `${API}/api/media/${encodeURIComponent(filename)}`
-                        return mime.includes('pdf')
-                          ? <a key={i} href={src} target="_blank" rel="noopener noreferrer"
-                              className="flex items-center gap-2 bg-[#4f51c0] rounded-lg px-3 py-2 my-1 max-w-xs no-underline">
-                              <span className="text-2xl">📄</span>
-                              <span className="text-xs text-white truncate">{filename}</span>
-                            </a>
-                          : <div key={i} className="my-1 cursor-pointer rounded-xl overflow-hidden inline-block" style={{ maxWidth: 220, maxHeight: 180 }}
-                              onClick={() => setLightboxSrc(src)}>
-                              <img src={src} alt="attachment" className="w-full h-full object-cover hover:opacity-90 transition-opacity"
-                                style={{ maxWidth: 220, maxHeight: 180 }}
-                                onError={(e) => { (e.target as HTMLImageElement).parentElement!.style.display = 'none' }} />
-                            </div>
-                      })
-                    : msg.MediaPath
-                      ? (() => {
-                          const filename = msg.MediaPath.split('/').pop() || ''
+                  {/* ─ Media attachments: grid thumbnails + lightbox ──────────────────────────── */}
+                  {(() => {
+                    const paths: string[] = msg.MediaPaths && msg.MediaPaths.length > 0
+                      ? msg.MediaPaths
+                      : msg.MediaPath ? [msg.MediaPath] : []
+                    if (paths.length === 0) return null
+                    const count = paths.length
+                    // Thumb size: 1 image = large, 2–4 = medium grid, 5+ = small grid
+                    const thumbSize = count === 1 ? 200 : count <= 4 ? 110 : 80
+                    return (
+                      <div className="flex flex-wrap gap-1 my-1" style={{ maxWidth: count === 1 ? 210 : Math.min(count, 3) * (thumbSize + 4) + 4 }}>
+                        {paths.map((p, i) => {
+                          const filename = p.split('/').pop() || ''
+                          const mime = msg.MediaPaths ? (msg.MediaTypes?.[i] || msg.MediaType || '') : (msg.MediaType || '')
                           const src = `${API}/api/media/${encodeURIComponent(filename)}`
-                          if ((msg.MediaType || '').includes('pdf')) {
-                            return <a href={src} target="_blank" rel="noopener noreferrer"
-                              className="flex items-center gap-2 bg-[#4f51c0] rounded-lg px-3 py-2 my-1 max-w-xs no-underline">
+                          if (mime.includes('pdf')) {
+                            return <a key={i} href={src} target="_blank" rel="noopener noreferrer"
+                              className="flex items-center gap-2 bg-[#4f51c0] rounded-lg px-3 py-2 max-w-xs no-underline">
                               <span className="text-2xl">📄</span>
                               <span className="text-xs text-white truncate">{filename}</span>
                             </a>
                           }
-                          return <div className="my-1 cursor-pointer rounded-xl overflow-hidden inline-block" style={{ maxWidth: 220, maxHeight: 180 }}
-                            onClick={() => setLightboxSrc(src)}>
-                            <img src={src} alt="attachment" className="w-full h-full object-cover hover:opacity-90 transition-opacity"
-                              style={{ maxWidth: 220, maxHeight: 180 }}
-                              onError={(e) => { (e.target as HTMLImageElement).parentElement!.style.display = 'none' }} />
-                          </div>
-                        })()
-                      : null
-                  )}
+                          return (
+                            <div key={i}
+                              className="cursor-pointer rounded-lg overflow-hidden flex-shrink-0 hover:opacity-90 transition-opacity"
+                              style={{ width: thumbSize, height: thumbSize }}
+                              onClick={() => setLightboxSrc(src)}
+                            >
+                              <img src={src} alt="attachment" className="w-full h-full object-cover"
+                                onError={(e) => { (e.target as HTMLImageElement).parentElement!.style.display = 'none' }} />
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )
+                  })()}
                   {/* Reply quote bubble — shown when message starts with reply context */}
                   {(() => {
                     const rc = getReplyCtx(msg.content)
@@ -2422,10 +2494,9 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                 {msg.role === 'assistant' && (
                   <button
                     onClick={() => setReplyingTo({ id: msg.id, role: 'assistant', preview: stripReplyCtxText(extractText(msg.content)).slice(0, 120) })}
-                    className={`bg-transparent border-0 outline-none text-[#6b7280] hover:text-[#a5b4fc] transition-all duration-150 shrink-0 mb-2 leading-none select-none p-1 ${hoveredMsgKey === msgKey ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
-                    style={{ fontFamily: 'inherit' }}
+                    className={`bg-transparent border-0 outline-none text-[#a0aec0] hover:text-white transition-all duration-100 shrink-0 mb-2 leading-none select-none p-0 text-base ${hoveredMsgKey === msgKey ? 'opacity-70 hover:opacity-100' : 'opacity-0 pointer-events-none'}`}
                     title="Reply"
-                  >{'\u21A9\uFE0E'}</button>
+                  >{'\u21A9'}</button>
                 )}
               </div>
               </React.Fragment>

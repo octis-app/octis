@@ -489,6 +489,27 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     return () => clearInterval(t)
   }, [])
   const { connected, send, agentId } = useGatewayStore()
+  // Track last WS message received — used by zombie watchdog below
+  const lastRxRef = useRef<number>(Date.now())
+  useEffect(() => {
+    const unsub = useGatewayStore.getState().subscribe(() => { lastRxRef.current = Date.now() })
+    return unsub
+  }, [])
+  // Desktop zombie watchdog: mirrors MobileApp — if connected but 60s of WS silence, force reconnect.
+  // The keepalive ping fires every 45s, so 60s silence = ping response never came = dead connection.
+  // Without this, the live indicator stays green forever after OpenClaw goes offline.
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (!useGatewayStore.getState().connected) return
+      if (document.visibilityState !== 'visible') return
+      if (Date.now() - lastRxRef.current > 60_000) {
+        console.log('[octis] Sidebar watchdog: 60s silence — zombie TCP, reconnecting')
+        useGatewayStore.setState({ _reconnectAttempts: 0 })
+        useGatewayStore.getState().forceReconnect()
+      }
+    }, 30_000)
+    return () => clearInterval(t)
+  }, [])
   const { getTag, getProjects, projectMeta, setProjectMeta } = useProjectStore()
   const { getLabel } = useLabelStore()
   const { hide: hideSession, unhide: unhideSession } = useHiddenStore()
@@ -889,7 +910,8 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     if (hideAgentSessions && isAgentSession(s)) return false
     if (isHiddenByProject(s)) return false
     const status = getStatus(s)
-    if (filter !== 'all' && status !== filter) return false
+    // Always show working sessions regardless of filter — never lose a running session
+    if (filter !== 'all' && status !== filter && status !== 'working') return false
     if (search) {
       const q = search.toLowerCase()
       const tag = getTag(s.key)

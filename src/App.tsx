@@ -196,7 +196,22 @@ function AuthenticatedApp({ preloadedConfig }: { preloadedConfig?: GatewayConfig
           }
         } catch {}
         connect()
-        
+        // HTTP sessions pre-fetch: fire in parallel with WS connect so sessions appear
+        // immediately even if WS auth takes a few seconds. WS response will overwrite.
+        void (async () => {
+          try {
+            const agId = data.agentId
+            const url = `${API}/api/sessions-list${agId ? `?agentId=${encodeURIComponent(agId)}` : ''}`
+            const r = await fetch(url, { credentials: 'include' })
+            if (!r.ok) return
+            const d = await r.json() as { ok: boolean; sessions?: Session[] }
+            if (d.ok && d.sessions?.length && !useGatewayStore.getState().connected) {
+              // Only apply if WS hasn't already delivered a fresh list
+              useSessionStore.getState().setSessions(d.sessions)
+            }
+          } catch { /* silent — WS will cover it */ }
+        })()
+
         void hydrateProjects()
         void hydrateHidden()
         void hydrateDrafts()
