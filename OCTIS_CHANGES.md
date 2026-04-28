@@ -1507,3 +1507,41 @@ Not an Octis change, but recorded for completeness:
 - `chatHistoryMaxChars: 200000` is set in `/root/.openclaw/openclaw.json` directly (not via config.patch). If the gateway config is reset, this needs to be re-applied manually.
 - User bubble link visibility fix (`index.css`) depends on `octis-user-bubble` class being present on the user message bubble element — confirm this class is applied consistently in ChatPane and MobileFullChat.
 - README still does not document `ANTHROPIC_API_KEY` env requirement.
+
+---
+
+## Session 2026-04-28 — Quick Commands Persistence Fix
+
+### 1. SettingsPanel.tsx — localStorage-primary (server never overwrites user's custom text)
+
+**Problem:** Settings panel on every open fetched from server and called `setQcValues({ ...QUICK_COMMAND_DEFAULTS, ...serverVals })`, overwriting localStorage unconditionally. If the server DB was ever reset (deploy, migration, upstream pull), all user-customized quick command text was silently wiped.
+
+**Fix:** Mount effect now merges `{ ...QUICK_COMMAND_DEFAULTS, ...serverVals, ...localVals }` where `localVals` is the current localStorage content. localStorage always wins. Server values only fill keys that don't exist in localStorage yet.
+
+**Files changed:** `src/components/SettingsPanel.tsx`
+
+**Verified:** Custom text persists after Settings close/reopen. Server DB still receives saves for cross-device sync. `isDirtyRef` still prevents server response from stomping in-progress edits.
+
+---
+
+### 2. MobileFullChat.tsx — QUICK_COMMAND_DEFAULTS updated to user's custom text
+
+**Problem:** `MobileFullChat.tsx` had its own hardcoded `QUICK_COMMAND_DEFAULTS` matching upstream Octis defaults (Octis-centric prompts). If localStorage is empty (new browser, cleared cache), mobile icons sent the wrong text.
+
+**Fix:** Updated `QUICK_COMMAND_DEFAULTS` in `MobileFullChat.tsx` to match Kennan's current saved custom text for all four keys (`brief`, `away`, `save`, `archive_msg`).
+
+**Files changed:** `src/components/MobileFullChat.tsx`
+
+---
+
+### 3. apply-local-patches.cjs — Patch 14 fixed + Patch 14b added
+
+**Problem:** Patch 14 in the patch script was a stub — it checked for a `hasLocalCustom` marker but made no actual code change. The localStorage-primary fix would not survive a `git pull`.
+
+**Fix:**
+- Patch 14 rewritten to apply the real localStorage-primary merge logic in `SettingsPanel.tsx`
+- Patch 14b added to sync `MobileFullChat.tsx` `QUICK_COMMAND_DEFAULTS` to user's custom text
+
+**Files changed:** `scripts/apply-local-patches.cjs`
+
+**Verified:** `npm run build` succeeded, `octis.service` active after `systemctl restart`.

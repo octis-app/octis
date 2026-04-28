@@ -480,12 +480,50 @@ patch(
 )
 
 // ─── Patch 14: SettingsPanel — localStorage-primary (no server overwrite) ────
+// Server values fill missing keys but never override what the user already has in localStorage.
 patch(
   'src/components/SettingsPanel.tsx',
-  'hasLocalCustom',
+  'localStorage is primary',
   (c) => {
-    if (c.includes('hasLocalCustom')) return c // already applied
-    return c
+    if (c.includes('localStorage is primary')) return c // already applied
+    return c.replace(
+      `        if (d.ok && d.settings?.quick_commands) {
+          const serverVals = d.settings.quick_commands as Record<string, string>
+          const merged = { ...QUICK_COMMAND_DEFAULTS, ...serverVals }
+          setQcValues(merged)
+          localStorage.setItem('octis-quick-commands', JSON.stringify(merged))
+        }`,
+      `        if (d.ok && d.settings?.quick_commands) {
+          const serverVals = d.settings.quick_commands as Record<string, string>
+          // localStorage is primary — user's saved text always wins.
+          // Server fills in keys that don't exist locally yet.
+          // This prevents server resets/deploys from ever wiping custom text.
+          let localVals: Record<string, string> = {}
+          try { localVals = JSON.parse(localStorage.getItem('octis-quick-commands') || '{}') } catch {}
+          const merged = { ...QUICK_COMMAND_DEFAULTS, ...serverVals, ...localVals }
+          setQcValues(merged)
+          localStorage.setItem('octis-quick-commands', JSON.stringify(merged))
+        }`
+    )
+  }
+)
+
+// ─── Patch 14b: MobileFullChat — sync QUICK_COMMAND_DEFAULTS to Kennan's custom text ────
+// So cold-cache / fresh-browser mobile always gets the right fallback text.
+patch(
+  'src/components/MobileFullChat.tsx',
+  'if applicable: update memory/module1-email-rules.md',
+  (c) => {
+    if (c.includes('if applicable: update memory/module1-email-rules.md')) return c // already applied
+    return c.replace(
+      /const QUICK_COMMAND_DEFAULTS = \{[\s\S]*?\}/,
+      `const QUICK_COMMAND_DEFAULTS = {
+  brief: "if applicable: update memory/module1-email-rules.md with all relevant decision and information in this session",
+  away: "I am stepping away for a while. Please do the following:\\n1. Summarize what you are currently working on (1-2 sentences).\\n2. List anything you are blocked on or need from me before I go - be specific (credentials, a decision, a file, etc.).\\n3. List everything you CAN do autonomously while I am gone, in order.\\n4. Estimate how long you can run without me.\\nBe concise. I will read this on my phone.",
+  save: "Before ending, update MEMORY.md/TODOS.md, checked against full project context. MEMORY.md = durable reusable context; TODOS.md = clear pending tasks. For long updates, inspect current memory + verified project files first; preserve useful context, clean duplicates/conflicts, add missing recurring info/preferences/source-checking safeguards, and flag uncertainty instead of guessing. Do not save temporary noise, assumptions, secrets, or ambiguous info. Only claim saved if file update succeeded; summarize memory changes, TODOs, cleanup, and anything not confidently added.\\n\\nIf this session modified Octis code, update \`/opt/octis/OCTIS_CHANGES.md\` with only relevant dev work since last log update: code changes, fixes, config/schema/API/dependency changes, decisions, known issues, and test/verification results. Keep entries clear and specific so the original GitHub app owner understands what changed, why, what was tested, and what needs review. Never claim logged/fixed/tested unless actually done.",
+  archive_msg: "\ud83d\udcbe Final save - If not already save - write any remaining decisions, tasks, or context to MEMORY.md and TODOS.md. Reply with NO_REPLY only.",
+}`
+    )
   }
 )
 
@@ -777,3 +815,43 @@ patch(
   "if (!hash) {",
   (c) => c
 )
+
+// ─── DB migration: reset stale quick_commands to current defaults ─────────────
+// Quick command values stored in the DB override code defaults. When QUICK_COMMANDS_CONFIG
+// is updated in SettingsPanel.tsx, stale DB values persist across git pulls and shadow
+// the new defaults. This migration resets known stale values to their current correct defaults.
+try {
+  const Database = require('better-sqlite3')
+  const os = require('os')
+  const dbPath = path.join(os.homedir(), '.octis', 'octis.db')
+  if (fs.existsSync(dbPath)) {
+    const db = new Database(dbPath)
+    const CORRECT_SAVE = '\u{1F4BE} checkpoint - save any key decisions, context, or tasks from this session to MEMORY.md and TODOS.md now. One-line ack only.'
+    const CORRECT_ARCHIVE = '\u{1F4BE} Final save - write any remaining decisions, tasks, or context to MEMORY.md and TODOS.md. Reply with NO_REPLY only.'
+    const row = db.prepare("SELECT value FROM user_settings WHERE key='quick_commands' LIMIT 1").get()
+    if (row) {
+      let data
+      try { data = JSON.parse(row.value) } catch { data = {} }
+      let changed = false
+      // Reset save if it looks like the old verbose default (doesn't start with checkpoint emoji)
+      if (data.save && !data.save.startsWith('\u{1F4BE} checkpoint')) {
+        data.save = CORRECT_SAVE
+        changed = true
+      }
+      // Reset archive_msg if it contains the old verbose text
+      if (data.archive_msg && data.archive_msg.includes('MEMORY.md = reusable future context only')) {
+        data.archive_msg = CORRECT_ARCHIVE
+        changed = true
+      }
+      if (changed) {
+        db.prepare("UPDATE user_settings SET value=?, updated_at=unixepoch() WHERE key='quick_commands'").run(JSON.stringify(data))
+        console.log('  [ok]   DB quick_commands — reset stale values to current defaults')
+      } else {
+        console.log('  [skip] DB quick_commands — already correct')
+      }
+    }
+    db.close()
+  }
+} catch (e) {
+  console.warn('  [WARN] DB quick_commands migration failed:', e.message)
+}

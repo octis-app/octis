@@ -487,8 +487,9 @@ export default function MobileApp() {
 
   const filtered = useMemo(() => visibleSessions.filter((s: Session) => {
     const st = getStatus(s)
-    if (filter === 'active') return st === 'active'
-    if (filter === 'idle') return st === 'quiet'
+    // Always show working sessions regardless of filter — never lose a running session
+    if (filter === 'active') return st === 'active' || st === 'working'
+    if (filter === 'idle') return st === 'quiet' || st === 'working'
     return true
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [visibleSessions, filter])
