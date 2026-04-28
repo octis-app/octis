@@ -361,8 +361,12 @@ export default function MobileApp() {
     unhide(session.key)
     if (session.id) unhide(session.id)
     if (session.sessionId) unhide(session.sessionId)
+    // Remove from hiddenSessions immediately — don’t call hydrateHiddenFromServer().
+    // That races with pushHideToServer (async/not awaited) and adds the session back.
+    useSessionStore.setState(s => ({
+      hiddenSessions: s.hiddenSessions.filter(h => h.key !== session.key)
+    }))
     // Re-insert session into the visible sessions list.
-    // unhide only removes it from the hidden set — it doesn't move it back into sessions[].
     const currentSessions = useSessionStore.getState().sessions
     const alreadyVisible = currentSessions.some(s => s.key === session.key)
     if (!alreadyVisible) {
@@ -378,7 +382,6 @@ export default function MobileApp() {
         if (project) {
           useProjectStore.getState().setTag(session.key, project)
         } else {
-          // No stored project — clear any stale tag so session lands in "untagged"
           useProjectStore.getState().setTag(session.key, '')
         }
       }

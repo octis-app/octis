@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useAuth } from '../lib/auth'
 import { useSessionStore, useProjectStore, useLabelStore, useHiddenStore, useGatewayStore, Session } from '../store/gatewayStore'
 import { useAuthStore } from '../store/authStore'
+import { authFetch } from '../lib/authFetch'
 import ChatPane from './ChatPane'
 import type { Project } from './ProjectsGrid'
 
@@ -347,10 +348,32 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
                     )}
                     {isArchived && editingSessionKey !== s.key && (
                       <button
-                        onClick={(e) => {
+                        onClick={async (e) => {
                           e.stopPropagation()
-                          unhideSession(s.key)
+                          const key = s.key
+                          // Grab session before unhide removes it from hiddenSessions
+                          const hiddenSession = useSessionStore.getState().hiddenSessions.find(h => h.key === key)
+                          unhideSession(key)
                           if ((s as any).id) unhideSession((s as any).id)
+                          // Remove from hiddenSessions immediately (avoid server round-trip race)
+                          useSessionStore.setState(st => ({
+                            hiddenSessions: st.hiddenSessions.filter(h => h.key !== key)
+                          }))
+                          // Re-insert into visible sessions list
+                          const current = useSessionStore.getState().sessions
+                          if (!current.some(x => x.key === key)) {
+                            useSessionStore.getState().setSessions([hiddenSession || s, ...current])
+                          }
+                          // Restore project tag (API returns map, NOT array)
+                          try {
+                            const r = await authFetch(`${API}/api/session-projects`)
+                            if (r.ok) {
+                              const map = await r.json() as Record<string, string>
+                              const proj = map[key]
+                              if (proj) setTag(key, proj)
+                              else setTag(key, '') // untagged
+                            }
+                          } catch { /* best-effort */ }
                         }}
                         className="absolute right-1.5 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 text-xs text-[#4b5563] hover:text-[#6366f1] transition-all px-1.5 py-0.5 rounded"
                         title="Restore session"
