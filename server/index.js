@@ -484,8 +484,31 @@ app.patch('/api/projects/:id', requireAuth, (req, res) => {
 })
 
 app.delete('/api/projects/:id', requireAuth, (req, res) => {
-  db.prepare('DELETE FROM octis_projects WHERE id = ?').run(req.params.id)
-  res.json({ ok: true })
+  const { id } = req.params
+  const { confirm } = req.query
+  
+  // Get project slug and count associated sessions
+  const project = db.prepare('SELECT slug FROM octis_projects WHERE id = ?').get(id)
+  if (!project) return res.status(404).json({ error: 'Project not found' })
+  
+  const sessionCount = db.prepare(
+    'SELECT COUNT(*) as count FROM octis_session_projects WHERE project = ?'
+  ).get(project.slug).count
+  
+  // If sessions exist and confirm not sent, return warning
+  if (sessionCount > 0 && confirm !== 'true') {
+    return res.json({ 
+      warning: true, 
+      sessionCount,
+      message: `This project has ${sessionCount} session${sessionCount !== 1 ? 's' : ''}. Delete anyway?`
+    })
+  }
+  
+  // Delete project and clear all session tags
+  db.prepare('DELETE FROM octis_projects WHERE id = ?').run(id)
+  db.prepare('DELETE FROM octis_session_projects WHERE project = ?').run(project.slug)
+  
+  res.json({ ok: true, removedTags: sessionCount })
 })
 
 // ─── Hidden sessions ──────────────────────────────────────────────────────────
