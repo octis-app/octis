@@ -952,6 +952,8 @@ app.get('/api/costs', requireAuth, async (req, res) => {
   if (!pgPool) return res.json({ disabled: true, message: 'Set COSTS_DB_URL to enable cost tracking.' })
   try {
     const days = Math.min(parseInt(req.query.days || '30'), 90)
+    
+    // Get daily aggregates
     const { rows: daily } = await pgPool.query(`
       SELECT cost_date AS date, SUM(total_cost_usd) AS total_cost_usd,
         SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, SUM(session_count) AS session_count
@@ -959,6 +961,8 @@ app.get('/api/costs', requireAuth, async (req, res) => {
       WHERE cost_date >= CURRENT_DATE - ($1 || ' days')::INTERVAL
       GROUP BY cost_date ORDER BY cost_date ASC
     `, [days])
+    
+    // Get top sessions (last N days)
     const { rows: sessions } = await pgPool.query(`
       SELECT cs.session_id AS session_key, COALESCE(ol.label, cs.first_message) AS session_label,
         cs.sender_name, SUM(cs.total_cost_usd) AS cost, MAX(cs.last_ts) AS last_activity,
@@ -969,25 +973,73 @@ app.get('/api/costs', requireAuth, async (req, res) => {
       GROUP BY cs.session_id, cs.first_message, cs.sender_name, ol.label
       ORDER BY cost DESC LIMIT 50
     `, [days])
-    // Use rolling 24h window for "today" so it matches Montreal timezone and doesn't reset at midnight UTC
-    const { rows: todayRow } = await pgPool.query(`SELECT COALESCE(SUM(total_cost_usd),0) AS today_cost FROM raw_nexus.claw_user_daily_costs WHERE cost_date >= (NOW() - INTERVAL '24 hours')::date`)
+    
+    // Get today's total (FIXED: use CURRENT_DATE directly)
+    const { rows: todayRow } = await pgPool.query(`
+      SELECT COALESCE(SUM(total_cost_usd), 0) AS today_cost,
+        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+        COALESCE(SUM(session_count), 0) AS session_count
+      FROM raw_nexus.claw_user_daily_costs 
+      WHERE cost_date = CURRENT_DATE
+    `)
+    
+    // Get today's top sessions (FIXED: use session_date for better performance)
     const { rows: todaySessionRows } = await pgPool.query(`
       SELECT cs.session_id AS session_key, COALESCE(ol.label, cs.first_message) AS session_label,
         cs.sender_name, SUM(cs.total_cost_usd) AS cost, MAX(cs.last_ts) AS last_activity,
         SUM(cs.input_tokens) AS input_tokens, SUM(cs.output_tokens) AS output_tokens
       FROM raw_nexus.claw_session_costs cs
       LEFT JOIN raw_nexus.octis_session_labels ol ON ol.session_key = cs.session_id
-      WHERE cs.last_ts >= NOW() - INTERVAL '24 hours'
+      WHERE cs.session_date = CURRENT_DATE
       GROUP BY cs.session_id, cs.first_message, cs.sender_name, ol.label
       ORDER BY cost DESC LIMIT 20
     `)
+    
+    // Get yesterday's total for comparison
+    const { rows: yesterdayRow } = await pgPool.query(`
+      SELECT COALESCE(SUM(total_cost_usd), 0) AS yesterday_cost
+      FROM raw_nexus.claw_user_daily_costs 
+      WHERE cost_date = CURRENT_DATE - INTERVAL '1 day'
+    `)
+    
+    // Get last sync time (newest session updated_at)
+    const { rows: syncRow } = await pgPool.query(`
+      SELECT MAX(last_ts) AS last_sync FROM raw_nexus.claw_session_costs
+    `)
+    
     res.json({
       today: parseFloat(todayRow[0]?.today_cost || 0),
-      daily: daily.map(r => ({ ...r, total_cost_usd: parseFloat(r.total_cost_usd), date: String(r.date).slice(0, 10) })),
-      sessions: sessions.map(r => ({ ...r, cost: parseFloat(r.cost), session_label: cleanSessionLabel(r.session_label, r.session_key) })),
-      todaySessions: todaySessionRows.map(r => ({ ...r, cost: parseFloat(r.cost), session_label: cleanSessionLabel(r.session_label, r.session_key) })),
+      todayInputTokens: parseInt(todayRow[0]?.input_tokens || 0),
+      todayOutputTokens: parseInt(todayRow[0]?.output_tokens || 0),
+      todaySessionCount: parseInt(todayRow[0]?.session_count || 0),
+      yesterday: parseFloat(yesterdayRow[0]?.yesterday_cost || 0),
+      lastSync: syncRow[0]?.last_sync || null,
+      daily: daily.map(r => ({ 
+        ...r, 
+        total_cost_usd: parseFloat(r.total_cost_usd), 
+        date: String(r.date).slice(0, 10),
+        input_tokens: parseInt(r.input_tokens || 0),
+        output_tokens: parseInt(r.output_tokens || 0),
+        session_count: parseInt(r.session_count || 0)
+      })),
+      sessions: sessions.map(r => ({ 
+        ...r, 
+        cost: parseFloat(r.cost), 
+        input_tokens: parseInt(r.input_tokens || 0),
+        output_tokens: parseInt(r.output_tokens || 0),
+        session_label: cleanSessionLabel(r.session_label, r.session_key) 
+      })),
+      todaySessions: todaySessionRows.map(r => ({ 
+        ...r, 
+        cost: parseFloat(r.cost),
+        input_tokens: parseInt(r.input_tokens || 0),
+        output_tokens: parseInt(r.output_tokens || 0),
+        session_label: cleanSessionLabel(r.session_label, r.session_key) 
+      })),
     })
   } catch (err) {
+    console.error('[octis] /api/costs error:', err)
     res.status(500).json({ error: err.message })
   }
 })

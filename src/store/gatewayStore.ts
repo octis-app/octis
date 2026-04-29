@@ -1448,7 +1448,21 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
     paneCount: s.paneCount,
     paneLayout: s.paneLayout,
     manualOrder: s.manualOrder,
-    // Persist last-known sessions so they show instantly on next open (stale-while-revalidate)
-    sessions: s.sessions.slice(0, 200),
+    // Persist minimal session metadata only (not full message history)
+    sessions: s.sessions.slice(0, 200).map((sess) => ({
+      key: sess.key,
+      sessionKey: sess.sessionKey,
+      id: sess.id,
+      sessionId: sess.sessionId,
+      label: sess.label,
+      cost: sess.cost,
+      updatedAt: sess.updatedAt,
+      lastActivity: sess.lastActivity,
+      updated_at: sess.updated_at,
+      estimatedCostUsd: sess.estimatedCostUsd,
+      totalTokens: sess.totalTokens,
+      contextTokens: sess.contextTokens,
+      status: sess.status,
+    })),
   }),
 }))

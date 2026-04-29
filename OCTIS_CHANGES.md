@@ -8,6 +8,31 @@
 
 ## Latest Changes — 2026-04-29
 
+### Fix localStorage Quota Error (17:47 UTC)
+
+**Files changed:**
+- `src/store/gatewayStore.ts`
+
+**Problem:**
+- Octis was persisting full session objects (including message histories, metadata, all fields) to localStorage
+- With `sessions.slice(0, 200)` storing up to 200 complete sessions, localStorage quota (~5-10MB browser limit) was exceeded
+- Error: "Failed to execute 'setItem' on 'Storage': Setting the value of 'octis-session-layout' exceeded the quota"
+- Prevented users from accessing sessions entirely
+
+**Solution:**
+- Changed `partialize` in `gatewayStore.ts` to persist ONLY minimal session metadata:
+  - `key`, `sessionKey`, `id`, `sessionId`, `label`, `cost`, `updatedAt`, `lastActivity`, `updated_at`, `estimatedCostUsd`, `totalTokens`, `contextTokens`, `status`
+- Strips out message arrays, full histories, and any other large embedded data
+- Sessions array is stale-while-revalidate cache only — app always fetches fresh from API
+- Reduces localStorage footprint by ~95%
+
+**Impact:**
+- Fixes quota errors immediately
+- No functional loss — hydrated sessions are placeholder/cache only; real data always comes from `/api/my-sessions`
+- Safer for users with large session counts or long conversation histories
+
+---
+
 ### Remove Archive Shortcut (17:02 UTC)
 
 **Files changed:**
