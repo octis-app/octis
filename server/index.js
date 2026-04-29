@@ -491,16 +491,30 @@ app.delete('/api/projects/:id', requireAuth, (req, res) => {
   const project = db.prepare('SELECT slug FROM octis_projects WHERE id = ?').get(id)
   if (!project) return res.status(404).json({ error: 'Project not found' })
   
-  const sessionCount = db.prepare(
-    'SELECT COUNT(*) as count FROM octis_session_projects WHERE project = ?'
-  ).get(project.slug).count
+  // Count active (non-archived) sessions
+  const activeCount = db.prepare(`
+    SELECT COUNT(*) as count FROM octis_session_projects sp
+    LEFT JOIN octis_hidden_sessions hs ON sp.session_key = hs.session_key
+    WHERE sp.project = ? AND hs.session_key IS NULL
+  `).get(project.slug).count
+  
+  // Count archived sessions
+  const archivedCount = db.prepare(`
+    SELECT COUNT(*) as count FROM octis_session_projects sp
+    INNER JOIN octis_hidden_sessions hs ON sp.session_key = hs.session_key
+    WHERE sp.project = ?
+  `).get(project.slug).count
+  
+  const totalCount = activeCount + archivedCount
   
   // If sessions exist and confirm not sent, return warning
-  if (sessionCount > 0 && confirm !== 'true') {
+  if (totalCount > 0 && confirm !== 'true') {
     return res.json({ 
       warning: true, 
-      sessionCount,
-      message: `This project has ${sessionCount} session${sessionCount !== 1 ? 's' : ''}. Delete anyway?`
+      sessionCount: totalCount,
+      activeCount,
+      archivedCount,
+      message: `This project has ${totalCount} session${totalCount !== 1 ? 's' : ''}. Delete anyway?`
     })
   }
   
@@ -508,7 +522,7 @@ app.delete('/api/projects/:id', requireAuth, (req, res) => {
   db.prepare('DELETE FROM octis_projects WHERE id = ?').run(id)
   db.prepare('DELETE FROM octis_session_projects WHERE project = ?').run(project.slug)
   
-  res.json({ ok: true, removedTags: sessionCount })
+  res.json({ ok: true, removedTags: totalCount })
 })
 
 // ─── Hidden sessions ──────────────────────────────────────────────────────────
