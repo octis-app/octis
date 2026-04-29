@@ -1,9 +1,21 @@
-import { defineConfig } from 'vite'
+import { defineConfig, mergeConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
+import { createRequire } from 'module'
+import { existsSync } from 'fs'
 
-export default defineConfig({
-  base: '/octis/',
+// Load local overrides (vite.config.local.js) if present — gitignored, safe for personal deployment settings
+const _require = createRequire(import.meta.url)
+let localOverrides = {}
+try {
+  if (existsSync(new URL('./vite.config.local.js', import.meta.url).pathname)) {
+    const local = await import('./vite.config.local.js')
+    localOverrides = local.default || {}
+  }
+} catch {}
+
+const baseConfig = defineConfig({
+  base: '/',
   plugins: [
     react(),
     VitePWA({
@@ -62,3 +74,5 @@ export default defineConfig({
     },
   },
 })
+
+export default mergeConfig(baseConfig, localOverrides)
