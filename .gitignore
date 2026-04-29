@@ -10,3 +10,11 @@ server/config/users.json
 src/src.bak-*/
 src-backup-*/
 backups/
+*.log
+.DS_Store
+npm-debug.log*
+server/config/agents.json
+VERSION
+OCTIS_CHANGES.md
+CHANGELOG.md
+vite.config.local.js

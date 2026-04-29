@@ -13,9 +13,9 @@ const API = import.meta.env.VITE_API_URL || ''
 const QUICK_COMMANDS_CONFIG = [
   {
     key: 'brief',
-    label: '📝 Dev Log',
-    note: '',
-    default: "If you're a session that modified Octis app code, keep OCTIS_CHANGES.md updated with only relevant development work since the last log update. Record every code modification, bug fix, config/schema/API change, dependency change, important decision, known issue, and testing/verification result.",
+    label: '📝 Summarize',
+    note: 'For a busy executive. Focus on actionable insights.',
+    default: "Summarize the following text for a smart executive, focusing on key takeaways and action items. Be concise but comprehensive. Your response will be sent to someone else, so do not address me.",
   },
   {
     key: 'away',
