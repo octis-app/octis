@@ -1,7 +1,7 @@
 import express from 'express'
 import cors from 'cors'
 import fs from 'fs/promises'
-import { readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs'
 import path from 'path'
 import { createRequire } from 'module'
 import crypto from 'crypto'
@@ -280,7 +280,9 @@ app.get('/api/health', (req, res) => res.json({ ok: true }))
 
 app.get('/api/agents', requireAuth, (req, res) => {
   try {
-    const agentsFile = path.join(__serverDir, 'config', 'agents.json')
+    const agentsFile = existsSync(path.join(__serverDir, 'config', 'agents.json'))
+      ? path.join(__serverDir, 'config', 'agents.json')
+      : path.join(__serverDir, 'config', 'agents.example.json')
     const raw = JSON.parse(readFileSync(agentsFile, 'utf8'))
     const staticAgents = Array.isArray(raw) ? raw : (raw.agents || [])
     const staticMap = Object.fromEntries(staticAgents.map(a => [a.id, a]))
@@ -347,8 +349,10 @@ app.get('/api/agents', requireAuth, (req, res) => {
 app.patch('/api/agents/:id/meta', requireAuth, (req, res) => {
   try {
     const { emoji, description, name, model, soul, visibleInPicker } = req.body
+    // Always write to agents.json (local config), seeding from example if needed
     const agentsFile = path.join(__serverDir, 'config', 'agents.json')
-    const raw = JSON.parse(readFileSync(agentsFile, 'utf8'))
+    const sourcefile = existsSync(agentsFile) ? agentsFile : path.join(__serverDir, 'config', 'agents.example.json')
+    const raw = JSON.parse(readFileSync(sourcefile, 'utf8'))
     const isList = Array.isArray(raw)
     let agentsList = isList ? raw : (raw.agents || [])
     const idx = agentsList.findIndex(a => a.id === req.params.id)
