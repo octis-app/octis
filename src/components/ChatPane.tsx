@@ -116,7 +116,7 @@ function modelShortName(modelId: string): string {
   return parts[parts.length - 1] || modelId
 }
 
-function ModelBadge({ sessionKey }: { sessionKey: string }) {
+function ModelBadge({ sessionKey, onModelSwitch }: { sessionKey: string; onModelSwitch?: (modelName: string) => void }) {
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null)
   const [providerHealth, setProviderHealth] = useState<Record<string, ProviderHealth>>({})
   const [open, setOpen] = useState(false)
@@ -164,22 +164,32 @@ function ModelBadge({ sessionKey }: { sessionKey: string }) {
     const shortName = modelId.split('/').pop() || modelId
     setOpen(false)
     setSwitching(true)
-    const { ws, connected, sendChat } = useGatewayStore.getState()
-    
-    // Send the switch message FIRST so it appears immediately
-    await sendChat({ sessionKey, message: `Model switched to ${shortName}` })
-    
-    // Then patch the session model
-    if (connected && ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: 'req',
-        id: `model-switch-${Date.now()}`,
-        method: 'sessions.patch',
-        params: { key: sessionKey, model: modelId },
-      }))
+    try {
+      const { ws, connected, sendChat } = useGatewayStore.getState()
+      
+      // Patch the session model
+      if (connected && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'req',
+          id: `model-switch-${Date.now()}`,
+          method: 'sessions.patch',
+          params: { key: sessionKey, model: modelId },
+        }))
+      }
+      
+      // Notify parent component about the switch
+      if (onModelSwitch) {
+        onModelSwitch(shortName)
+      }
+      
+      // Fetch the updated model info
+      await new Promise(r => setTimeout(r, 800))
+      await fetchModel()
+    } catch (err) {
+      console.error('Model switch error:', err)
+    } finally {
+      setSwitching(false)
     }
-    // Refresh after a short delay to pick up the new model
-    setTimeout(() => { void fetchModel(); setSwitching(false) }, 2000)
   }
 
   if (!modelInfo) return null
@@ -1119,6 +1129,9 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             }
           }
           setMessages((prev) => {
+            // Preserve local-only messages (like model switch notifications)
+            const localOnly = prev.filter((m: any) => m.__localOnly)
+            
             if (msgs.length === 0) return prev
 
             // ── Step 1: Compute base — NEVER downgrade loaded history ───────────────────────
@@ -1126,7 +1139,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             // BEFORE optimistic logic — old code applied guard only when no optimistics
             // existed, causing poll to collapse 200-msg history to 30 whenever user had
             // a pending message. That's the root cause of messages disappearing on send.
-            const prevServer = prev.filter(m => typeof m.id !== 'number')
+            const prevServer = prev.filter(m => typeof m.id !== 'number' && !(m as any).__localOnly)
             let base: ChatMessage[]
             if (msgs.length >= prevServer.length) {
               // Poll covers everything we have — use directly
@@ -1221,7 +1234,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                   base.length === prevServer.length) {
                 return prev
               }
-              return base
+              return [...base, ...localOnly]
             }
 
             // ── Step 3: Handle active optimistic ────────────────────────────────
@@ -1241,12 +1254,12 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                   return !base.some(bm => bm.role === 'user' && typeof bm.id !== 'number' &&
                     extractText(bm.content).substring(0, 80).trim() === oText)
                 })
-                return [...base, ...pendingOrphans, optimistic]
+                return [...base, ...pendingOrphans, optimistic, ...localOnly]
               }
               // Server confirmed — drop optimistic
               confirmedOptimisticRef.current = oid
               pendingOptimisticIdRef.current = null
-              return base
+              return [...base, ...localOnly]
             }
 
             // ── Step 4: Handle orphaned optimistics ────────────────────────────
@@ -1258,11 +1271,11 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                        extractText(m.content).substring(0, 80).trim() === oText
                 )
               })
-              if (!serverHasOrphans) return [...base, ...orphans]
-              return base
+              if (!serverHasOrphans) return [...base, ...orphans, ...localOnly]
+              return [...base, ...localOnly]
             }
 
-            return base
+            return [...base, ...localOnly]
           })
           return
         }
@@ -2455,7 +2468,19 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               </span>
             )}
             <SessionCostBadge sessionKey={sessionKey} />
-            <ModelBadge sessionKey={sessionKey} />
+            <ModelBadge 
+              sessionKey={sessionKey} 
+              onModelSwitch={(modelName) => {
+                const notificationMsg = {
+                  id: `model-switch-${Date.now()}`,
+                  role: 'assistant' as const,
+                  content: `Model switched to ${modelName}`,
+                  ts: new Date().toISOString(),
+                  __localOnly: true
+                }
+                setMessages(prev => [...prev, notificationMsg])
+              }}
+            />
             <ProjectDropdown sessionKey={sessionKey} />
             <button
               onClick={onClose}
@@ -2649,7 +2674,8 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               const msgKey = msg.id !== undefined ? String(msg.id) : String(getMsgTs(msg) || `${msg.role}-${i}`)
               // Model switch detection — render as divider annotation instead of a bubble
               const msgText = extractText(msg.content)
-              const isModelSwitch = msg.role === 'assistant' && (
+              const isModelSwitch = (
+                /^Model switched to /i.test(msgText) ||
                 /model (set|switched|now using|changed) to/i.test(msgText) ||
                 /^(switching|fallback|now using|using) (model|claude|gemini|gpt)/i.test(msgText) ||
                 /\/(model|switch) /i.test(msgText) ||

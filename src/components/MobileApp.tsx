@@ -152,7 +152,7 @@ export default function MobileApp() {
       .then(r => r.json())
       .then((data: {projects?: Array<{id: string; name: string; slug: string; emoji?: string; color?: string}>} | Array<{id: string; name: string; slug: string; emoji?: string; color?: string}>) => {
         const list = Array.isArray(data) ? data : (data.projects || [])
-        setAvailableProjects(list.filter((p: any) => p.slug !== 'others' && !p.hide_from_sessions))
+        setAvailableProjects(list.filter((p: any) => p.slug !== 'others' && p.slug !== '__archived' && !p.hide_from_sessions))
         // Publish to global store so emoji prefixes + hide-from-sessions work everywhere
         const meta: Record<string, { emoji: string; name: string; color: string; hideFromSessions?: boolean }> = {}
         for (const p of list) meta[p.slug] = { emoji: (p as any).emoji || '📁', name: p.name, color: (p as any).color || '#6366f1', hideFromSessions: !!(p as any).hide_from_sessions }
