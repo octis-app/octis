@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
 import { useGatewayStore, useSessionStore, useProjectStore, useLabelStore, useDraftStore, Session, DraftData } from '../store/gatewayStore'
 import { authFetch } from '../lib/authFetch'
 import { useTextareaUndo } from '../hooks/useTextareaUndo'
@@ -409,21 +409,37 @@ function MobileModelBadge({ sessionKey }: { sessionKey: string }) {
     const shortName = modelId.split('/').pop() || modelId
     setOpen(false)
     setSwitching(true)
-    const { ws, connected, sendChat } = useGatewayStore.getState()
-    
-    // Send the switch message FIRST so it appears immediately
-    await sendChat({ sessionKey, message: `Model switched to ${shortName}` })
-    
-    // Then patch the session model
-    if (connected && ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: 'req',
+    try {
+      const { ws, connected, sendChat } = useGatewayStore.getState()
+      
+      // Patch the session model
+      if (connected && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'req',
+          id: `model-switch-${Date.now()}`,
+          method: 'sessions.patch',
+          params: { key: sessionKey, model: modelId },
+        }))
+      }
+      
+      // Add a local-only notification that persists across fetchModel calls
+      const notificationMsg = {
         id: `model-switch-${Date.now()}`,
-        method: 'sessions.patch',
-        params: { key: sessionKey, model: modelId },
-      }))
+        role: 'assistant' as const,
+        content: `Model switched to ${shortName}`,
+        ts: new Date().toISOString(),
+        __localOnly: true // Flag to prevent it from being removed by setMessages
+      }
+      setMessages(prev => [...prev, notificationMsg])
+      
+      // Fetch the updated model info
+      await new Promise(r => setTimeout(r, 800))
+      await fetchModel()
+    } catch (err) {
+      console.error('Model switch error:', err)
+    } finally {
+      setSwitching(false)
     }
-    setTimeout(() => { void fetchModel(); setSwitching(false) }, 2000)
   }
 
   if (!modelInfo) return null
@@ -1927,7 +1943,8 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
             {reversed.map((msg, i) => {
               // Model switch detection — render as divider annotation
               const msgText = extractText(msg.content)
-              const isModelSwitch = msg.role === 'assistant' && (
+              const isModelSwitch = (
+                /^Model switched to /i.test(msgText) ||
                 /model (set|switched|now using|changed) to/i.test(msgText) ||
                 /^(switching|fallback|now using|using) (model|claude|gemini|gpt)/i.test(msgText) ||
                 /\/(model|switch) /i.test(msgText) ||

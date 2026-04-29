@@ -8,6 +8,48 @@
 
 ## Latest Changes — 2026-04-29
 
+### Mobile Project Switcher Fix (11:18 UTC)
+
+**Files changed:**
+- `src/components/MobileApp.tsx`
+
+**Changes:**
+1. Added `__archived` filter to `availableProjects` initialization (line 155)
+2. Changed filter from `p.slug !== 'others' && !p.hide_from_sessions` to `p.slug !== 'others' && p.slug !== '__archived' && !p.hide_from_sessions`
+
+**Why:** Mobile project switcher and new-session picker were showing "Archived" as a selectable project option (same issue as desktop, different code path). Users couldn't switch projects or see proper project list on mobile.
+
+**Tested:** ✓ Build successful, service restarted
+
+---
+
+### Model Switch Notification Feature (Desktop)
+
+**Files changed:**
+- `src/components/ChatPane.tsx` (ModelBadge component + message rendering)
+- `src/components/MobileFullChat.tsx` (partial implementation, incomplete)
+
+**Changes:**
+1. Added inline divider-style notification when manually switching models (like Messenger group name change)
+2. Detection regex matches messages starting with "Model switched to" or containing model switch keywords
+3. `ModelBadge` component now accepts `onModelSwitch` callback prop
+4. Parent `ChatPane` injects local-only notification message with `__localOnly: true` flag
+5. Message deduplication logic (`setMessages` in poll handler) preserves `__localOnly` messages across history refreshes
+6. Notification appears instantly on switch, persists during session, but disappears on page refresh (client-side only)
+
+**Why:** User requested visual feedback when manually switching models to confirm the change took effect.
+
+**Tested:** ✓ Desktop switches show notification instantly; refresh clears it (expected behavior)
+
+**Known issues:**
+- Mobile implementation incomplete (lacks message preservation logic)
+- Notifications don't persist to server (localStorage approach failed due to message state conflicts)
+- Multiple failed attempts logged: tried `chat.send` (triggers unwanted agent run), tried localStorage (caused state conflicts), settled on client-only approach
+
+**Review needed:** Decide if server-side persistence is worth the complexity (would require adding system message injection or separate notification table)
+
+---
+
 ### Archived Session UI Improvements
 
 **Files changed:**
