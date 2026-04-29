@@ -44,8 +44,8 @@ const QUICK_COMMAND_DEFAULTS: Record<string, string> = Object.fromEntries(
 
 function getQuickCommands(): Record<string, string> {
   try {
-    return { ...QUICK_COMMAND_DEFAULTS, ...JSON.parse(localStorage.getItem('octis-quick-commands') || '{}') }
-  } catch { return { ...QUICK_COMMAND_DEFAULTS } }
+    return JSON.parse(localStorage.getItem('octis-quick-commands') || '{}')
+  } catch { return {} }
 }
 
 function saveQuickCommand(key: string, value: string) {
@@ -191,10 +191,10 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
           const serverVals = d.settings.quick_commands as Record<string, string>
           // localStorage is primary — user's saved text always wins.
           // Server fills in keys that don't exist locally yet.
-          // This prevents server resets/deploys from ever wiping custom text.
+          // NO DEFAULTS - only use what's explicitly saved (localStorage > server).
           let localVals: Record<string, string> = {}
           try { localVals = JSON.parse(localStorage.getItem('octis-quick-commands') || '{}') } catch {}
-          const merged = { ...QUICK_COMMAND_DEFAULTS, ...serverVals, ...localVals }
+          const merged = { ...serverVals, ...localVals }
           setQcValues(merged)
           localStorage.setItem('octis-quick-commands', JSON.stringify(merged))
         }
@@ -254,9 +254,11 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
 
   const resetQc = useCallback((key: string) => {
     isDirtyRef.current = true
-    const def = QUICK_COMMAND_DEFAULTS[key] ?? ''
-    saveQuickCommand(key, def)
-    setQcValues(prev => { const next = { ...prev, [key]: def }; persistQcToServer(next); return next })
+    // Delete the command entirely (no defaults)
+    const current = getQuickCommands()
+    delete current[key]
+    localStorage.setItem('octis-quick-commands', JSON.stringify(current))
+    setQcValues(prev => { const next = { ...prev }; delete next[key]; persistQcToServer(next); return next })
   }, [persistQcToServer])
 
   const doQcUndo = useCallback((key: string) => {

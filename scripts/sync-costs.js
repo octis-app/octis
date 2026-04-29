@@ -42,6 +42,20 @@ if (!DB_URL) {
 
 const pool = new pg.Pool({ connectionString: DB_URL, ssl: false, max: 3 })
 
+// Anthropic pricing (USD per 1M tokens) - as of 2026-04
+const PRICING = {
+  'claude-sonnet-4-5': { input: 3.0, output: 15.0, cacheRead: 0.3, cacheWrite: 3.75 },
+  'claude-opus-4-5': { input: 15.0, output: 75.0, cacheRead: 1.5, cacheWrite: 18.75 },
+  'claude-haiku-4-5': { input: 1.0, output: 5.0, cacheRead: 0.1, cacheWrite: 1.25 },
+}
+
+function estimateCost(inputTokens, outputTokens, model = 'claude-sonnet-4-5') {
+  const pricing = PRICING[model] || PRICING['claude-sonnet-4-5']
+  const inputCost = (inputTokens / 1_000_000) * pricing.input
+  const outputCost = (outputTokens / 1_000_000) * pricing.output
+  return inputCost + outputCost
+}
+
 /** Find all agents' sessions.json files */
 function findSessionFiles() {
   const agentsDir = path.join(OPENCLAW_HOME, 'agents')
@@ -121,14 +135,17 @@ async function sync() {
 
     // Upsert session costs
     for (const { key, session } of allSessions) {
-      const cost = parseFloat(session.estimatedCostUsd) || 0
+      const inputTok = parseInt(session.inputTokens) || 0
+      const outputTok = parseInt(session.outputTokens) || 0
+      
+      // Calculate cost from tokens (since OpenClaw doesn't populate estimatedCostUsd)
+      const cost = estimateCost(inputTok, outputTok)
+      
       const updatedAt = session.updatedAt ? new Date(session.updatedAt) : new Date()
       const sessionDate = updatedAt.toISOString().slice(0, 10)
       const sessionId = cleanSessionKey(key)
       const sender = senderName(session)
       const msg = firstMessage(session)
-      const inputTok = parseInt(session.inputTokens) || 0
-      const outputTok = parseInt(session.outputTokens) || 0
 
       if (DRY_RUN) {
         console.log(`  DRY: ${sessionId} | cost=$${cost.toFixed(4)} | date=${sessionDate} | sender=${sender}`)
@@ -137,8 +154,8 @@ async function sync() {
 
       await client.query(`
         INSERT INTO raw_nexus.claw_session_costs
-          (session_id, first_message, sender_name, total_cost_usd, last_ts, session_date, input_tokens, output_tokens, turn_count)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          (session_id, first_message, sender_name, total_cost_usd, last_ts, session_date, input_tokens, output_tokens, turn_count, user_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         ON CONFLICT (session_id, session_date) DO UPDATE SET
           total_cost_usd = EXCLUDED.total_cost_usd,
           first_message = EXCLUDED.first_message,
@@ -146,21 +163,24 @@ async function sync() {
           last_ts = EXCLUDED.last_ts,
           input_tokens = EXCLUDED.input_tokens,
           output_tokens = EXCLUDED.output_tokens,
-          turn_count = EXCLUDED.turn_count
-      `, [sessionId, msg, sender, cost, updatedAt, sessionDate, inputTok, outputTok, 0])
+          turn_count = EXCLUDED.turn_count,
+          user_id = EXCLUDED.user_id
+      `, [sessionId, msg, sender, cost, updatedAt, sessionDate, inputTok, outputTok, 0, 'kennan'])
     }
 
     if (!DRY_RUN) {
-      // Rebuild daily aggregates from session data
+      // Rebuild daily aggregates from session data (Kennan only)
       await client.query(`
-        INSERT INTO raw_nexus.claw_user_daily_costs (cost_date, total_cost_usd, input_tokens, output_tokens, session_count)
+        INSERT INTO raw_nexus.claw_user_daily_costs (cost_date, total_cost_usd, input_tokens, output_tokens, session_count, user_id)
         SELECT
           session_date AS cost_date,
           SUM(total_cost_usd) AS total_cost_usd,
           SUM(input_tokens) AS input_tokens,
           SUM(output_tokens) AS output_tokens,
-          COUNT(DISTINCT session_id) AS session_count
+          COUNT(DISTINCT session_id) AS session_count,
+          'kennan' AS user_id
         FROM raw_nexus.claw_session_costs
+        WHERE user_id = 'kennan'
         GROUP BY session_date
         ON CONFLICT (cost_date) DO UPDATE SET
           total_cost_usd = EXCLUDED.total_cost_usd,

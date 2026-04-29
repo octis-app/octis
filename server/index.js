@@ -952,15 +952,16 @@ app.get('/api/costs', requireAuth, async (req, res) => {
   if (!pgPool) return res.json({ disabled: true, message: 'Set COSTS_DB_URL to enable cost tracking.' })
   try {
     const days = Math.min(parseInt(req.query.days || '30'), 90)
+    const userId = 'kennan'  // Kennan's data only
     
     // Get daily aggregates
     const { rows: daily } = await pgPool.query(`
       SELECT cost_date AS date, SUM(total_cost_usd) AS total_cost_usd,
         SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, SUM(session_count) AS session_count
       FROM raw_nexus.claw_user_daily_costs
-      WHERE cost_date >= CURRENT_DATE - ($1 || ' days')::INTERVAL
+      WHERE user_id = $1 AND cost_date >= CURRENT_DATE - ($2 || ' days')::INTERVAL
       GROUP BY cost_date ORDER BY cost_date ASC
-    `, [days])
+    `, [userId, days])
     
     // Get top sessions (last N days)
     const { rows: sessions } = await pgPool.query(`
@@ -969,10 +970,10 @@ app.get('/api/costs', requireAuth, async (req, res) => {
         SUM(cs.input_tokens) AS input_tokens, SUM(cs.output_tokens) AS output_tokens
       FROM raw_nexus.claw_session_costs cs
       LEFT JOIN raw_nexus.octis_session_labels ol ON ol.session_key = cs.session_id
-      WHERE cs.session_date >= CURRENT_DATE - ($1 || ' days')::INTERVAL
+      WHERE cs.user_id = $1 AND cs.session_date >= CURRENT_DATE - ($2 || ' days')::INTERVAL
       GROUP BY cs.session_id, cs.first_message, cs.sender_name, ol.label
       ORDER BY cost DESC LIMIT 50
-    `, [days])
+    `, [userId, days])
     
     // Get today's total (FIXED: use CURRENT_DATE directly)
     const { rows: todayRow } = await pgPool.query(`
@@ -981,8 +982,8 @@ app.get('/api/costs', requireAuth, async (req, res) => {
         COALESCE(SUM(output_tokens), 0) AS output_tokens,
         COALESCE(SUM(session_count), 0) AS session_count
       FROM raw_nexus.claw_user_daily_costs 
-      WHERE cost_date = CURRENT_DATE
-    `)
+      WHERE user_id = $1 AND cost_date = CURRENT_DATE
+    `, [userId])
     
     // Get today's top sessions (FIXED: use session_date for better performance)
     const { rows: todaySessionRows } = await pgPool.query(`
@@ -991,22 +992,22 @@ app.get('/api/costs', requireAuth, async (req, res) => {
         SUM(cs.input_tokens) AS input_tokens, SUM(cs.output_tokens) AS output_tokens
       FROM raw_nexus.claw_session_costs cs
       LEFT JOIN raw_nexus.octis_session_labels ol ON ol.session_key = cs.session_id
-      WHERE cs.session_date = CURRENT_DATE
+      WHERE cs.user_id = $1 AND cs.session_date = CURRENT_DATE
       GROUP BY cs.session_id, cs.first_message, cs.sender_name, ol.label
       ORDER BY cost DESC LIMIT 20
-    `)
+    `, [userId])
     
     // Get yesterday's total for comparison
     const { rows: yesterdayRow } = await pgPool.query(`
       SELECT COALESCE(SUM(total_cost_usd), 0) AS yesterday_cost
       FROM raw_nexus.claw_user_daily_costs 
-      WHERE cost_date = CURRENT_DATE - INTERVAL '1 day'
-    `)
+      WHERE user_id = $1 AND cost_date = CURRENT_DATE - INTERVAL '1 day'
+    `, [userId])
     
     // Get last sync time (newest session updated_at)
     const { rows: syncRow } = await pgPool.query(`
-      SELECT MAX(last_ts) AS last_sync FROM raw_nexus.claw_session_costs
-    `)
+      SELECT MAX(last_ts) AS last_sync FROM raw_nexus.claw_session_costs WHERE user_id = $1
+    `, [userId])
     
     res.json({
       today: parseFloat(todayRow[0]?.today_cost || 0),
