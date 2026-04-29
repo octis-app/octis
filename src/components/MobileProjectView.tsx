@@ -500,7 +500,7 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
             <div className="w-10 h-1 bg-[#2a3142] rounded-full mx-auto mb-4" />
             <div className="text-[#6b7280] text-xs font-medium mb-3 px-1">Switch project</div>
             <div className="space-y-1 max-h-72 overflow-y-auto">
-              {allProjects.map(p => (
+              {allProjects.filter(p => p.slug !== '__archived').map(p => (
                 <button
                   key={p.id}
                   onClick={() => { setShowProjectSwitcher(false); onSwitchProject?.(p) }}
@@ -542,7 +542,7 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
             </div>
             <div className="space-y-1 max-h-72 overflow-y-auto">
               {allProjects
-                .filter(p => p.slug !== getTag(longPressSession.key).project)
+                .filter(p => p.slug !== getTag(longPressSession.key).project && p.slug !== '__archived')
                 .map(p => (
                   <button
                     key={p.id}

@@ -161,10 +161,15 @@ function ModelBadge({ sessionKey }: { sessionKey: string }) {
   }, [open])
 
   const switchModel = async (modelId: string) => {
+    const shortName = modelId.split('/').pop() || modelId
     setOpen(false)
     setSwitching(true)
-    const { ws, connected } = useGatewayStore.getState()
-    // Use sessions.patch to set model override directly (no slash command needed)
+    const { ws, connected, sendChat } = useGatewayStore.getState()
+    
+    // Send the switch message FIRST so it appears immediately
+    await sendChat({ sessionKey, message: `Model switched to ${shortName}` })
+    
+    // Then patch the session model
     if (connected && ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
         type: 'req',
@@ -617,6 +622,121 @@ function ReplyQuoteBubble({ role, preview, isUserMsg, onJump }: { role: string; 
 // ─── Message cache (localStorage - survives pane unmount) ──────────────────────
 import { loadMsgCache, saveMsgCache } from '../lib/msgCache'
 import { useTextareaUndo } from '../hooks/useTextareaUndo'
+
+// ─── Project Dropdown ────────────────────────────────────────────────────────
+function ProjectDropdown({ sessionKey }: { sessionKey: string }) {
+  const { getTag, setTag, projectMeta } = useProjectStore()
+  const { isHidden } = useHiddenStore()
+  const { hiddenSessions } = useSessionStore()
+  const [open, setOpen] = useState(false)
+  const [switching, setSwitching] = useState(false)
+  const dropdownRef = useRef<HTMLDivElement>(null)
+
+  const currentProject = getTag(sessionKey).project || null
+  // Check both client hidden set and DB-backed hiddenSessions list
+  const isArchived = isHidden(sessionKey) || hiddenSessions.some((s) => s.key === sessionKey)
+  const projects = Object.entries(projectMeta).filter(([slug]) => slug !== '__archived')
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  const handleSwitch = (slug: string | null) => {
+    setOpen(false)
+    setSwitching(true)
+    if (slug === null) {
+      setTag(sessionKey, '')
+    } else {
+      setTag(sessionKey, slug)
+    }
+    setTimeout(() => setSwitching(false), 600)
+  }
+
+  const currentMeta = currentProject ? projectMeta[currentProject] : null
+  const currentColor = currentMeta?.color || null
+
+  return (
+    <div className="relative shrink-0" ref={dropdownRef}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        title={currentMeta ? `Project: ${currentMeta.name}${isArchived ? ' · Archived' : ''}` : isArchived ? 'Archived · No project' : 'No project — click to assign'}
+        className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-medium transition-colors select-none ${
+          switching ? 'opacity-50 cursor-wait' : 'cursor-pointer'
+        } ${
+          currentProject
+            ? 'bg-[#1e2330] text-[#a5b4fc] border-[#2a3142] hover:border-[#6366f1]'
+            : 'bg-transparent text-[#4b5563] border-[#1e2330] hover:border-[#3a4152] hover:text-[#6b7280]'
+        }`}
+      >
+        {switching ? (
+          <span className="leading-none">...</span>
+        ) : (
+          <>
+            {currentColor && (
+              <span className="w-2 h-2 rounded-full shrink-0" style={{ background: currentColor }} />
+            )}
+            <span className="leading-none">
+              {currentMeta ? `${currentMeta.emoji || '📁'} ${currentMeta.name}` : '📁'}
+            </span>
+            {isArchived && <span className="leading-none opacity-60">📦</span>}
+          </>
+        )}
+        <span className="text-[8px] opacity-60">▾</span>
+      </button>
+      {open && (
+        <div className="absolute right-0 top-7 z-50 bg-[#1a1f2e] border border-[#2a3142] rounded-xl shadow-2xl p-2 min-w-[190px] text-xs">
+          <div className="text-[#6b7280] text-[10px] font-medium px-2 pb-1.5">Switch project</div>
+
+          {isArchived && (
+            <div className="flex items-center gap-2 px-2 py-1.5 mb-1 rounded-lg bg-amber-900/20 text-amber-400/80 text-[10px] border border-amber-900/30">
+              <span>📦</span>
+              <span>Archived session</span>
+            </div>
+          )}
+
+          {projects.length === 0 && (
+            <div className="px-2 py-1.5 text-[#4b5563]">No projects found</div>
+          )}
+          {projects.map(([slug, meta]) => (
+            <button
+              key={slug}
+              onClick={() => handleSwitch(slug)}
+              className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg transition-colors text-left ${
+                currentProject === slug
+                  ? 'bg-[#6366f1]/20 text-[#a5b4fc]'
+                  : 'text-[#e8eaf0] hover:bg-[#2a3142]'
+              }`}
+            >
+              <span className="w-2 h-2 rounded-full shrink-0" style={{ background: meta.color || '#6366f1' }} />
+              <span className="text-[13px] leading-none">{meta.emoji || '📁'}</span>
+              <span className="flex-1 truncate">{meta.name}</span>
+              {currentProject === slug && <span className="text-[#6366f1] shrink-0">✓</span>}
+            </button>
+          ))}
+          {currentProject && (
+            <>
+              <div className="my-1 border-t border-[#2a3142]" />
+              <button
+                onClick={() => handleSwitch(null)}
+                className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left text-[#6b7280] hover:bg-[#2a3142] hover:text-red-400 transition-colors"
+              >
+                <span>✕</span>
+                <span>Remove from project</span>
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -2336,6 +2456,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             )}
             <SessionCostBadge sessionKey={sessionKey} />
             <ModelBadge sessionKey={sessionKey} />
+            <ProjectDropdown sessionKey={sessionKey} />
             <button
               onClick={onClose}
               className="h-6 w-6 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-xs text-[#6b7280] hover:text-red-400 shrink-0"
@@ -2531,7 +2652,9 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               const isModelSwitch = msg.role === 'assistant' && (
                 /model (set|switched|now using|changed) to/i.test(msgText) ||
                 /^(switching|fallback|now using|using) (model|claude|gemini|gpt)/i.test(msgText) ||
-                /\/(model|switch) /i.test(msgText)
+                /\/(model|switch) /i.test(msgText) ||
+                /fallback.*model/i.test(msgText) ||
+                /switch.*model/i.test(msgText)
               ) && msgText.length < 200
 
               return (

@@ -6,6 +6,27 @@
 
 ---
 
+## Latest Changes — 2026-04-29
+
+### Archived Session UI Improvements
+
+**Files changed:**
+- `src/components/ChatPane.tsx`
+- `src/components/MobileProjectView.tsx`
+- `src/components/Sidebar.tsx`
+
+**Changes:**
+1. Removed `__archived` as a selectable project option from project switcher dropdowns
+2. Kept the amber "Archived session" indicator badge at the top of the project switcher when viewing an archived session
+3. Filtered `__archived` from regular project lists in both desktop (`ChatPane.tsx`) and mobile (`MobileProjectView.tsx`) views
+4. Cleaned up project filtering logic to exclude `__archived` from "Switch project" and "Move to project" sheets
+
+**Why:** The `__archived` project was showing as a selectable option in the project switcher, which was confusing UX. Archived sessions should show a visual indicator (the amber badge) but shouldn't be manually assignable as a "project" — archiving is a separate action from project assignment.
+
+**Tested:** ✓ Build successful, service restarted, UI displays correctly
+
+---
+
 ## 1. Build / Deployment — `vite.config.js`
 
 **Context:** Octis is deployed at a subpath (`/octis/`) behind a Caddy reverse proxy, not at the root (`/`).
@@ -1545,3 +1566,54 @@ Not an Octis change, but recorded for completeness:
 **Files changed:** `scripts/apply-local-patches.cjs`
 
 **Verified:** `npm run build` succeeded, `octis.service` active after `systemctl restart`.
+
+---
+
+## Session 2026-04-29 — Project Dropdown in ChatPane Header
+
+### 1. ChatPane.tsx — ProjectDropdown component added
+
+**Feature:** New `ProjectDropdown` component added to the ChatPane session header (right of the model badge, left of the close button). Allows viewing and switching the current session's project without leaving the chat pane.
+
+**Pill button shows:**
+- Colored dot (project's color from DB)
+- Emoji + project name
+- 📦 icon if the session is archived
+- Tooltip with project name + archived status
+
+**Dropdown shows:**
+- "Archived session" amber banner when session is archived (checks both `useHiddenStore.isHidden()` and `useSessionStore.hiddenSessions` — needed because `isHidden` only covers client-side hide set, not DB-backed archived sessions after page refresh)
+- All projects with colored dot + emoji + name
+- Checkmark on current project
+- "Remove from project" option when a project is tagged
+- Uses existing `useProjectStore.setTag()` → `pushProjectTagToServer()` path — no new API endpoints
+
+**Files changed:** `src/components/ChatPane.tsx`
+
+**Verified:** `npm run build` clean, `octis.service` active after restart. Dropdown opens, switches project, updates header pill immediately.
+
+---
+
+### 2. octis.db — Project emojis and colors updated
+
+Updated `octis_projects` table directly with distinct emojis and colors for each project:
+
+| Slug | Emoji | Color |
+|---|---|---|
+| Module 1 | 🏗️ | #f59e0b (amber) |
+| Octis | 🐙 | #6366f1 (indigo) |
+| Slack | 💬 | #4a154b (Slack purple) |
+| Personal | 👤 | #22c55e (green) |
+| WhatsApp | 💬 | #25d366 (WhatsApp green, unchanged) |
+
+**Verified:** DB query confirmed all 5 rows updated. UI picks these up via `/api/projects` fetch on Sidebar mount.
+
+---
+
+### Versions this session
+- Started: v2.06
+- Ending: v2.07 (pending commit)
+
+### Known issues / needs review
+- `ProjectDropdown` is NOT yet registered in `apply-local-patches.cjs` — if an upstream pull runs `apply-local-patches.cjs`, this feature will be preserved only because it's committed to `kennan-local-changes`. Patch marker should be added before next pull.
+- Mobile (`MobileApp.tsx`, `MobileProjectView.tsx`, `MobileFullChat.tsx`) does not yet have a project switcher — only desktop ChatPane was updated. Parity TODO.

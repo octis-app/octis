@@ -406,10 +406,15 @@ function MobileModelBadge({ sessionKey }: { sessionKey: string }) {
   }, [fetchModel, fetchHealth])
 
   const switchModel = async (modelId: string) => {
+    const shortName = modelId.split('/').pop() || modelId
     setOpen(false)
     setSwitching(true)
-    const { ws, connected } = useGatewayStore.getState()
-    // Use sessions.patch to set model override directly
+    const { ws, connected, sendChat } = useGatewayStore.getState()
+    
+    // Send the switch message FIRST so it appears immediately
+    await sendChat({ sessionKey, message: `Model switched to ${shortName}` })
+    
+    // Then patch the session model
     if (connected && ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
         type: 'req',
@@ -1919,12 +1924,32 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
             })
           const reversed = [...filtered].reverse()
           return (<>
-            {reversed.map((msg, i) => (
-            <div
-              key={msg.id !== undefined ? String(msg.id) : i}
-              data-msg-key={msg.id !== undefined ? String(msg.id) : String(getMsgTs(msg) || i)}
-              className={`flex items-end gap-1 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-            >
+            {reversed.map((msg, i) => {
+              // Model switch detection — render as divider annotation
+              const msgText = extractText(msg.content)
+              const isModelSwitch = msg.role === 'assistant' && (
+                /model (set|switched|now using|changed) to/i.test(msgText) ||
+                /^(switching|fallback|now using|using) (model|claude|gemini|gpt)/i.test(msgText) ||
+                /\/(model|switch) /i.test(msgText) ||
+                /fallback.*model/i.test(msgText) ||
+                /switch.*model/i.test(msgText)
+              ) && msgText.length < 200
+              return (
+                <React.Fragment key={msg.id !== undefined ? String(msg.id) : i}>
+                  {isModelSwitch && (
+                    <div className="flex items-center gap-2 px-4 py-1 my-1">
+                      <div className="flex-1 h-px bg-[#2a3142]" />
+                      <span className="text-[10px] text-[#6366f1] font-mono flex items-center gap-1">
+                        <span>⚡</span>
+                        <span>{msgText.slice(0, 80)}</span>
+                      </span>
+                      <div className="flex-1 h-px bg-[#2a3142]" />
+                    </div>
+                  )}
+                  <div
+                    data-msg-key={msg.id !== undefined ? String(msg.id) : String(getMsgTs(msg) || i)}
+                    className={`flex items-end gap-1 ${isModelSwitch ? 'hidden' : ''} ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                  >
               {/* Reply button — left of user messages (always visible, subtle) */}
               {msg.role === 'user' && (
                 <button
@@ -2080,7 +2105,9 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
                 >{'\u21A9\uFE0E'}</button>
               )}
             </div>
-          ))}
+          </React.Fragment>
+        )})
+          }
             {/* Load-more: LAST in DOM = visual TOP in flex-col-reverse */}
             {hasMore && loadedKey === session?.key && (
               <div className="flex justify-center py-3">

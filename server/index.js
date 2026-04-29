@@ -835,6 +835,23 @@ app.post('/api/chat-send', requireAuth, async (req, res) => {
   }
 })
 
+// ─── Send model-switch annotation message ─────────────────────────────────────
+app.post('/api/model-switch-notify', requireAuth, async (req, res) => {
+  try {
+    const { sessionKey, modelName } = req.body
+    if (!sessionKey || !modelName) return res.status(400).json({ ok: false, error: 'sessionKey and modelName required' })
+    // Send as a regular message that will be detected and rendered as a divider
+    const [result] = await adminGwCall([{
+      method: 'chat.send',
+      params: { sessionKey, message: `Model switched to ${modelName}`, deliver: false }
+    }])
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('[octis] model-switch-notify HTTP error:', err.message)
+    res.status(500).json({ ok: false, error: err.message })
+  }
+})
+
 // ─── Costs (optional — requires COSTS_DB_URL) ────────────────────────────────
 
 app.get('/api/costs', requireAuth, async (req, res) => {
