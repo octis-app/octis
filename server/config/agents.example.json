@@ -1,0 +1,14 @@
+{
+  "agents": [
+    {
+      "id": "main",
+      "name": "My Agent",
+      "description": "Default agent",
+      "emoji": "🤖",
+      "default": true,
+      "visibleInPicker": true,
+      "soul": ""
+    }
+  ],
+  "renameAgentId": "fast"
+}

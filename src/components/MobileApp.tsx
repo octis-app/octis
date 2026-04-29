@@ -9,6 +9,7 @@ import MobileSessionCard from './MobileSessionCard'
 import MobileFullChat from './MobileFullChat'
 import CostsPanel from './CostsPanel'
 import MemoryPanel from './MemoryPanel'
+import AgentsPage from './AgentsPage'
 import ConnectModal from './ConnectModal'
 import ProjectsGrid, { type Project } from './ProjectsGrid'
 import MobileProjectView from './MobileProjectView'
@@ -21,6 +22,7 @@ const TABS = [
   { id: 'sessions', icon: '💬', label: 'Sessions' },
   { id: 'costs', icon: '💰', label: 'Costs' },
   { id: 'memory', icon: '🧠', label: 'Memory' },
+  { id: 'agents', icon: '🤖', label: 'Agents' },
 ]
 
 type FilterType = 'all' | 'active' | 'idle'
@@ -160,7 +162,7 @@ export default function MobileApp() {
       })
       .catch(() => {})
   }, [])
-  const VALID_TABS = ['projects', 'sessions', 'costs', 'memory']
+  const VALID_TABS = ['projects', 'sessions', 'costs', 'memory', 'agents']
   const [tab, setTab] = useState(() => {
     // Hash first (refresh), sessionStorage fallback (PWA home screen launch strips hash)
     const h = window.location.hash.replace('#', '')
@@ -857,6 +859,10 @@ export default function MobileApp() {
             </button>
           </div>
           <MemoryPanel />
+        </div>
+
+        <div className={tab === 'agents' ? 'flex-1 min-h-0 flex flex-col overflow-y-auto' : 'hidden'}>
+          <AgentsPage onStartSession={() => setTab('sessions')} />
         </div>
       </div>
 

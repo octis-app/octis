@@ -1,7 +1,7 @@
 import express from 'express'
 import cors from 'cors'
 import fs from 'fs/promises'
-import { readFileSync, mkdirSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs'
 import path from 'path'
 import { createRequire } from 'module'
 import crypto from 'crypto'
@@ -280,11 +280,97 @@ app.get('/api/health', (req, res) => res.json({ ok: true }))
 
 app.get('/api/agents', requireAuth, (req, res) => {
   try {
+    const agentsFile = existsSync(path.join(__serverDir, 'config', 'agents.json'))
+      ? path.join(__serverDir, 'config', 'agents.json')
+      : path.join(__serverDir, 'config', 'agents.example.json')
+    const raw = JSON.parse(readFileSync(agentsFile, 'utf8'))
+    const staticAgents = Array.isArray(raw) ? raw : (raw.agents || [])
+    const staticMap = Object.fromEntries(staticAgents.map(a => [a.id, a]))
+    const renameAgentId = raw.renameAgentId || 'fast'
+
+    // Try to read openclaw.json for live agent list
+    let liveAgents = []
+    let defaultModel = ''
+    try {
+      const clawConfig = JSON.parse(readFileSync(path.join(HOME, '.openclaw', 'openclaw.json'), 'utf8'))
+      liveAgents = clawConfig.agents?.list || []
+      defaultModel = clawConfig.agents?.defaults?.model?.primary || ''
+    } catch {}
+
+    function friendlyModel(m) {
+      if (!m) return 'Default'
+      if (m.includes('claude-sonnet')) return 'Claude Sonnet'
+      if (m.includes('claude-haiku')) return 'Claude Haiku'
+      if (m.includes('claude-opus')) return 'Claude Opus'
+      if (m.includes('deepseek')) return 'DeepSeek'
+      if (m.includes('gpt-4o-mini')) return 'GPT-4o mini'
+      if (m.includes('gemini-2.5-flash') || m.includes('gemini-flash')) return 'Gemini Flash'
+      if (m.includes('gemini-2.5-pro') || m.includes('gemini-pro')) return 'Gemini Pro'
+      if (m.includes('qwen')) return 'Qwen'
+      return m.split('/').pop() || m
+    }
+
+    const primaryAgentId = req.user?.agent_id || 'main'
+
+    let merged
+    if (liveAgents.length > 0) {
+      merged = liveAgents.map(la => {
+        const override = staticMap[la.id] || {}
+        return {
+          id: la.id,
+          name: override.name || la.name || la.id,
+          emoji: override.emoji || '🤖',
+          description: override.description || '',
+          visibleInPicker: Object.keys(override).length > 0 ? (override.visibleInPicker ?? true) : false,
+          soul: override.soul || '',
+          model: friendlyModel(la.model?.primary || la.model || defaultModel),
+          isPrimary: la.id === primaryAgentId,
+        }
+      })
+    } else {
+      merged = staticAgents.map(a => ({
+        id: a.id,
+        name: a.name || a.id,
+        emoji: a.emoji || '🤖',
+        description: a.description || '',
+        visibleInPicker: a.visibleInPicker ?? true,
+        soul: a.soul || '',
+        model: a.description?.match(/—\s*(.+)/)?.[1] || 'Default',
+        isPrimary: a.id === primaryAgentId
+      }))
+    }
+
+    res.json({ agents: merged, renameAgentId })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.patch('/api/agents/:id/meta', requireAuth, (req, res) => {
+  try {
+    const { emoji, description, name, model, soul, visibleInPicker } = req.body
+    // Always write to agents.json (local config), seeding from example if needed
     const agentsFile = path.join(__serverDir, 'config', 'agents.json')
-    const agents = JSON.parse(readFileSync(agentsFile, 'utf8'))
-    res.json({ agents })
-  } catch {
-    res.json({ agents: [{ id: 'main', name: 'Byte', emoji: '🦞', description: 'Default' }] })
+    const sourcefile = existsSync(agentsFile) ? agentsFile : path.join(__serverDir, 'config', 'agents.example.json')
+    const raw = JSON.parse(readFileSync(sourcefile, 'utf8'))
+    const isList = Array.isArray(raw)
+    let agentsList = isList ? raw : (raw.agents || [])
+    const idx = agentsList.findIndex(a => a.id === req.params.id)
+    if (idx === -1) {
+      agentsList.push({ id: req.params.id, name: name || req.params.id, emoji: emoji || '🤖', description: description || '', visibleInPicker: visibleInPicker ?? true })
+    } else {
+      if (emoji !== undefined) agentsList[idx].emoji = emoji
+      if (description !== undefined) agentsList[idx].description = description
+      if (name !== undefined) agentsList[idx].name = name
+      if (soul !== undefined) agentsList[idx].soul = soul
+      if (model !== undefined) agentsList[idx].model = model
+      if (visibleInPicker !== undefined) agentsList[idx].visibleInPicker = visibleInPicker
+    }
+    const toWrite = isList ? agentsList : { ...raw, agents: agentsList }
+    writeFileSync(agentsFile, JSON.stringify(toWrite, null, 2))
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
   }
 })
 

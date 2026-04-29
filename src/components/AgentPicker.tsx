@@ -8,6 +8,9 @@ export interface Agent {
   name: string
   emoji: string
   description: string
+  visibleInPicker?: boolean
+  model?: string
+  isPrimary?: boolean
 }
 
 interface AgentPickerProps {
