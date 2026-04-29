@@ -491,18 +491,32 @@ app.delete('/api/projects/:id', requireAuth, (req, res) => {
   const project = db.prepare('SELECT slug FROM octis_projects WHERE id = ?').get(id)
   if (!project) return res.status(404).json({ error: 'Project not found' })
   
-  // Count active (non-archived) sessions
+  // Apply visibility filters matching frontend (ProjectsGrid/MobileProjectView):
+  // - Exclude background subagent sessions (key contains ':subagent:')
+  // - Exclude heartbeat cron sessions
+  // - Exclude "continue where you left off" labeled sessions
+  
+  // Count active (non-archived) visible sessions
   const activeCount = db.prepare(`
     SELECT COUNT(*) as count FROM octis_session_projects sp
     LEFT JOIN octis_hidden_sessions hs ON sp.session_key = hs.session_key
-    WHERE sp.project = ? AND hs.session_key IS NULL
+    LEFT JOIN octis_session_labels lbl ON sp.session_key = lbl.session_key
+    WHERE sp.project = ? 
+      AND hs.session_key IS NULL
+      AND sp.session_key NOT LIKE '%:subagent:%'
+      AND sp.session_key NOT LIKE '%:heartbeat'
+      AND (lbl.label IS NULL OR lbl.label NOT LIKE 'continue where you left off%')
   `).get(project.slug).count
   
-  // Count archived sessions
+  // Count archived visible sessions
   const archivedCount = db.prepare(`
     SELECT COUNT(*) as count FROM octis_session_projects sp
     INNER JOIN octis_hidden_sessions hs ON sp.session_key = hs.session_key
+    LEFT JOIN octis_session_labels lbl ON sp.session_key = lbl.session_key
     WHERE sp.project = ?
+      AND sp.session_key NOT LIKE '%:subagent:%'
+      AND sp.session_key NOT LIKE '%:heartbeat'
+      AND (lbl.label IS NULL OR lbl.label NOT LIKE 'continue where you left off%')
   `).get(project.slug).count
   
   const totalCount = activeCount + archivedCount
