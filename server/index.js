@@ -491,33 +491,42 @@ app.delete('/api/projects/:id', requireAuth, (req, res) => {
   const project = db.prepare('SELECT slug FROM octis_projects WHERE id = ?').get(id)
   if (!project) return res.status(404).json({ error: 'Project not found' })
   
-  // Apply visibility filters matching frontend (ProjectsGrid/MobileProjectView):
+  // Apply same visibility filters as frontend (ProjectsGrid/MobileProjectView):
+  // - Agent isolation: only count sessions belonging to this user's mainAgentId
   // - Exclude background subagent sessions (key contains ':subagent:')
   // - Exclude heartbeat cron sessions
+  // - Exclude thread sessions (Slack/Discord threads have separate session keys but don't count as "sessions" in UI)
   // - Exclude "continue where you left off" labeled sessions
   
-  // Count active (non-archived) visible sessions
+  const mainAgentId = req.user.agent_id || 'main'
+  const agentPrefix = `agent:${mainAgentId}:%`
+  
+  // Count active (non-archived) visible sessions owned by this agent
   const activeCount = db.prepare(`
     SELECT COUNT(*) as count FROM octis_session_projects sp
     LEFT JOIN octis_hidden_sessions hs ON sp.session_key = hs.session_key
     LEFT JOIN octis_session_labels lbl ON sp.session_key = lbl.session_key
     WHERE sp.project = ? 
       AND hs.session_key IS NULL
+      AND sp.session_key LIKE ?
       AND sp.session_key NOT LIKE '%:subagent:%'
       AND sp.session_key NOT LIKE '%:heartbeat'
+      AND sp.session_key NOT LIKE '%:thread:%'
       AND (lbl.label IS NULL OR lbl.label NOT LIKE 'continue where you left off%')
-  `).get(project.slug).count
+  `).get(project.slug, agentPrefix).count
   
-  // Count archived visible sessions
+  // Count archived visible sessions owned by this agent
   const archivedCount = db.prepare(`
     SELECT COUNT(*) as count FROM octis_session_projects sp
     INNER JOIN octis_hidden_sessions hs ON sp.session_key = hs.session_key
     LEFT JOIN octis_session_labels lbl ON sp.session_key = lbl.session_key
     WHERE sp.project = ?
+      AND sp.session_key LIKE ?
       AND sp.session_key NOT LIKE '%:subagent:%'
       AND sp.session_key NOT LIKE '%:heartbeat'
+      AND sp.session_key NOT LIKE '%:thread:%'
       AND (lbl.label IS NULL OR lbl.label NOT LIKE 'continue where you left off%')
-  `).get(project.slug).count
+  `).get(project.slug, agentPrefix).count
   
   const totalCount = activeCount + archivedCount
   
@@ -709,16 +718,50 @@ app.get('/api/session-projects', requireAuth, (req, res) => {
   res.json(map)
 })
 
-app.post('/api/session-projects', requireAuth, (req, res) => {
-  const { sessionKey, projectTag } = req.body
+app.post('/api/session-projects', requireAuth, async (req, res) => {
+  const { sessionKey, projectTag, skipInject } = req.body
   if (!sessionKey) return res.status(400).json({ error: 'sessionKey required' })
+  
+  // Get current project to detect if this is a change
+  const current = db.prepare('SELECT project FROM octis_session_projects WHERE session_key = ?').get(sessionKey)
+  const oldProject = current?.project || null
+  
   if (!projectTag) {
+    // Removing from project
     db.prepare('DELETE FROM octis_session_projects WHERE session_key = ?').run(sessionKey)
+    // Inject removal notification only if there WAS a project before
+    if (oldProject && !skipInject) {
+      try {
+        const msg = `This session has been **removed from its project**. It is now unassigned.`
+        await adminGwCall([{ method: 'chat.inject', params: { sessionKey, message: msg, label: '📁 Project' } }])
+      } catch (err) {
+        console.error('[octis] project-remove inject error:', err.message)
+      }
+    }
   } else {
+    // Setting/changing project
     db.prepare(
       `INSERT OR REPLACE INTO octis_session_projects (session_key, project) VALUES (?, ?)`
     ).run(sessionKey, projectTag)
+    
+    // Only inject if this is a CHANGE (not initial set) and skipInject flag is not set
+    // Initial assignment is handled by session-init endpoint (called on first message via pendingProjectInit)
+    if (oldProject && oldProject !== projectTag && !skipInject) {
+      try {
+        const project = db.prepare('SELECT * FROM octis_projects WHERE slug = ?').get(projectTag)
+        if (project) {
+          const { name, emoji, description, memory_file } = project
+          const descLine = description ? `\n${description}` : ''
+          const memLine = memory_file ? `\nContext file: memory/${memory_file}` : ''
+          const msg = `This session has been **moved to the ${emoji} ${name} project**.${descLine}${memLine}\n\nWhen the user asks which project this session is under, answer: **${name}**.`
+          await adminGwCall([{ method: 'chat.inject', params: { sessionKey, message: msg, label: '📁 Project' } }])
+        }
+      } catch (err) {
+        console.error('[octis] project-set inject error:', err.message)
+      }
+    }
   }
+  
   res.json({ ok: true })
 })
 
