@@ -20,8 +20,6 @@ function getQuickCommands() {
 }
 
 // ─── Session cost/health badge (for panel header) ─────────────────────────────
-let cachedAgents: { id: string; name: string; emoji: string }[] = []
-
 function SessionCostBadge({ sessionKey }: { sessionKey: string }) {
   const { sessions, sessionMeta } = useSessionStore()
   const { send, sendChat } = useGatewayStore()
@@ -79,6 +77,175 @@ function SessionCostBadge({ sessionKey }: { sessionKey: string }) {
 }
 
 const API = (import.meta.env.VITE_API_URL as string) || ''
+
+
+// ─── Model Badge ────────────────────────────────────────────────────────────
+
+interface ModelInfo {
+  model: string
+  displayName: string
+  provider: string
+  isFallback: boolean
+  defaultModel: string
+  fallbacks: string[]
+}
+
+interface ProviderHealth {
+  errorCount: number
+  lastFailureAt: number | null
+  healthy: boolean
+}
+
+function modelShortName(modelId: string): string {
+  const map: Record<string, string> = {
+    'anthropic/claude-sonnet-4-6': 'Sonnet',
+    'anthropic/claude-sonnet-4-5': 'Sonnet',
+    'anthropic/claude-opus-4-5': 'Opus',
+    'anthropic/claude-opus-4': 'Opus',
+    'anthropic/claude-haiku-4-5': 'Haiku',
+    'anthropic/claude-haiku-4': 'Haiku',
+    'google/gemini-2.0-flash': 'Gemini Flash',
+    'google/gemini-2.0-pro': 'Gemini Pro',
+    'google/gemini-1.5-pro': 'Gemini 1.5 Pro',
+    'google/gemini-1.5-flash': 'Gemini Flash',
+    'openai/gpt-4o': 'GPT-4o',
+    'openai/gpt-4o-mini': 'GPT-4o mini',
+  }
+  if (map[modelId]) return map[modelId]
+  const parts = modelId.split('/')
+  return parts[parts.length - 1] || modelId
+}
+
+function ModelBadge({ sessionKey, onModelSwitch }: { sessionKey: string; onModelSwitch?: (modelName: string) => void }) {
+  const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null)
+  const [providerHealth, setProviderHealth] = useState<Record<string, ProviderHealth>>({})
+  const [open, setOpen] = useState(false)
+  const [switching, setSwitching] = useState(false)
+  const dropdownRef = useRef<HTMLDivElement>(null)
+  const { sendChat } = useGatewayStore()
+
+  const fetchModel = useCallback(async () => {
+    try {
+      const res = await authFetch(`${API}/api/session-model?sessionKey=${encodeURIComponent(sessionKey)}`)
+      if (res.ok) setModelInfo(await res.json())
+    } catch {}
+  }, [sessionKey])
+
+  const fetchHealth = useCallback(async () => {
+    try {
+      const res = await authFetch(`${API}/api/provider-health`)
+      if (res.ok) {
+        const data = await res.json()
+        setProviderHealth(data.providers || {})
+      }
+    } catch {}
+  }, [])
+
+  useEffect(() => {
+    fetchModel()
+    fetchHealth()
+    const t = setInterval(() => { fetchModel(); fetchHealth() }, 30000)
+    return () => clearInterval(t)
+  }, [fetchModel, fetchHealth])
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  const switchModel = async (modelId: string) => {
+    const shortName = modelId.split('/').pop() || modelId
+    setOpen(false)
+    setSwitching(true)
+    try {
+      const { ws, connected, sendChat } = useGatewayStore.getState()
+      
+      // Patch the session model
+      if (connected && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'req',
+          id: `model-switch-${Date.now()}`,
+          method: 'sessions.patch',
+          params: { key: sessionKey, model: modelId },
+        }))
+      }
+      
+      // Notify parent component about the switch
+      if (onModelSwitch) {
+        onModelSwitch(shortName)
+      }
+      
+      // Fetch the updated model info
+      await new Promise(r => setTimeout(r, 800))
+      await fetchModel()
+    } catch (err) {
+      console.error('Model switch error:', err)
+    } finally {
+      setSwitching(false)
+    }
+  }
+
+  if (!modelInfo) return null
+
+  const isFallback = modelInfo.isFallback
+  const pillClass = isFallback
+    ? 'bg-amber-900/40 text-amber-300 border-amber-600/50 hover:border-amber-500'
+    : 'bg-[#1e2330] text-[#a5b4fc] border-[#2a3142] hover:border-[#6366f1]'
+
+  // All available models to pick from
+  const allModels = [modelInfo.defaultModel, ...modelInfo.fallbacks].filter(
+    (m, i, arr) => arr.indexOf(m) === i
+  )
+
+  return (
+    <div className="relative shrink-0" ref={dropdownRef}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        title={`Model: ${modelInfo.model}${isFallback ? ' (fallback)' : ''}`}
+        className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-mono transition-colors select-none ${
+          switching ? 'opacity-50 cursor-wait' : 'cursor-pointer'
+        } ${pillClass}`}
+      >
+        {isFallback && <span className="leading-none">⚡</span>}
+        <span className="leading-none">{switching ? '...' : modelInfo.displayName}</span>
+        <span className="text-[8px] opacity-60">▾</span>
+      </button>
+      {open && (
+        <div className="absolute right-0 top-7 z-50 bg-[#1a1f2e] border border-[#2a3142] rounded-xl shadow-2xl p-2 min-w-[190px] text-xs">
+          <div className="text-[#6b7280] text-[10px] font-medium px-2 pb-1.5">Switch model</div>
+          {allModels.map(m => {
+            const provName = m.split('/')[0]
+            const health = providerHealth[provName]
+            const hasError = health && health.errorCount > 0 && !health.healthy
+            const isCurrent = modelInfo.model === m
+            return (
+              <button
+                key={m}
+                onClick={() => switchModel(m)}
+                className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg transition-colors text-left ${
+                  isCurrent
+                    ? 'bg-[#6366f1]/20 text-[#a5b4fc]'
+                    : 'text-[#e8eaf0] hover:bg-[#2a3142]'
+                }`}
+              >
+                <span className="flex-1">{modelShortName(m)}</span>
+                {hasError && <span title="Provider has recent errors" className="text-amber-400 text-[10px]">⚠</span>}
+                {isCurrent && <span className="text-[#6366f1] text-[10px]">✓</span>}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -341,6 +508,8 @@ function isHeartbeatTrigger(content: MessageContent): boolean {
   // Async exec completion notifications injected by OpenClaw - always hide
   if (text.trimStart().startsWith('System (untrusted):') || text.trimStart().startsWith('System:') ||
       text.includes('An async command you ran earlier has completed')) return true
+  // System-injected lifecycle messages (memory flush, compaction, etc.) — hide from chat
+  if (text.startsWith('Pre-compaction memory flush') || text.startsWith('Pre-compaction context flush')) return true
   return false
 }
 
@@ -464,6 +633,121 @@ function ReplyQuoteBubble({ role, preview, isUserMsg, onJump }: { role: string; 
 import { loadMsgCache, saveMsgCache } from '../lib/msgCache'
 import { useTextareaUndo } from '../hooks/useTextareaUndo'
 
+// ─── Project Dropdown ────────────────────────────────────────────────────────
+function ProjectDropdown({ sessionKey }: { sessionKey: string }) {
+  const { getTag, setTag, projectMeta } = useProjectStore()
+  const { isHidden } = useHiddenStore()
+  const { hiddenSessions } = useSessionStore()
+  const [open, setOpen] = useState(false)
+  const [switching, setSwitching] = useState(false)
+  const dropdownRef = useRef<HTMLDivElement>(null)
+
+  const currentProject = getTag(sessionKey).project || null
+  // Check both client hidden set and DB-backed hiddenSessions list
+  const isArchived = isHidden(sessionKey) || hiddenSessions.some((s) => s.key === sessionKey)
+  const projects = Object.entries(projectMeta).filter(([slug]) => slug !== '__archived')
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  const handleSwitch = (slug: string | null) => {
+    setOpen(false)
+    setSwitching(true)
+    if (slug === null) {
+      setTag(sessionKey, '')
+    } else {
+      setTag(sessionKey, slug)
+    }
+    setTimeout(() => setSwitching(false), 600)
+  }
+
+  const currentMeta = currentProject ? projectMeta[currentProject] : null
+  const currentColor = currentMeta?.color || null
+
+  return (
+    <div className="relative shrink-0" ref={dropdownRef}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        title={currentMeta ? `Project: ${currentMeta.name}${isArchived ? ' · Archived' : ''}` : isArchived ? 'Archived · No project' : 'No project — click to assign'}
+        className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-medium transition-colors select-none ${
+          switching ? 'opacity-50 cursor-wait' : 'cursor-pointer'
+        } ${
+          currentProject
+            ? 'bg-[#1e2330] text-[#a5b4fc] border-[#2a3142] hover:border-[#6366f1]'
+            : 'bg-transparent text-[#4b5563] border-[#1e2330] hover:border-[#3a4152] hover:text-[#6b7280]'
+        }`}
+      >
+        {switching ? (
+          <span className="leading-none">...</span>
+        ) : (
+          <>
+            {currentColor && (
+              <span className="w-2 h-2 rounded-full shrink-0" style={{ background: currentColor }} />
+            )}
+            <span className="leading-none">
+              {currentMeta ? `${currentMeta.emoji || '📁'} ${currentMeta.name}` : '📁'}
+            </span>
+            {isArchived && <span className="leading-none opacity-60">📦</span>}
+          </>
+        )}
+        <span className="text-[8px] opacity-60">▾</span>
+      </button>
+      {open && (
+        <div className="absolute right-0 top-7 z-50 bg-[#1a1f2e] border border-[#2a3142] rounded-xl shadow-2xl p-2 min-w-[190px] text-xs">
+          <div className="text-[#6b7280] text-[10px] font-medium px-2 pb-1.5">Switch project</div>
+
+          {isArchived && (
+            <div className="flex items-center gap-2 px-2 py-1.5 mb-1 rounded-lg bg-amber-900/20 text-amber-400/80 text-[10px] border border-amber-900/30">
+              <span>📦</span>
+              <span>Archived session</span>
+            </div>
+          )}
+
+          {projects.length === 0 && (
+            <div className="px-2 py-1.5 text-[#4b5563]">No projects found</div>
+          )}
+          {projects.map(([slug, meta]) => (
+            <button
+              key={slug}
+              onClick={() => handleSwitch(slug)}
+              className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg transition-colors text-left ${
+                currentProject === slug
+                  ? 'bg-[#6366f1]/20 text-[#a5b4fc]'
+                  : 'text-[#e8eaf0] hover:bg-[#2a3142]'
+              }`}
+            >
+              <span className="w-2 h-2 rounded-full shrink-0" style={{ background: meta.color || '#6366f1' }} />
+              <span className="text-[13px] leading-none">{meta.emoji || '📁'}</span>
+              <span className="flex-1 truncate">{meta.name}</span>
+              {currentProject === slug && <span className="text-[#6366f1] shrink-0">✓</span>}
+            </button>
+          ))}
+          {currentProject && (
+            <>
+              <div className="my-1 border-t border-[#2a3142]" />
+              <button
+                onClick={() => handleSwitch(null)}
+                className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left text-[#6b7280] hover:bg-[#2a3142] hover:text-red-400 transition-colors"
+              >
+                <span>✕</span>
+                <span>Remove from project</span>
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, onFocus, isFocused, isFeatured, onDragStart, onDragOver, onDrop, onDragEnd, isDragOver, renameRequested }: ChatPaneProps) {
@@ -472,24 +756,10 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   const { setCard, getTag, getProjectEmoji } = useProjectStore()
   const { setLabel: saveLabelLocal, getLabel } = useLabelStore()
   const { setDraft, getDraft, getDraftData, clearDraft, isDraftCleared, hydrateFromServer: hydrateDraftsFromServer } = useDraftStore()
-
-  let cachedAgents: { id: string; name: string; emoji: string }[] = []
-  const [agents, setAgents] = useState<{ id: string; name: string; emoji: string }[]>([])
-  useEffect(() => {
-    if (cachedAgents.length === 0) {
-      authFetch(`${API}/api/agents`)
-        .then(r => r.json())
-        .then(d => {
-          const fetched = d.agents || []
-          cachedAgents = fetched
-          setAgents(fetched)
-        })
-        .catch(() => {})
-    }
-  }, [])
   // Per-session message cache - show instantly on switch, refresh silently behind the scenes
   // Uses localStorage so cache survives pane unmount/remount (useRef would die on close)
   const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null)
   const setMessagesAndCache = (updater: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[]), key?: string) => {
     setMessages(prev => {
       const next = typeof updater === 'function' ? updater(prev) : updater
@@ -741,6 +1011,15 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     }
   }, [globalStreaming])
 
+  // Clear ALL remaining queue entries a few seconds after agent finishes
+  // (catches rapid-send orphans that never got individual confirmation)
+  useEffect(() => {
+    if (!isWorking && !globalStreaming) {
+      const t = setTimeout(() => setSentQueue([]), 3000)
+      return () => clearTimeout(t)
+    }
+  }, [isWorking, globalStreaming])
+
   // ── Phase 1: show cached messages immediately, no WS needed ──────────────
   useEffect(() => {
     if (!sessionKey) return
@@ -850,6 +1129,9 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             }
           }
           setMessages((prev) => {
+            // Preserve local-only messages (like model switch notifications)
+            const localOnly = prev.filter((m: any) => m.__localOnly)
+            
             if (msgs.length === 0) return prev
 
             // ── Step 1: Compute base — NEVER downgrade loaded history ───────────────────────
@@ -857,30 +1139,84 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             // BEFORE optimistic logic — old code applied guard only when no optimistics
             // existed, causing poll to collapse 200-msg history to 30 whenever user had
             // a pending message. That's the root cause of messages disappearing on send.
-            const prevServer = prev.filter(m => typeof m.id !== 'number')
+            const prevServer = prev.filter(m => typeof m.id !== 'number' && !(m as any).__localOnly)
             let base: ChatMessage[]
             if (msgs.length >= prevServer.length) {
               // Poll covers everything we have — use directly
-              base = msgs
+              // Preserve local image content if server stripped the base64
+              base = msgs.map(serverMsg => {
+                if (serverMsg.role !== 'user' || !Array.isArray(serverMsg.content)) return serverMsg
+                const blocks = serverMsg.content as ContentBlock[]
+                const hasEmptyImage = blocks.some(b => b.type === 'image' && !(b as Record<string,unknown>).data)
+                if (!hasEmptyImage) return serverMsg
+                const localMsg = prevServer.find(m =>
+                  (m.id !== undefined && m.id === serverMsg.id) ||
+                  (getMsgTs(m) > 0 && getMsgTs(m) === getMsgTs(serverMsg))
+                )
+                if (!localMsg || !Array.isArray(localMsg.content)) return serverMsg
+                const localBlocks = localMsg.content as ContentBlock[]
+                const localHasImageData = localBlocks.some(b => b.type === 'image' && !!(b as Record<string,unknown>).data)
+                return localHasImageData ? { ...serverMsg, content: localMsg.content } : serverMsg
+              })
             } else {
               // Poll is truncated: keep prev, append only genuinely new messages
               const prevTs = new Set(prevServer.map(m => getMsgTs(m)).filter(ts => ts > 0))
+              const prevIds = new Set(
+                prevServer.filter(m => m.id !== undefined && m.id !== null).map(m => m.id)
+              )
               // For ts=0 messages: use content fingerprint to avoid appending duplicates each poll
               const prevFp = new Set(prevServer.filter(m => getMsgTs(m) === 0).map(m =>
                 `${m.role}:${extractText(m.content).substring(0, 100)}`
               ))
               const newOnes = msgs.filter(m => {
+                // Already present by id — this is a ts-update for a WS-echo that had ts=0, not a new msg
+                if (m.id !== undefined && m.id !== null && prevIds.has(m.id)) return false
                 const ts = getMsgTs(m)
                 if (ts > 0) return !prevTs.has(ts)
                 return !prevFp.has(`${m.role}:${extractText(m.content).substring(0, 100)}`)
               })
+              // Patch real timestamps onto ts=0 entries that the poll now has ts for.
+              // WS echoes often lack timestamps; without patching, the message stays ts=0
+              // and every subsequent poll re-adds it as "new", eventually landing after
+              // assistant replies that already have timestamps.
+              const patched = prevServer.map(m => {
+                if (m.id !== undefined && m.id !== null) {
+                  const pm = msgs.find(p => p.id === m.id)
+                  if (pm) {
+                    // Merge fresh server data: fills in ts and MediaPaths that WS echo may have lacked
+                    const hasMissingTs = getMsgTs(m) === 0 && getMsgTs(pm) > 0
+                    const hasMissingMedia = !m.MediaPath && !m.MediaPaths && (pm.MediaPath || pm.MediaPaths)
+                    if (hasMissingTs || hasMissingMedia) {
+                      // Don't overwrite content when local has image data and server stripped it
+                      const localHasImgData = Array.isArray(m.content) &&
+                        (m.content as ContentBlock[]).some(b => b.type === 'image' && !!(b as Record<string,unknown>).data)
+                      const serverHasEmptyImg = Array.isArray(pm.content) &&
+                        (pm.content as ContentBlock[]).some(b => b.type === 'image' && !(b as Record<string,unknown>).data)
+                      return localHasImgData && serverHasEmptyImg
+                        ? { ...m, ...pm, content: m.content }
+                        : { ...m, ...pm }
+                    }
+                  }
+                }
+                return m
+              })
               // Fast-exit: last message unchanged and nothing new — skip re-render
               if (newOnes.length === 0) {
                 const lastPollTs = getMsgTs(msgs[msgs.length - 1])
-                const lastPrevTs = getMsgTs(prevServer[prevServer.length - 1])
+                const lastPrevTs = getMsgTs(patched[patched.length - 1])
                 if (lastPollTs > 0 && lastPollTs === lastPrevTs) return prev
               }
-              base = newOnes.length > 0 ? [...prevServer, ...newOnes] : prevServer
+              if (newOnes.length > 0) {
+                // Sort by timestamp so out-of-order arrivals land in the right spot.
+                // Both ta and tb must be > 0 to sort; ts=0 preserves relative order.
+                base = [...patched, ...newOnes].sort((a, b) => {
+                  const ta = getMsgTs(a), tb = getMsgTs(b)
+                  if (!ta || !tb) return 0
+                  return ta - tb
+                })
+              } else {
+                base = patched
+              }
             }
 
             // ── Step 2: Fast-exit for standard case (no optimistics, nothing new) ─────
@@ -898,7 +1234,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                   base.length === prevServer.length) {
                 return prev
               }
-              return base
+              return [...base, ...localOnly]
             }
 
             // ── Step 3: Handle active optimistic ────────────────────────────────
@@ -910,12 +1246,20 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                      extractText(m.content).substring(0, 80).trim() === optimisticText
               )
               if (!serverAlreadyHasMsg) {
-                return [...base, optimistic] // keep optimistic on top of full history
+                // Also preserve other rapid-send messages (earlier optimistics that became "orphans"
+                // because pendingOptimisticIdRef only tracks the latest send)
+                const pendingOrphans = prev.filter(m => typeof m.id === 'number' && m.id !== oid).filter(o => {
+                  const oText = extractText(o.content).substring(0, 80).trim()
+                  if (!oText) return true // image-only: keep, can't match by text
+                  return !base.some(bm => bm.role === 'user' && typeof bm.id !== 'number' &&
+                    extractText(bm.content).substring(0, 80).trim() === oText)
+                })
+                return [...base, ...pendingOrphans, optimistic, ...localOnly]
               }
               // Server confirmed — drop optimistic
               confirmedOptimisticRef.current = oid
               pendingOptimisticIdRef.current = null
-              return base
+              return [...base, ...localOnly]
             }
 
             // ── Step 4: Handle orphaned optimistics ────────────────────────────
@@ -927,18 +1271,37 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                        extractText(m.content).substring(0, 80).trim() === oText
                 )
               })
-              if (!serverHasOrphans) return [...base, ...orphans]
-              return base
+              if (!serverHasOrphans) return [...base, ...orphans, ...localOnly]
+              return [...base, ...localOnly]
             }
 
-            return base
+            return [...base, ...localOnly]
           })
           return
         }
 
         // History response — match by prefix so load-more requests (sent from a separate effect) are also handled
         if (msg.type === 'res' && msg.ok && msg.id?.startsWith(`chat-history-${sessionKey}-`)) {
-          const msgs = msg.payload?.messages || []
+          let msgs: ChatMessage[] = msg.payload?.messages || []
+          // WS chat.history strips base64 from image blocks.
+          // Restore from: 1) current state 2) localStorage cache 3) async HTTP (server enriches from JSONL)
+          const hasEmptyImages = msgs.some(m =>
+            m.role === 'user' && Array.isArray(m.content) &&
+            (m.content as ContentBlock[]).some(b => b.type === 'image' && !(b as Record<string,unknown>).data)
+          )
+          if (hasEmptyImages) {
+            // WS chat.history strips base64 from image blocks (gateway optimization).
+            // Re-fetch via HTTP: the Octis server enriches image blocks from the JSONL.
+            authFetch(`${API}/api/chat-history?sessionKey=${encodeURIComponent(sessionKey)}&limit=${historyLimitRef.current}`)
+              .then(r => r.json())
+              .then((d: { ok?: boolean; messages?: ChatMessage[] }) => {
+                if (!d.ok || !d.messages?.length) return
+                // Replace state with enriched HTTP response and update cache
+                setMessages(d.messages)
+                saveMsgCache(sessionKey, d.messages)
+              })
+              .catch(() => {})
+          }
           const lastHB = [...msgs]
             .reverse()
             .find((m) => m.role === 'assistant' && isHeartbeatResponse(m.content))
@@ -1116,8 +1479,17 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                 if (oid !== null) {
                   const optimisticIdx = prev.findIndex((m) => m.id === oid)
                   if (optimisticIdx >= 0) {
+                    const optimistic = prev[optimisticIdx]
+                    // If WS echo lacks MediaPaths but optimistic had image blocks (base64 preview),
+                    // keep the optimistic content so the image stays visible until poll confirms MediaPath.
+                    const echoHasImages = (chatMsg.MediaPaths?.length || 0) > 0 || !!chatMsg.MediaPath
+                    const optimisticHasImages = !echoHasImages && Array.isArray(optimistic.content) &&
+                      (optimistic.content as ContentBlock[]).some(b => (b as {type:string}).type === 'image')
+                    const mergedMsg = optimisticHasImages
+                      ? { ...chatMsg, content: optimistic.content } // preserve base64 until poll patches MediaPath
+                      : chatMsg
                     const next = [...prev]
-                    next[optimisticIdx] = chatMsg
+                    next[optimisticIdx] = mergedMsg
                     pendingOptimisticIdRef.current = null
                     return next
                   }
@@ -1266,7 +1638,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     void fetch(`${API}/api/session-autoname`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: slim }),
+      body: JSON.stringify({ messages: slim, model: localStorage.getItem('octis-rename-model') || undefined }),
     }).then((r) => r.json()).then((data: { label?: string }) => {
       const label = data.label
       if (!label) return
@@ -1290,9 +1662,9 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     }).catch(() => { /* silently fail - label stays as session key */ })
   }, [autoRenamed, sessionKey, messages, send, setSessions])
 
-  useEffect(() => {
-    autoRename()
-  }, [autoRename])
+  // Auto-rename is intentionally NOT fired automatically here.
+  // It must be triggered manually via the ✨ star button in the pane header.
+  // Removing the auto-fire useEffect prevents silent token burns on every session open.
 
   useEffect(() => {
     // Skip auto-scroll when we just loaded older messages (useLayoutEffect handled that)
@@ -1369,6 +1741,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     // OpenClaw native format: {type:'image', data:..., mimeType:...}
     const directData = block.data as string | undefined
     const directMime = (block.mimeType || block.media_type) as string | undefined
+    const API_BASE = (window as {VITE_API_URL?: string}).VITE_API_URL || import.meta.env.VITE_API_URL || ''
     let imgSrc = ''
     if (src?.type === 'base64' && src.data) {
       imgSrc = `data:${src.media_type || 'image/png'};base64,${src.data}`
@@ -1376,10 +1749,24 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
       imgSrc = src.url
     } else if (directData) {
       imgSrc = `data:${directMime || 'image/png'};base64,${directData}`
+    } else if (src?.type === 'file' && (src as Record<string,unknown>).path) {
+      const filePath = (src as Record<string,unknown>).path as string
+      const filename = filePath.split('/').pop() || ''
+      imgSrc = `${API_BASE}/api/media/${encodeURIComponent(filename)}`
+    } else if ((block.path || block.file_path) as string | undefined) {
+      const filePath = (block.path || block.file_path) as string
+      const filename = filePath.split('/').pop() || ''
+      imgSrc = `${API_BASE}/api/media/${encodeURIComponent(filename)}`
     }
-    return imgSrc
-      ? <img key={key} src={imgSrc} alt="image" className="max-w-full rounded-lg my-1 max-h-64 object-contain" />
-      : <span key={key} className="text-[#6b7280] text-xs italic">[Image]</span>
+    if (!imgSrc) return null
+    return (
+      <div key={key} className="my-1 cursor-pointer rounded-xl overflow-hidden inline-block" style={{ maxWidth: 220, maxHeight: 180 }}
+        onClick={() => setLightboxSrc(imgSrc)}>
+        <img src={imgSrc} alt="image" className="w-full h-full object-cover hover:opacity-90 transition-opacity"
+          style={{ maxWidth: 220, maxHeight: 180 }}
+          onError={(e) => { (e.target as HTMLImageElement).parentElement!.style.display = 'none' }} />
+      </div>
+    )
   }
 
   const API = (window as {VITE_API_URL?: string}).VITE_API_URL ||
@@ -1551,7 +1938,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
         return <div className="flex items-center gap-2 bg-[#2a3142] rounded-lg px-3 py-2 my-1 max-w-xs"><span className="text-2xl">📄</span><span className="text-xs text-[#6b7280]">PDF attachment</span></div>
       }
       if (hasImageBlock) {
-        return <span className="text-[#6b7280] text-xs italic">[Image attachment]</span>
+        return null  // content-block image — MediaPaths render handles the actual preview
       }
       return <span className="text-[#6b7280] text-xs italic">[Attachment]</span>
     }
@@ -1835,7 +2222,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
       const res = await fetch(`${API}/api/session-autoname`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: slim }),
+        body: JSON.stringify({ messages: slim, model: localStorage.getItem('octis-rename-model') || undefined }),
       })
       const data = await res.json() as { label?: string; error?: string }
       const label = data.label
@@ -1860,23 +2247,25 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     }
   }
 
-  // Helper: send a quick-action message without adding an optimistic to the local state.
-  // The poll will surface the message naturally. The thinking indicator confirms it was sent.
+  // Helper: send a quick-action message with an optimistic entry so it appears immediately.
+  // Same pattern as handleSend — the poll/WS echo will confirm + replace it.
   const sendQuickAction = (msg: string, prefix: string) => {
     if (!sessionKey) return
-    sendChat({ sessionKey, message: msg, deliver: false, idempotencyKey: `octis-${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}` })
-    const ok = true // sendChat handles WS + HTTP fallback
-    if (ok) {
-      setIsWorking(true)
-      setWorkingTool(null)
-      setLastRole(sessionKey, 'user')
-      lastSentRef.current = Date.now()
-      preSendCountRef.current = messages.filter(m => typeof m.id !== 'number').length
-      preSendCostRef.current = sessions.find((s: Session) => s.key === sessionKey)?.estimatedCostUsd || 0
-      if (sessionKey) markSessionStreaming(sessionKey)
-      if (workingTimeoutRef.current) clearTimeout(workingTimeoutRef.current)
-      workingTimeoutRef.current = setTimeout(() => { setIsWorking(false); setWorkingTool(null) }, 90000)
-    }
+    const idempotencyKey = `octis-${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    sendChat({ sessionKey, message: msg, deliver: false, idempotencyKey })
+    // Add optimistic so message is visible immediately (avoids "message missing" race)
+    const optimisticId = Date.now()
+    pendingOptimisticIdRef.current = optimisticId
+    setMessages(prev => [...prev, { role: 'user', content: msg, id: optimisticId }])
+    setIsWorking(true)
+    setWorkingTool(null)
+    setLastRole(sessionKey, 'user')
+    lastSentRef.current = Date.now()
+    preSendCountRef.current = messages.filter(m => typeof m.id !== 'number').length
+    preSendCostRef.current = sessions.find((s: Session) => s.key === sessionKey)?.estimatedCostUsd || 0
+    if (sessionKey) markSessionStreaming(sessionKey)
+    if (workingTimeoutRef.current) clearTimeout(workingTimeoutRef.current)
+    workingTimeoutRef.current = setTimeout(() => { setIsWorking(false); setWorkingTool(null) }, 90000)
   }
 
   const handleBriefMe    = () => sendQuickAction(getQuickCommands().brief, 'brief')
@@ -2051,16 +2440,6 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                     title={sessionKey}
                   >
                     {displayName}
-                    {(() => {
-                      const m = sessionKey?.match(/^agent:([^:]+):/) 
-                      const agentId = m?.[1] || 'main'
-                      const agent = agents.find(a => a.id === agentId)
-                      return agent ? (
-                        <span className="ml-2 text-xs opacity-60" title={`Powered by ${agent.name} (${agentId})`}>
-                          {agent.emoji} {agent.name}
-                        </span>
-                      ) : null
-                    })()}
                   </span>
                   <button
                     className="opacity-65 hover:opacity-100 transition-opacity text-[11px] text-[#6b7280] hover:text-indigo-400 shrink-0 px-0.5"
@@ -2089,6 +2468,20 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               </span>
             )}
             <SessionCostBadge sessionKey={sessionKey} />
+            <ModelBadge 
+              sessionKey={sessionKey} 
+              onModelSwitch={(modelName) => {
+                const notificationMsg = {
+                  id: `model-switch-${Date.now()}`,
+                  role: 'assistant' as const,
+                  content: `Model switched to ${modelName}`,
+                  ts: new Date().toISOString(),
+                  __localOnly: true
+                }
+                setMessages(prev => [...prev, notificationMsg])
+              }}
+            />
+            <ProjectDropdown sessionKey={sessionKey} />
             <button
               onClick={onClose}
               className="h-6 w-6 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-xs text-[#6b7280] hover:text-red-400 shrink-0"
@@ -2279,11 +2672,32 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               const msgTs = getMsgTs(msg)
               const showTs = msgTs > 0
               const msgKey = msg.id !== undefined ? String(msg.id) : String(getMsgTs(msg) || `${msg.role}-${i}`)
+              // Model switch detection — render as divider annotation instead of a bubble
+              const msgText = extractText(msg.content)
+              const isModelSwitch = (
+                /^Model switched to /i.test(msgText) ||
+                /model (set|switched|now using|changed) to/i.test(msgText) ||
+                /^(switching|fallback|now using|using) (model|claude|gemini|gpt)/i.test(msgText) ||
+                /\/(model|switch) /i.test(msgText) ||
+                /fallback.*model/i.test(msgText) ||
+                /switch.*model/i.test(msgText)
+              ) && msgText.length < 200
+
               return (
               <React.Fragment key={msgKey}>
+              {isModelSwitch && (
+                <div className="flex items-center gap-2 px-4 py-1 my-1">
+                  <div className="flex-1 h-px bg-[#2a3142]" />
+                  <span className="text-[10px] text-[#6366f1] font-mono flex items-center gap-1">
+                    <span>⚡</span>
+                    <span>{msgText.slice(0, 80)}</span>
+                  </span>
+                  <div className="flex-1 h-px bg-[#2a3142]" />
+                </div>
+              )}
               <div
                 data-msg-key={msgKey}
-                className={`flex gap-2 items-end ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                className={`flex gap-2 items-end ${isModelSwitch ? 'hidden' : ''} ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
                 onMouseEnter={() => setHoveredMsgKey(msgKey)}
                 onMouseLeave={() => setHoveredMsgKey(null)}
               >
@@ -2291,49 +2705,55 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                 {msg.role === 'user' && (
                   <button
                     onClick={() => setReplyingTo({ id: msg.id, role: 'user', preview: stripReplyCtxText(extractText(msg.content)).slice(0, 120) })}
-                    className={`bg-transparent border-0 outline-none text-[#6b7280] hover:text-[#a5b4fc] transition-all duration-150 shrink-0 mb-2 leading-none select-none p-1 ${hoveredMsgKey === msgKey ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
-                    style={{ fontFamily: 'inherit' }}
+                    className={`bg-transparent border-0 outline-none text-[#a0aec0] hover:text-white transition-all duration-100 shrink-0 mb-2 leading-none select-none p-0 text-base ${hoveredMsgKey === msgKey ? 'opacity-70 hover:opacity-100' : 'opacity-0 pointer-events-none'}`}
                     title="Reply"
-                  >{'\u21A9\uFE0E'}</button>
+                  >{'\u21A9'}</button>
                 )}
                 <div
                   className={`max-w-[85%] px-3 py-2 rounded-xl ${
                     msg.role === 'user'
-                      ? 'bg-[#6366f1] text-white rounded-br-sm text-sm'
+                      ? 'bg-[#6366f1] text-white rounded-br-sm text-sm octis-user-bubble'
                       : 'bg-[#1e2330] text-[#e8eaf0] rounded-bl-sm'
                   }`}
                   style={highlightedMsgKey === msgKey ? { animation: 'octisFlash 1.4s ease-out forwards' } : {}}
                 >
                   {/* Render gateway-stored media attachments (MediaPath/MediaPaths from chat.send) */}
-                  {msg.MediaPaths && msg.MediaPaths.length > 0
-                    ? msg.MediaPaths.map((p, i) => {
-                        const filename = p.split('/').pop() || ''
-                        const mime = (msg.MediaTypes?.[i] || msg.MediaType || '')
-                        const src = `${API}/api/media/${encodeURIComponent(filename)}`
-                        return mime.includes('pdf')
-                          ? <a key={i} href={src} target="_blank" rel="noopener noreferrer"
-                              className="flex items-center gap-2 bg-[#4f51c0] rounded-lg px-3 py-2 my-1 max-w-xs no-underline">
+                  {/* ─ Media attachments: grid thumbnails + lightbox ──────────────────────────── */}
+                  {(() => {
+                    const paths: string[] = msg.MediaPaths && msg.MediaPaths.length > 0
+                      ? msg.MediaPaths
+                      : msg.MediaPath ? [msg.MediaPath] : []
+                    if (paths.length === 0) return null
+                    const count = paths.length
+                    // Thumb size: 1 image = large, 2–4 = medium grid, 5+ = small grid
+                    const thumbSize = count === 1 ? 200 : count <= 4 ? 110 : 80
+                    return (
+                      <div className="flex flex-wrap gap-1 my-1" style={{ maxWidth: count === 1 ? 210 : Math.min(count, 3) * (thumbSize + 4) + 4 }}>
+                        {paths.map((p, i) => {
+                          const filename = p.split('/').pop() || ''
+                          const mime = msg.MediaPaths ? (msg.MediaTypes?.[i] || msg.MediaType || '') : (msg.MediaType || '')
+                          const src = `${API}/api/media/${encodeURIComponent(filename)}`
+                          if (mime.includes('pdf')) {
+                            return <a key={i} href={src} target="_blank" rel="noopener noreferrer"
+                              className="flex items-center gap-2 bg-[#4f51c0] rounded-lg px-3 py-2 max-w-xs no-underline">
                               <span className="text-2xl">📄</span>
                               <span className="text-xs text-white truncate">{filename}</span>
                             </a>
-                          : <img key={i} src={src} alt="attachment" className="max-w-full rounded-lg my-1 max-h-64 object-contain"
-                              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
-                      })
-                    : msg.MediaPath
-                      ? (() => {
-                          const filename = msg.MediaPath.split('/').pop() || ''
-                          const src = `${API}/api/media/${encodeURIComponent(filename)}`
-                          return (msg.MediaType || '').includes('pdf')
-                            ? <a href={src} target="_blank" rel="noopener noreferrer"
-                                className="flex items-center gap-2 bg-[#4f51c0] rounded-lg px-3 py-2 my-1 max-w-xs no-underline">
-                                <span className="text-2xl">📄</span>
-                                <span className="text-xs text-white truncate">{filename}</span>
-                              </a>
-                            : <img src={src} alt="attachment" className="max-w-full rounded-lg my-1 max-h-64 object-contain"
-                                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
-                        })()
-                      : null
-                  }
+                          }
+                          return (
+                            <div key={i}
+                              className="cursor-pointer rounded-lg overflow-hidden flex-shrink-0 hover:opacity-90 transition-opacity"
+                              style={{ width: thumbSize, height: thumbSize }}
+                              onClick={() => setLightboxSrc(src)}
+                            >
+                              <img src={src} alt="attachment" className="w-full h-full object-cover"
+                                onError={(e) => { (e.target as HTMLImageElement).parentElement!.style.display = 'none' }} />
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )
+                  })()}
                   {/* Reply quote bubble — shown when message starts with reply context */}
                   {(() => {
                     const rc = getReplyCtx(msg.content)
@@ -2396,10 +2816,9 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                 {msg.role === 'assistant' && (
                   <button
                     onClick={() => setReplyingTo({ id: msg.id, role: 'assistant', preview: stripReplyCtxText(extractText(msg.content)).slice(0, 120) })}
-                    className={`bg-transparent border-0 outline-none text-[#6b7280] hover:text-[#a5b4fc] transition-all duration-150 shrink-0 mb-2 leading-none select-none p-1 ${hoveredMsgKey === msgKey ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
-                    style={{ fontFamily: 'inherit' }}
+                    className={`bg-transparent border-0 outline-none text-[#a0aec0] hover:text-white transition-all duration-100 shrink-0 mb-2 leading-none select-none p-0 text-base ${hoveredMsgKey === msgKey ? 'opacity-70 hover:opacity-100' : 'opacity-0 pointer-events-none'}`}
                     title="Reply"
-                  >{'\u21A9\uFE0E'}</button>
+                  >{'\u21A9'}</button>
                 )}
               </div>
               </React.Fragment>
@@ -2588,6 +3007,39 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
           onConfirm={handleDelete}
           onCancel={() => setShowDeleteConfirm(false)}
         />
+      )}
+
+      {/* ─ Image lightbox ──────────────────────────────────────────────────────── */}
+      {lightboxSrc && (
+        <div
+          className="fixed inset-0 z-[300] bg-black/90 flex items-center justify-center"
+          onClick={() => setLightboxSrc(null)}
+          onKeyDown={(e) => { if (e.key === 'Escape') setLightboxSrc(null) }}
+          tabIndex={-1}
+          ref={(el) => el?.focus()}
+        >
+          {/* Close button */}
+          <button
+            className="absolute top-4 right-4 z-10 w-9 h-9 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 text-white text-xl transition-colors"
+            onClick={() => setLightboxSrc(null)}
+            title="Close (Esc)"
+          >×</button>
+          {/* Image — click stops propagation so clicking image itself doesn’t close */}
+          <img
+            src={lightboxSrc}
+            alt="Full size"
+            className="max-h-[90vh] max-w-[90vw] object-contain rounded-lg shadow-2xl select-none"
+            onClick={(e) => e.stopPropagation()}
+          />
+          {/* Open in new tab */}
+          <a
+            href={lightboxSrc}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="absolute bottom-4 right-4 text-xs text-white/50 hover:text-white/80 transition-colors"
+            onClick={(e) => e.stopPropagation()}
+          >↗ open in new tab</a>
+        </div>
       )}
     </div>
   )

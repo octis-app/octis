@@ -11,7 +11,6 @@ export interface Session {
   id?: string
   sessionId?: string
   label?: string
-  channel?: string
   cost?: number
   updatedAt?: string | number
   lastActivity?: string | number
@@ -154,6 +153,9 @@ function autoTagSlackSessions(sessions: Session[]): void {
     for (const s of sessions) {
       if (s.key.includes(':slack:') && !projectStore.tags[s.key]?.project) {
         projectStore.setTag(s.key, 'Slack')
+      }
+      if (/whatsapp/i.test(s.key) && !projectStore.tags[s.key]?.project) {
+        projectStore.setTag(s.key, 'WhatsApp')
       }
     }
   }, 0)
@@ -308,6 +310,8 @@ export const useGatewayStore = create<GatewayState>()(
         idempotencyKey?: string
         deliver?: boolean
         attachments?: { type: string; mimeType: string; content: string }[]
+        model?: string
+        provider?: string
       }): Promise<{ ok: boolean; via: 'ws' | 'http'; runId?: string }> => {
         const { ws, connected } = get()
         const API = (import.meta as Record<string, unknown>).env

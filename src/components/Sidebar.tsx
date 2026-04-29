@@ -417,7 +417,11 @@ function ProjectGroup({ name, slug, sessions, activePanes, paneCount, onPin, onR
   onProjectDrop?: () => void
 }) {
   const { getStatus } = useSessionStore()
-  const [open, setOpen] = useState(true)
+  const storageKey = `octis-group-open-${name}`
+  const [open, setOpen] = useState(() => {
+    const saved = localStorage.getItem(storageKey)
+    return saved === null ? true : saved === 'true'
+  })
 
   // Bubble up highest-urgency status
   const order: SessionStatus[] = ['working', 'stuck', 'active', 'quiet']
@@ -440,7 +444,7 @@ function ProjectGroup({ name, slug, sessions, activePanes, paneCount, onPin, onR
       onDrop={(e) => { e.preventDefault(); onProjectDrop?.() }}
     >
       <button
-        onClick={() => setOpen(o => !o)}
+        onClick={() => setOpen(o => { const next = !o; localStorage.setItem(storageKey, String(next)); return next })}
         className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg transition-colors text-left ${
           isDragOver ? 'bg-[#2a2f5a] text-[#818cf8]' : 'hover:bg-[#1e2330]'
         }`}
@@ -485,6 +489,27 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     return () => clearInterval(t)
   }, [])
   const { connected, send, agentId } = useGatewayStore()
+  // Track last WS message received — used by zombie watchdog below
+  const lastRxRef = useRef<number>(Date.now())
+  useEffect(() => {
+    const unsub = useGatewayStore.getState().subscribe(() => { lastRxRef.current = Date.now() })
+    return unsub
+  }, [])
+  // Desktop zombie watchdog: mirrors MobileApp — if connected but 60s of WS silence, force reconnect.
+  // The keepalive ping fires every 45s, so 60s silence = ping response never came = dead connection.
+  // Without this, the live indicator stays green forever after OpenClaw goes offline.
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (!useGatewayStore.getState().connected) return
+      if (document.visibilityState !== 'visible') return
+      if (Date.now() - lastRxRef.current > 60_000) {
+        console.log('[octis] Sidebar watchdog: 60s silence — zombie TCP, reconnecting')
+        useGatewayStore.setState({ _reconnectAttempts: 0 })
+        useGatewayStore.getState().forceReconnect()
+      }
+    }, 30_000)
+    return () => clearInterval(t)
+  }, [])
   const { getTag, getProjects, projectMeta, setProjectMeta } = useProjectStore()
   const { getLabel } = useLabelStore()
   const { hide: hideSession, unhide: unhideSession } = useHiddenStore()
@@ -768,13 +793,36 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
   }
 
   const restoreSessionWithProject = async (key: string) => {
+    // Grab session data BEFORE unhide removes it from hiddenSessions
+    const hiddenSession = useSessionStore.getState().hiddenSessions.find(s => s.key === key)
     unhideSession(key)
+    // Remove from hiddenSessions immediately — do NOT wait for a server round-trip.
+    // Calling hydrateHiddenFromServer() right after unhide races with pushHideToServer
+    // (async, not awaited), causing the server to return the session as still-hidden,
+    // which adds it back to hiddenSessions and makes Archives re-show it instantly.
+    useSessionStore.setState(s => ({
+      hiddenSessions: s.hiddenSessions.filter(h => h.key !== key)
+    }))
+    // Re-insert session into the visible sessions list.
+    // unhideSession only removes it from the hidden set — it doesn't move it back into sessions[].
+    const currentSessions = useSessionStore.getState().sessions
+    const alreadyVisible = currentSessions.some(s => s.key === key)
+    if (!alreadyVisible) {
+      const sessionToAdd = hiddenSession || ({ key } as Session)
+      useSessionStore.getState().setSessions([sessionToAdd, ...currentSessions])
+    }
+    // Restore project tag. API returns a map { sessionKey: projectSlug }, NOT an array.
     try {
       const r = await authFetch(`${API}/api/session-projects`)
       if (r.ok) {
-        const rows: { session_key: string; project: string }[] = await r.json()
-        const row = rows.find(r => r.session_key === key)
-        if (row?.project) useProjectStore.getState().setTag(key, row.project)
+        const map = await r.json() as Record<string, string>
+        const project = map[key]
+        if (project) {
+          useProjectStore.getState().setTag(key, project)
+        } else {
+          // No stored project — clear any stale tag so session lands in "untagged"
+          useProjectStore.getState().setTag(key, '')
+        }
       }
     } catch { /* best-effort */ }
   }
@@ -783,7 +831,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     const keys = Array.from(selectedArchive)
     setSelectedArchive(new Set())
     for (const key of keys) await restoreSessionWithProject(key)
-    void hydrateHiddenFromServer()
+    // restoreSessionWithProject handles hiddenSessions cleanup; no hydrateHiddenFromServer needed.
   }
 
   const handleBulkArchiveDelete = () => {
@@ -860,8 +908,6 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
   const isAgentSession = (s: Session) => {
     const key = (s.key || '').toLowerCase()
     if (key.includes(':subagent:')) return true
-    // Hide uninitialized gateway sessions (WebSocket handshake artifacts with no real interaction)
-    if (s.channel === 'unknown') return true
     const lbl = getLabel(s.key, s.label || '')
     if (lbl.startsWith('Continue where you left off')) return true
     return false
@@ -887,7 +933,8 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     if (hideAgentSessions && isAgentSession(s)) return false
     if (isHiddenByProject(s)) return false
     const status = getStatus(s)
-    if (filter !== 'all' && status !== filter) return false
+    // Always show working sessions regardless of filter — never lose a running session
+    if (filter !== 'all' && status !== filter && status !== 'working') return false
     if (search) {
       const q = search.toLowerCase()
       const tag = getTag(s.key)
@@ -1249,7 +1296,9 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
                       onArchive={() => {}}
                       onUnarchive={async (key) => {
                         await restoreSessionWithProject(key)
-                        void hydrateHiddenFromServer()
+                        // NOTE: do NOT call hydrateHiddenFromServer() here — it races with
+                        // pushHideToServer (async) and adds the session back to Archives.
+                        // restoreSessionWithProject already removes it from hiddenSessions directly.
                       }}
                       onDelete={handleDeleteRequest}
                       onContinue={handleContinue}
@@ -1296,7 +1345,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
                     authFetch(`${API}/api/session-projects`, {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ sessionKey: key, projectTag: p.slug }),
+                      body: JSON.stringify({ sessionKey: key, projectTag: p.slug, skipInject: true }),
                     }).catch(() => {})
                     setPendingPaneKey(key)
                   } catch (e) { console.error('Failed to create session:', e) }

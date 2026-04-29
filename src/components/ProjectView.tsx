@@ -3,8 +3,6 @@ import { useAuth } from '../lib/auth'
 import { useSessionStore, useProjectStore, useLabelStore, useHiddenStore, useGatewayStore, Session } from '../store/gatewayStore'
 import { useAuthStore } from '../store/authStore'
 import { authFetch } from '../lib/authFetch'
-import InlineAgentPicker from './InlineAgentPicker'
-import { Agent } from './AgentPicker'
 import ChatPane from './ChatPane'
 import type { Project } from './ProjectsGrid'
 
@@ -35,17 +33,6 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
     setActiveSession(null)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.slug])
-
-  const mainAgentId = useAuthStore(s => s.mainAgentId) || 'main'
-  const [agents, setAgents] = useState<Agent[]>([])
-  const [showAgentPicker, setShowAgentPicker] = useState(false)
-
-  useEffect(() => {
-    authFetch(`${API}/api/agents`)
-      .then(r => r.json())
-      .then((d: { agents?: Agent[] }) => setAgents(d.agents || []))
-      .catch(() => {})
-  }, [])
   const [tagging, setTagging] = useState<string | null>(null) // session key being tagged
   const [editingSessionKey, setEditingSessionKey] = useState<string | null>(null)
   const [editingLabelValue, setEditingLabelValue] = useState('')
@@ -148,32 +135,7 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
   }, [])
 
   // Create a brand-new session in this project
-  const handleNewSession = async (agentId?: string) => {
-    const effectiveAgent = agentId || mainAgentId
-    if (effectiveAgent !== mainAgentId) {
-      // Non-primary agent: create real session via API
-      const res = await authFetch(`${API}/api/sessions/create`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agentId: effectiveAgent }),
-      })
-      const data = await res.json()
-      const realKey = data.sessionKey || data.key
-      if (realKey) {
-        useAuthStore.getState().claimSession(realKey)
-        setTag(realKey, project.slug)
-        const newSession: Session = { key: realKey, label: `New ${project.name} session`, sessionKey: realKey } as Session
-        setSessions([newSession, ...sessions])
-        const freshPanes: (string | null)[] = [null, null, null, null, null, null, null, null]
-        freshPanes[0] = realKey
-        setLocalPanes(freshPanes)
-        setActiveSession(realKey)
-      }
-      setShowAgentPicker(false)
-      return
-    }
-    // Original flow for primary agent
-    setShowAgentPicker(false)
+  const handleNewSession = async () => {
     const key = `session-${Date.now()}`
     useAuthStore.getState().claimSession(key)
     const label = `New ${project.name} session`
@@ -190,7 +152,7 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-      body: JSON.stringify({ sessionKey: key, projectTag: project.slug }),
+      body: JSON.stringify({ sessionKey: key, projectTag: project.slug, skipInject: true }),
     })
     setTag(key, project.slug)
     // Defer context injection until user actually sends a message
@@ -316,21 +278,13 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
               <div className="text-[#4b5563] text-[10px]">{projectSessions.length} session{projectSessions.length !== 1 ? 's' : ''}</div>
             </div>
             <button
-              onClick={() => agents.length > 1 ? setShowAgentPicker(v => !v) : handleNewSession()}
+              onClick={handleNewSession}
               title="New session in this project"
               className="w-7 h-7 rounded-lg bg-[#6366f1] hover:bg-[#818cf8] text-white flex items-center justify-center text-lg font-light transition-colors shrink-0"
             >
               +
             </button>
           </div>
-        {showAgentPicker && agents.length > 1 && (
-          <InlineAgentPicker
-            agents={agents}
-            selectedId={mainAgentId}
-            onSelect={(id) => handleNewSession(id)}
-            onClose={() => setShowAgentPicker(false)}
-          />
-        )}
         </div>
 
         {/* Session list */}
@@ -394,10 +348,32 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
                     )}
                     {isArchived && editingSessionKey !== s.key && (
                       <button
-                        onClick={(e) => {
+                        onClick={async (e) => {
                           e.stopPropagation()
-                          unhideSession(s.key)
+                          const key = s.key
+                          // Grab session before unhide removes it from hiddenSessions
+                          const hiddenSession = useSessionStore.getState().hiddenSessions.find(h => h.key === key)
+                          unhideSession(key)
                           if ((s as any).id) unhideSession((s as any).id)
+                          // Remove from hiddenSessions immediately (avoid server round-trip race)
+                          useSessionStore.setState(st => ({
+                            hiddenSessions: st.hiddenSessions.filter(h => h.key !== key)
+                          }))
+                          // Re-insert into visible sessions list
+                          const current = useSessionStore.getState().sessions
+                          if (!current.some(x => x.key === key)) {
+                            useSessionStore.getState().setSessions([hiddenSession || s, ...current])
+                          }
+                          // Restore project tag (API returns map, NOT array)
+                          try {
+                            const r = await authFetch(`${API}/api/session-projects`)
+                            if (r.ok) {
+                              const map = await r.json() as Record<string, string>
+                              const proj = map[key]
+                              if (proj) setTag(key, proj)
+                              else setTag(key, '') // untagged
+                            }
+                          } catch { /* best-effort */ }
                         }}
                         className="absolute right-1.5 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 text-xs text-[#4b5563] hover:text-[#6366f1] transition-all px-1.5 py-0.5 rounded"
                         title="Restore session"
@@ -416,7 +392,7 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
                   + Add existing
                 </button>
                 <button
-                  onClick={() => agents.length > 1 ? setShowAgentPicker(v => !v) : handleNewSession()}
+                  onClick={handleNewSession}
                   className="text-[10px] text-[#6366f1] hover:text-[#818cf8] transition-colors ml-auto"
                 >
                   + New session

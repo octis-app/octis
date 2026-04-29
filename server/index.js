@@ -1,7 +1,7 @@
 import express from 'express'
 import cors from 'cors'
 import fs from 'fs/promises'
-import { readFileSync, mkdirSync, writeFileSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync } from 'fs'
 import path from 'path'
 import { createRequire } from 'module'
 import crypto from 'crypto'
@@ -300,15 +300,15 @@ app.get('/api/agents', requireAuth, (req, res) => {
       if (m.includes('claude-sonnet')) return 'Claude Sonnet'
       if (m.includes('claude-haiku')) return 'Claude Haiku'
       if (m.includes('claude-opus')) return 'Claude Opus'
-      if (m.includes('deepseek-v4')) return 'DeepSeek V4'
+      if (m.includes('deepseek')) return 'DeepSeek'
       if (m.includes('gpt-4o-mini')) return 'GPT-4o mini'
-      if (m.includes('gemini-2.5-flash')) return 'Gemini Flash'
-      if (m.includes('gemini-2.5-pro')) return 'Gemini Pro'
-      if (m.includes('qwen3-coder')) return 'Qwen3 Coder'
+      if (m.includes('gemini-2.5-flash') || m.includes('gemini-flash')) return 'Gemini Flash'
+      if (m.includes('gemini-2.5-pro') || m.includes('gemini-pro')) return 'Gemini Pro'
+      if (m.includes('qwen')) return 'Qwen'
       return m.split('/').pop() || m
     }
 
-    const primaryAgentId = req.user.agent_id || 'main'
+    const primaryAgentId = req.user?.agent_id || 'main'
 
     let merged
     if (liveAgents.length > 0) {
@@ -319,7 +319,6 @@ app.get('/api/agents', requireAuth, (req, res) => {
           name: override.name || la.name || la.id,
           emoji: override.emoji || '🤖',
           description: override.description || '',
-          // Agents in agents.json use their saved value; unconfigured agents default to hidden
           visibleInPicker: Object.keys(override).length > 0 ? (override.visibleInPicker ?? true) : false,
           soul: override.soul || '',
           model: friendlyModel(la.model?.primary || la.model || defaultModel),
@@ -327,15 +326,15 @@ app.get('/api/agents', requireAuth, (req, res) => {
         }
       })
     } else {
-      merged = staticAgents.map(a => ({ 
+      merged = staticAgents.map(a => ({
         id: a.id,
         name: a.name || a.id,
-        emoji: a.emoji || '🤖', 
+        emoji: a.emoji || '🤖',
         description: a.description || '',
         visibleInPicker: a.visibleInPicker ?? true,
         soul: a.soul || '',
-        model: a.description?.match(/—\s*(.+)/)?.[1] || 'Default', 
-        isPrimary: a.id === primaryAgentId 
+        model: a.description?.match(/—\s*(.+)/)?.[1] || 'Default',
+        isPrimary: a.id === primaryAgentId
       }))
     }
 
@@ -350,57 +349,21 @@ app.patch('/api/agents/:id/meta', requireAuth, (req, res) => {
     const { emoji, description, name, model, soul, visibleInPicker } = req.body
     const agentsFile = path.join(__serverDir, 'config', 'agents.json')
     const raw = JSON.parse(readFileSync(agentsFile, 'utf8'))
-    const agentsList = Array.isArray(raw) ? raw : (raw.agents || [])
-    const renameAgentId = raw.renameAgentId || 'fast'
-    
+    const isList = Array.isArray(raw)
+    let agentsList = isList ? raw : (raw.agents || [])
     const idx = agentsList.findIndex(a => a.id === req.params.id)
     if (idx === -1) {
-      agentsList.push({ 
-        id: req.params.id, 
-        name: name || req.params.id, 
-        emoji: emoji || '🤖', 
-        description: description || '', 
-        visibleInPicker: visibleInPicker ?? true, 
-        soul: soul || '' 
-      })
+      agentsList.push({ id: req.params.id, name: name || req.params.id, emoji: emoji || '🤖', description: description || '', visibleInPicker: visibleInPicker ?? true })
     } else {
       if (emoji !== undefined) agentsList[idx].emoji = emoji
       if (description !== undefined) agentsList[idx].description = description
       if (name !== undefined) agentsList[idx].name = name
       if (soul !== undefined) agentsList[idx].soul = soul
+      if (model !== undefined) agentsList[idx].model = model
       if (visibleInPicker !== undefined) agentsList[idx].visibleInPicker = visibleInPicker
-      // model change: update openclaw.json agents.list[id].model
-      if (model !== undefined) {
-        agentsList[idx].model = model  // store in agents.json for display
-        try {
-          const clawPath = path.join(HOME, '.openclaw', 'openclaw.json')
-          const claw = JSON.parse(readFileSync(clawPath, 'utf8'))
-          const agentEntry = (claw.agents?.list || []).find(a => a.id === req.params.id)
-          if (agentEntry) {
-            agentEntry.model = model
-            writeFileSync(clawPath, JSON.stringify(claw, null, 2))
-          }
-        } catch (e) {
-          console.warn('[octis] Could not update openclaw.json model:', e.message)
-        }
-      }
     }
-    
-    writeFileSync(agentsFile, JSON.stringify({ renameAgentId, agents: agentsList }, null, 2))
-    res.json({ ok: true })
-  } catch (e) {
-    res.status(500).json({ error: e.message })
-  }
-})
-
-app.patch('/api/agents-config', requireAuth, (req, res) => {
-  try {
-    const { renameAgentId } = req.body
-    const agentsFile = path.join(__serverDir, 'config', 'agents.json')
-    const raw = JSON.parse(readFileSync(agentsFile, 'utf8'))
-    const agentsList = Array.isArray(raw) ? [] : (raw.agents || [])
-    const config = { renameAgentId: renameAgentId || raw.renameAgentId || 'fast', agents: agentsList }
-    writeFileSync(agentsFile, JSON.stringify(config, null, 2))
+    const toWrite = isList ? agentsList : { ...raw, agents: agentsList }
+    writeFileSync(agentsFile, JSON.stringify(toWrite, null, 2))
     res.json({ ok: true })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -473,7 +436,6 @@ app.post('/api/session-autoname', async (req, res) => {
 
     const prompt = `Generate a 3-5 word session title for this conversation. Reply with ONLY the title — no quotes, no punctuation, no explanation.\nExamples: Octis Sidebar Layout Fixes | Sage GL Batch Push | Centurion Deal Analysis\n\n${excerpt}\n\nTitle:`
 
-    // Use Anthropic Haiku for autoname (no OpenRouter key on this deployment)
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
@@ -604,8 +566,68 @@ app.patch('/api/projects/:id', requireAuth, (req, res) => {
 })
 
 app.delete('/api/projects/:id', requireAuth, (req, res) => {
-  db.prepare('DELETE FROM octis_projects WHERE id = ?').run(req.params.id)
-  res.json({ ok: true })
+  const { id } = req.params
+  const { confirm } = req.query
+  
+  // Get project slug and count associated sessions
+  const project = db.prepare('SELECT slug FROM octis_projects WHERE id = ?').get(id)
+  if (!project) return res.status(404).json({ error: 'Project not found' })
+  
+  // Apply same visibility filters as frontend (ProjectsGrid/MobileProjectView):
+  // - Agent isolation: only count sessions belonging to this user's mainAgentId
+  // - Exclude background subagent sessions (key contains ':subagent:')
+  // - Exclude heartbeat cron sessions
+  // - Exclude thread sessions (Slack/Discord threads have separate session keys but don't count as "sessions" in UI)
+  // - Exclude "continue where you left off" labeled sessions
+  
+  const mainAgentId = req.user.agent_id || 'main'
+  const agentPrefix = `agent:${mainAgentId}:%`
+  
+  // Count active (non-archived) visible sessions owned by this agent
+  const activeCount = db.prepare(`
+    SELECT COUNT(*) as count FROM octis_session_projects sp
+    LEFT JOIN octis_hidden_sessions hs ON sp.session_key = hs.session_key
+    LEFT JOIN octis_session_labels lbl ON sp.session_key = lbl.session_key
+    WHERE sp.project = ? 
+      AND hs.session_key IS NULL
+      AND sp.session_key LIKE ?
+      AND sp.session_key NOT LIKE '%:subagent:%'
+      AND sp.session_key NOT LIKE '%:heartbeat'
+      AND sp.session_key NOT LIKE '%:thread:%'
+      AND (lbl.label IS NULL OR lbl.label NOT LIKE 'continue where you left off%')
+  `).get(project.slug, agentPrefix).count
+  
+  // Count archived visible sessions owned by this agent
+  const archivedCount = db.prepare(`
+    SELECT COUNT(*) as count FROM octis_session_projects sp
+    INNER JOIN octis_hidden_sessions hs ON sp.session_key = hs.session_key
+    LEFT JOIN octis_session_labels lbl ON sp.session_key = lbl.session_key
+    WHERE sp.project = ?
+      AND sp.session_key LIKE ?
+      AND sp.session_key NOT LIKE '%:subagent:%'
+      AND sp.session_key NOT LIKE '%:heartbeat'
+      AND sp.session_key NOT LIKE '%:thread:%'
+      AND (lbl.label IS NULL OR lbl.label NOT LIKE 'continue where you left off%')
+  `).get(project.slug, agentPrefix).count
+  
+  const totalCount = activeCount + archivedCount
+  
+  // If sessions exist and confirm not sent, return warning
+  if (totalCount > 0 && confirm !== 'true') {
+    return res.json({ 
+      warning: true, 
+      sessionCount: totalCount,
+      activeCount,
+      archivedCount,
+      message: `This project has ${totalCount} session${totalCount !== 1 ? 's' : ''}. Delete anyway?`
+    })
+  }
+  
+  // Delete project and clear all session tags
+  db.prepare('DELETE FROM octis_projects WHERE id = ?').run(id)
+  db.prepare('DELETE FROM octis_session_projects WHERE project = ?').run(project.slug)
+  
+  res.json({ ok: true, removedTags: totalCount })
 })
 
 // ─── Hidden sessions ──────────────────────────────────────────────────────────
@@ -778,16 +800,50 @@ app.get('/api/session-projects', requireAuth, (req, res) => {
   res.json(map)
 })
 
-app.post('/api/session-projects', requireAuth, (req, res) => {
-  const { sessionKey, projectTag } = req.body
+app.post('/api/session-projects', requireAuth, async (req, res) => {
+  const { sessionKey, projectTag, skipInject } = req.body
   if (!sessionKey) return res.status(400).json({ error: 'sessionKey required' })
+  
+  // Get current project to detect if this is a change
+  const current = db.prepare('SELECT project FROM octis_session_projects WHERE session_key = ?').get(sessionKey)
+  const oldProject = current?.project || null
+  
   if (!projectTag) {
+    // Removing from project
     db.prepare('DELETE FROM octis_session_projects WHERE session_key = ?').run(sessionKey)
+    // Inject removal notification only if there WAS a project before
+    if (oldProject && !skipInject) {
+      try {
+        const msg = `This session has been **removed from its project**. It is now unassigned.`
+        await adminGwCall([{ method: 'chat.inject', params: { sessionKey, message: msg, label: '📁 Project' } }])
+      } catch (err) {
+        console.error('[octis] project-remove inject error:', err.message)
+      }
+    }
   } else {
+    // Setting/changing project
     db.prepare(
       `INSERT OR REPLACE INTO octis_session_projects (session_key, project) VALUES (?, ?)`
     ).run(sessionKey, projectTag)
+    
+    // Only inject if this is a CHANGE (not initial set) and skipInject flag is not set
+    // Initial assignment is handled by session-init endpoint (called on first message via pendingProjectInit)
+    if (oldProject && oldProject !== projectTag && !skipInject) {
+      try {
+        const project = db.prepare('SELECT * FROM octis_projects WHERE slug = ?').get(projectTag)
+        if (project) {
+          const { name, emoji, description, memory_file } = project
+          const descLine = description ? `\n${description}` : ''
+          const memLine = memory_file ? `\nContext file: memory/${memory_file}` : ''
+          const msg = `This session has been **moved to the ${emoji} ${name} project**.${descLine}${memLine}\n\nWhen the user asks which project this session is under, answer: **${name}**.`
+          await adminGwCall([{ method: 'chat.inject', params: { sessionKey, message: msg, label: '📁 Project' } }])
+        }
+      } catch (err) {
+        console.error('[octis] project-set inject error:', err.message)
+      }
+    }
   }
+  
   res.json({ ok: true })
 })
 
@@ -845,6 +901,80 @@ app.get('/api/sessions-list', requireAuth, async (req, res) => {
   }
 })
 
+// ─── Enrich image blocks stripped by gateway chat.history ───────────────────
+// The gateway strips base64 data from image blocks for bandwidth efficiency.
+// This helper reads the local JSONL to restore image data for user messages.
+async function enrichImageBlocks(sessionKey, messages) {
+  // Find user messages with image blocks that have empty data
+  const needsEnrich = messages.some(m =>
+    m.role === 'user' && Array.isArray(m.content) &&
+    m.content.some(b => b.type === 'image' && !b.data)
+  )
+  if (!needsEnrich) return messages
+
+  try {
+    // Resolve session UUID from sessions.json
+    const sessionsPath = `${HOME}/.openclaw/agents/main/sessions/sessions.json`
+    let sessionsJson = '{}'
+    try { sessionsJson = await fs.readFile(sessionsPath, 'utf8') } catch {}
+    const sessions = JSON.parse(sessionsJson)
+    const sessionInfo = sessions[sessionKey]
+    const sessionUUID = sessionInfo?.sessionId
+    if (!sessionUUID) return messages
+
+    // Read the JSONL file and build timestamp→content map for image messages
+    const jsonlPath = `${HOME}/.openclaw/agents/main/sessions/${sessionUUID}.jsonl`
+    let jsonlContent = ''
+    try { jsonlContent = await fs.readFile(jsonlPath, 'utf8') } catch { return messages }
+
+    // Build match key from text content — more reliable than timestamp format mismatch
+    // JSONL stores the full OpenClaw envelope (Sender metadata + timestamp prefix),
+    // but chat.history returns only the stripped message text. Strip the envelope first.
+    const stripEnvelope = (text) => {
+      if (!text.includes('Sender (untrusted metadata):')) return text
+      const m = text.match(/\[\w+\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+UTC\]\s*([\s\S]*)$/)
+      return m ? m[1].trim() : text
+    }
+    const textKey = (content, stripEnv = false) => {
+      if (!Array.isArray(content)) {
+        const t = String(content || '')
+        return (stripEnv ? stripEnvelope(t) : t).substring(0, 120)
+      }
+      return content.filter(b => b.type === 'text')
+        .map(b => { const t = String(b.text || ''); return (stripEnv ? stripEnvelope(t) : t).substring(0, 120) })
+        .join('|')
+    }
+
+    const imageMap = new Map() // textKey → full content array with image data
+    for (const line of jsonlContent.split('\n')) {
+      if (!line.trim()) continue
+      try {
+        const evt = JSON.parse(line)
+        if (evt.message?.role === 'user' && Array.isArray(evt.message.content)) {
+          const hasImgData = evt.message.content.some(b => b.type === 'image' && b.data)
+          if (hasImgData) {
+            const key = textKey(evt.message.content, true) // strip envelope for matching
+            if (key) imageMap.set(key, evt.message.content)
+          }
+        }
+      } catch {}
+    }
+    if (imageMap.size === 0) return messages
+
+    return messages.map(m => {
+      if (m.role !== 'user' || !Array.isArray(m.content)) return m
+      const hasEmptyImage = m.content.some(b => b.type === 'image' && !b.data)
+      if (!hasEmptyImage) return m
+      const key = textKey(m.content)
+      const richContent = key && imageMap.get(key)
+      return richContent ? { ...m, content: richContent } : m
+    })
+  } catch (e) {
+    console.error('[octis] enrichImageBlocks error:', e.message)
+    return messages
+  }
+}
+
 // ─── HTTP fallback for chat.history ─────────────────────────────────────
 app.get('/api/chat-history', requireAuth, async (req, res) => {
   try {
@@ -854,7 +984,9 @@ app.get('/api/chat-history', requireAuth, async (req, res) => {
       method: 'chat.history',
       params: { sessionKey, limit: Math.min(Number(limit), 300) }
     }])
-    res.json({ ok: true, messages: result?.messages || [] })
+    const raw = result?.messages || []
+    const messages = await enrichImageBlocks(sessionKey, raw)
+    res.json({ ok: true, messages })
   } catch (err) {
     console.error('[octis] chat-history HTTP error:', err.message)
     res.status(502).json({ ok: false, error: err.message })
@@ -876,6 +1008,23 @@ app.post('/api/chat-send', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('[octis] chat-send HTTP error:', err.message)
     res.status(502).json({ ok: false, error: err.message })
+  }
+})
+
+// ─── Send model-switch annotation message ─────────────────────────────────────
+app.post('/api/model-switch-notify', requireAuth, async (req, res) => {
+  try {
+    const { sessionKey, modelName } = req.body
+    if (!sessionKey || !modelName) return res.status(400).json({ ok: false, error: 'sessionKey and modelName required' })
+    // Send as a regular message that will be detected and rendered as a divider
+    const [result] = await adminGwCall([{
+      method: 'chat.send',
+      params: { sessionKey, message: `Model switched to ${modelName}`, deliver: false }
+    }])
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('[octis] model-switch-notify HTTP error:', err.message)
+    res.status(500).json({ ok: false, error: err.message })
   }
 })
 
@@ -1109,6 +1258,132 @@ app.put('/api/drafts/:sessionKey', requireAuth, (req, res) => {
 })
 
 // Permanently delete session from DB + gateway
+// ─── Model info endpoints ────────────────────────────────────────────────────
+
+const OPENCLAW_CONFIG_PATH = path.join(HOME, '.openclaw/openclaw.json')
+const AUTH_STATE_PATH = path.join(HOME, '.openclaw/agents/main/agent/auth-state.json')
+const SESSIONS_JSON_PATH = path.join(HOME, '.openclaw/agents/main/sessions/sessions.json')
+
+function modelDisplayName(modelId) {
+  if (!modelId) return 'Unknown'
+  const map = {
+    'anthropic/claude-sonnet-4-6': 'Sonnet',
+    'anthropic/claude-sonnet-4-5': 'Sonnet',
+    'anthropic/claude-opus-4-5': 'Opus',
+    'anthropic/claude-opus-4': 'Opus',
+    'anthropic/claude-haiku-4-5': 'Haiku',
+    'anthropic/claude-haiku-4': 'Haiku',
+    'google/gemini-2.0-flash': 'Gemini Flash',
+    'google/gemini-2.0-pro': 'Gemini Pro',
+    'google/gemini-1.5-pro': 'Gemini 1.5 Pro',
+    'google/gemini-1.5-flash': 'Gemini Flash',
+    'openai/gpt-4o': 'GPT-4o',
+    'openai/gpt-4o-mini': 'GPT-4o mini',
+  }
+  if (map[modelId]) return map[modelId]
+  // Fallback: extract the last segment
+  const parts = modelId.split('/')
+  return parts[parts.length - 1] || modelId
+}
+
+function modelProvider(modelId) {
+  if (!modelId) return 'unknown'
+  if (modelId.startsWith('anthropic/')) return 'anthropic'
+  if (modelId.startsWith('google/')) return 'google'
+  if (modelId.startsWith('openai/')) return 'openai'
+  const slash = modelId.indexOf('/')
+  return slash > 0 ? modelId.slice(0, slash) : 'unknown'
+}
+
+// GET /api/session-model?sessionKey=xxx
+app.get('/api/session-model', requireAuth, async (req, res) => {
+  try {
+    const { sessionKey } = req.query
+
+    // Read openclaw.json for default model
+    let defaultModel = 'anthropic/claude-sonnet-4-6'
+    try {
+      const cfg = JSON.parse(await fs.readFile(OPENCLAW_CONFIG_PATH, 'utf8'))
+      defaultModel = cfg?.agents?.defaults?.model?.primary || defaultModel
+    } catch {}
+
+    // Try to read per-session model from sessions.json
+    let sessionModel = defaultModel
+    let isFallback = false
+    if (sessionKey) {
+      try {
+        const sessions = JSON.parse(await fs.readFile(SESSIONS_JSON_PATH, 'utf8'))
+        const sess = sessions[sessionKey]
+        if (sess) {
+          // Prefer modelOverride/providerOverride (set by /model command)
+          // Fall back to modelProvider/model (last-used model)
+          const provider = sess.providerOverride || sess.modelProvider
+          const model = sess.modelOverride || sess.model
+          if (provider && model) {
+            sessionModel = `${provider}/${model}`
+          }
+          // Check if it's a fallback (provider differs from default provider)
+          const defaultProvider = modelProvider(defaultModel)
+          if (provider && provider !== defaultProvider) {
+            isFallback = true
+          }
+        }
+      } catch {}
+    }
+
+    // Validate fallbacks from config
+    let fallbacks = []
+    try {
+      const cfg = JSON.parse(await fs.readFile(OPENCLAW_CONFIG_PATH, 'utf8'))
+      fallbacks = cfg?.agents?.defaults?.model?.fallbacks || []
+    } catch {}
+
+    res.json({
+      model: sessionModel,
+      displayName: modelDisplayName(sessionModel),
+      provider: modelProvider(sessionModel),
+      isFallback,
+      defaultModel,
+      fallbacks,
+    })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// GET /api/provider-health
+app.get('/api/provider-health', requireAuth, async (req, res) => {
+  try {
+    const authState = JSON.parse(await fs.readFile(AUTH_STATE_PATH, 'utf8'))
+    const usageStats = authState?.usageStats || {}
+    const lastGood = authState?.lastGood || {}
+
+    // Build per-provider health summary
+    const providerHealth = {}
+    for (const [profileKey, stats] of Object.entries(usageStats)) {
+      const provider = profileKey.split(':')[0]
+      if (!providerHealth[provider]) {
+        providerHealth[provider] = { errorCount: 0, lastFailureAt: null, healthy: true }
+      }
+      providerHealth[provider].errorCount += (stats.errorCount || 0)
+      if (stats.lastFailureAt) {
+        const current = providerHealth[provider].lastFailureAt
+        if (!current || stats.lastFailureAt > current) {
+          providerHealth[provider].lastFailureAt = stats.lastFailureAt
+        }
+      }
+    }
+    // Mark as unhealthy if errorCount > 0 and lastGood doesn't have this provider
+    for (const [provider, health] of Object.entries(providerHealth)) {
+      health.healthy = health.errorCount === 0 || !!lastGood[provider]
+    }
+
+    res.json({ ok: true, providers: providerHealth, lastGood })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 app.post('/api/session-delete', requireAuth, async (req, res) => {
   const { sessionKey } = req.body
   if (!sessionKey) return res.status(400).json({ error: 'sessionKey required' })
@@ -1218,3 +1493,4 @@ app.listen(PORT, () => {
   console.log(`[octis] Gateway: ${GATEWAY_URL} | token: ${GATEWAY_TOKEN.slice(0, 8)}...`)
   console.log(`[octis] Data: ${path.join(DATA_DIR, 'octis.db')}`)
 })
+

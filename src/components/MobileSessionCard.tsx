@@ -193,7 +193,8 @@ function MobileSessionCard({ session, onOpenFull, onArchive }: MobileSessionCard
     }).catch(() => {})
   }, [autoRenamed, messages, session, getLabel, setLabel, send])
 
-  useEffect(() => { autoRename() }, [autoRename])
+  // Auto-rename is intentionally NOT fired automatically.
+  // Must be triggered manually via the ✨ button to avoid token burns on every session open.
 
   const handleRename = () => {
     const trimmed = renameValue.trim()

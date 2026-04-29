@@ -198,7 +198,22 @@ function AuthenticatedApp({ preloadedConfig }: { preloadedConfig?: GatewayConfig
           }
         } catch {}
         connect()
-        
+        // HTTP sessions pre-fetch: fire in parallel with WS connect so sessions appear
+        // immediately even if WS auth takes a few seconds. WS response will overwrite.
+        void (async () => {
+          try {
+            const agId = data.agentId
+            const url = `${API}/api/sessions-list${agId ? `?agentId=${encodeURIComponent(agId)}` : ''}`
+            const r = await fetch(url, { credentials: 'include' })
+            if (!r.ok) return
+            const d = await r.json() as { ok: boolean; sessions?: Session[] }
+            if (d.ok && d.sessions?.length && !useGatewayStore.getState().connected) {
+              // Only apply if WS hasn't already delivered a fresh list
+              useSessionStore.getState().setSessions(d.sessions)
+            }
+          } catch { /* silent — WS will cover it */ }
+        })()
+
         void hydrateProjects()
         void hydrateHidden()
         void hydrateDrafts()
@@ -446,12 +461,11 @@ const visiblePanes = activePanes.filter((key, idx) => !!key && activePanes.index
   }, [])
 
   useHotkeys([
-    { key: 'n', handler: handleNewSessionHotkey, ignoreInputs: true },
-    { key: 'e', handler: handleArchiveHotkey, ignoreInputs: true },
-    { key: 'r', handler: handleRenameHotkey, ignoreInputs: true },
+    { key: 'n', cmdOrCtrl: true, handler: handleNewSessionHotkey },
+    { key: 'r', cmdOrCtrl: true, handler: handleRenameHotkey },
     { key: 'z', cmdOrCtrl: true, handler: handleUndoArchive },
     { key: 'y', cmdOrCtrl: true, handler: handleRedoArchive },
-    { key: '?', handler: () => setShowHotkeys(v => !v), ignoreInputs: true },
+    { key: '/', cmdOrCtrl: true, shift: true, handler: () => setShowHotkeys(v => !v) },
   ])
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -680,15 +694,16 @@ const visiblePanes = activePanes.filter((key, idx) => !!key && activePanes.index
             <div className="space-y-1 text-sm">
               {([
                 { group: 'Sessions' },
-                { key: 'N', desc: 'New session' },
-                { key: 'E', desc: 'Archive focused pane' },
-                { key: 'R', desc: 'AI auto-rename focused pane' },
+                { key: '⌘N', desc: 'New session' },
+                { key: '⌘R', desc: 'AI auto-rename focused pane' },
                 { group: 'Panes' },
                 { key: '💬 icon (again)', desc: 'Toggle sessions sidebar' },
                 { key: 'all / none', desc: 'Open or close all panes' },
                 { group: 'History' },
                 { key: '⌘Z', desc: 'Undo archive' },
                 { key: '⌘Y', desc: 'Redo archive' },
+                { group: 'Help' },
+                { key: '⌘⇧/', desc: 'Show keyboard shortcuts' },
                 { group: 'Chat' },
                 { key: 'Enter', desc: 'Send message' },
                 { key: 'Shift+Enter', desc: 'New line' },
