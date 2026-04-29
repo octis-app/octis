@@ -310,6 +310,8 @@ export const useGatewayStore = create<GatewayState>()(
         idempotencyKey?: string
         deliver?: boolean
         attachments?: { type: string; mimeType: string; content: string }[]
+        model?: string
+        provider?: string
       }): Promise<{ ok: boolean; via: 'ws' | 'http'; runId?: string }> => {
         const { ws, connected } = get()
         const API = (import.meta as Record<string, unknown>).env

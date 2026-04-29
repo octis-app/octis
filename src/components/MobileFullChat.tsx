@@ -408,8 +408,17 @@ function MobileModelBadge({ sessionKey }: { sessionKey: string }) {
   const switchModel = async (modelId: string) => {
     setOpen(false)
     setSwitching(true)
-    void sendChat({ sessionKey, message: `/model ${modelId}` })
-    setTimeout(() => { void fetchModel(); setSwitching(false) }, 5000)
+    const { ws, connected } = useGatewayStore.getState()
+    // Use sessions.patch to set model override directly
+    if (connected && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'req',
+        id: `model-switch-${Date.now()}`,
+        method: 'sessions.patch',
+        params: { key: sessionKey, model: modelId },
+      }))
+    }
+    setTimeout(() => { void fetchModel(); setSwitching(false) }, 2000)
   }
 
   if (!modelInfo) return null
