@@ -47,7 +47,7 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
   const emojiInputRef = useRef<HTMLInputElement>(null)
 
   // Delete confirmation state
-  const [deleteConfirm, setDeleteConfirm] = useState<{ id: string; name: string; sessionCount: number } | null>(null)
+  const [deleteConfirm, setDeleteConfirm] = useState<{ id: string; name: string; sessionCount: number; activeCount: number; archivedCount: number } | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
 
   // Drag-and-drop reorder state
@@ -147,7 +147,13 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
     
     if (d.warning) {
       // Show confirmation dialog
-      setDeleteConfirm({ id: project.id, name: project.name, sessionCount: d.sessionCount })
+      setDeleteConfirm({ 
+        id: project.id, 
+        name: project.name, 
+        sessionCount: d.sessionCount,
+        activeCount: d.activeCount || 0,
+        archivedCount: d.archivedCount || 0
+      })
       setDeleting(null)
     } else if (d.ok) {
       // Deleted successfully
@@ -535,7 +541,16 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
               <div>
                 <h3 className="text-white font-semibold text-lg">Delete "{deleteConfirm.name}"?</h3>
                 <p className="text-[#9ca3af] text-sm mt-1">
-                  This project has <strong className="text-white">{deleteConfirm.sessionCount} session{deleteConfirm.sessionCount !== 1 ? 's' : ''}</strong>.
+                  This project has <strong className="text-white">{deleteConfirm.sessionCount} session{deleteConfirm.sessionCount !== 1 ? 's' : ''}</strong>
+                  {deleteConfirm.activeCount > 0 && deleteConfirm.archivedCount > 0 && (
+                    <span> ({deleteConfirm.activeCount} active, {deleteConfirm.archivedCount} archived)</span>
+                  )}
+                  {deleteConfirm.activeCount > 0 && deleteConfirm.archivedCount === 0 && (
+                    <span> ({deleteConfirm.activeCount} active)</span>
+                  )}
+                  {deleteConfirm.activeCount === 0 && deleteConfirm.archivedCount > 0 && (
+                    <span> ({deleteConfirm.archivedCount} archived)</span>
+                  )}.
                   The sessions will not be deleted, but their project tags will be removed.
                 </p>
               </div>
