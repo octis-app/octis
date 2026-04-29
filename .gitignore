@@ -10,3 +10,6 @@ server/config/users.json
 src/src.bak-*/
 src-backup-*/
 backups/
+*.log
+.DS_Store
+npm-debug.log*

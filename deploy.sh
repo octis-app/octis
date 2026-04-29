@@ -1,4 +1,5 @@
 #!/bin/bash
+# Deploys to /var/www/octis on the target machine.
 # Octis deploy — VM only
 # Usage: ./deploy.sh
 #

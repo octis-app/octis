@@ -1,6 +1,14 @@
 {
-  "renameAgentId": "main",
   "agents": [
-    { "id": "main", "name": "Ghosty", "emoji": "👻", "description": "Sonnet — default", "visibleInPicker": true, "default": true, "soul": "" }
-  ]
+    {
+      "id": "main",
+      "name": "My Agent",
+      "description": "Default agent",
+      "emoji": "🤖",
+      "default": true,
+      "visibleInPicker": true,
+      "soul": ""
+    }
+  ],
+  "renameAgentId": "fast"
 }
