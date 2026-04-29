@@ -1065,6 +1065,131 @@ app.put('/api/drafts/:sessionKey', requireAuth, (req, res) => {
 })
 
 // Permanently delete session from DB + gateway
+// ─── Model info endpoints ────────────────────────────────────────────────────
+
+const OPENCLAW_CONFIG_PATH = path.join(HOME, '.openclaw/openclaw.json')
+const AUTH_STATE_PATH = path.join(HOME, '.openclaw/agents/main/agent/auth-state.json')
+const SESSIONS_JSON_PATH = path.join(HOME, '.openclaw/agents/main/sessions/sessions.json')
+
+function modelDisplayName(modelId) {
+  if (!modelId) return 'Unknown'
+  const map = {
+    'anthropic/claude-sonnet-4-6': 'Sonnet',
+    'anthropic/claude-sonnet-4-5': 'Sonnet',
+    'anthropic/claude-opus-4-5': 'Opus',
+    'anthropic/claude-opus-4': 'Opus',
+    'anthropic/claude-haiku-4-5': 'Haiku',
+    'anthropic/claude-haiku-4': 'Haiku',
+    'google/gemini-2.0-flash': 'Gemini Flash',
+    'google/gemini-2.0-pro': 'Gemini Pro',
+    'google/gemini-1.5-pro': 'Gemini 1.5 Pro',
+    'google/gemini-1.5-flash': 'Gemini Flash',
+    'openai/gpt-4o': 'GPT-4o',
+    'openai/gpt-4o-mini': 'GPT-4o mini',
+  }
+  if (map[modelId]) return map[modelId]
+  // Fallback: extract the last segment
+  const parts = modelId.split('/')
+  return parts[parts.length - 1] || modelId
+}
+
+function modelProvider(modelId) {
+  if (!modelId) return 'unknown'
+  if (modelId.startsWith('anthropic/')) return 'anthropic'
+  if (modelId.startsWith('google/')) return 'google'
+  if (modelId.startsWith('openai/')) return 'openai'
+  const slash = modelId.indexOf('/')
+  return slash > 0 ? modelId.slice(0, slash) : 'unknown'
+}
+
+// GET /api/session-model?sessionKey=xxx
+app.get('/api/session-model', requireAuth, async (req, res) => {
+  try {
+    const { sessionKey } = req.query
+
+    // Read openclaw.json for default model
+    let defaultModel = 'anthropic/claude-sonnet-4-6'
+    try {
+      const cfg = JSON.parse(await fs.readFile(OPENCLAW_CONFIG_PATH, 'utf8'))
+      defaultModel = cfg?.agents?.defaults?.model?.primary || defaultModel
+    } catch {}
+
+    // Try to read per-session model from sessions.json
+    let sessionModel = defaultModel
+    let isFallback = false
+    if (sessionKey) {
+      try {
+        const sessions = JSON.parse(await fs.readFile(SESSIONS_JSON_PATH, 'utf8'))
+        const sess = sessions[sessionKey]
+        if (sess) {
+          // sessions.json stores provider + model separately
+          const provider = sess.modelProvider
+          const model = sess.model
+          if (provider && model) {
+            sessionModel = `${provider}/${model}`
+          }
+          // Check if it's a fallback (provider differs from default provider)
+          const defaultProvider = modelProvider(defaultModel)
+          if (provider && provider !== defaultProvider) {
+            isFallback = true
+          }
+        }
+      } catch {}
+    }
+
+    // Validate fallbacks from config
+    let fallbacks = []
+    try {
+      const cfg = JSON.parse(await fs.readFile(OPENCLAW_CONFIG_PATH, 'utf8'))
+      fallbacks = cfg?.agents?.defaults?.model?.fallbacks || []
+    } catch {}
+
+    res.json({
+      model: sessionModel,
+      displayName: modelDisplayName(sessionModel),
+      provider: modelProvider(sessionModel),
+      isFallback,
+      defaultModel,
+      fallbacks,
+    })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// GET /api/provider-health
+app.get('/api/provider-health', requireAuth, async (req, res) => {
+  try {
+    const authState = JSON.parse(await fs.readFile(AUTH_STATE_PATH, 'utf8'))
+    const usageStats = authState?.usageStats || {}
+    const lastGood = authState?.lastGood || {}
+
+    // Build per-provider health summary
+    const providerHealth = {}
+    for (const [profileKey, stats] of Object.entries(usageStats)) {
+      const provider = profileKey.split(':')[0]
+      if (!providerHealth[provider]) {
+        providerHealth[provider] = { errorCount: 0, lastFailureAt: null, healthy: true }
+      }
+      providerHealth[provider].errorCount += (stats.errorCount || 0)
+      if (stats.lastFailureAt) {
+        const current = providerHealth[provider].lastFailureAt
+        if (!current || stats.lastFailureAt > current) {
+          providerHealth[provider].lastFailureAt = stats.lastFailureAt
+        }
+      }
+    }
+    // Mark as unhealthy if errorCount > 0 and lastGood doesn't have this provider
+    for (const [provider, health] of Object.entries(providerHealth)) {
+      health.healthy = health.errorCount === 0 || !!lastGood[provider]
+    }
+
+    res.json({ ok: true, providers: providerHealth, lastGood })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 app.post('/api/session-delete', requireAuth, async (req, res) => {
   const { sessionKey } = req.body
   if (!sessionKey) return res.status(400).json({ error: 'sessionKey required' })
