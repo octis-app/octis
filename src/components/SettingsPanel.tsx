@@ -189,7 +189,12 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
         if (isDirtyRef.current) return // user already edited - don't stomp their work
         if (d.ok && d.settings?.quick_commands) {
           const serverVals = d.settings.quick_commands as Record<string, string>
-          const merged = { ...QUICK_COMMAND_DEFAULTS, ...serverVals }
+          // localStorage is primary — user's saved text always wins.
+          // Server fills in keys that don't exist locally yet.
+          // This prevents server resets/deploys from ever wiping custom text.
+          let localVals: Record<string, string> = {}
+          try { localVals = JSON.parse(localStorage.getItem('octis-quick-commands') || '{}') } catch {}
+          const merged = { ...QUICK_COMMAND_DEFAULTS, ...serverVals, ...localVals }
           setQcValues(merged)
           localStorage.setItem('octis-quick-commands', JSON.stringify(merged))
         }

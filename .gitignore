@@ -9,4 +9,4 @@ src.bak*
 server/config/users.json
 src/src.bak-*/
 src-backup-*/
-OCTIS_CHANGES.md
+backups/

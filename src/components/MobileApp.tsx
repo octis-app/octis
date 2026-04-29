@@ -9,11 +9,11 @@ import MobileSessionCard from './MobileSessionCard'
 import MobileFullChat from './MobileFullChat'
 import CostsPanel from './CostsPanel'
 import MemoryPanel from './MemoryPanel'
+import AgentsPage from './AgentsPage'
 import ConnectModal from './ConnectModal'
 import ProjectsGrid, { type Project } from './ProjectsGrid'
 import MobileProjectView from './MobileProjectView'
 import IssueReporter from './IssueReporter'
-import AgentsPage from './AgentsPage'
 import SettingsPanel from './SettingsPanel'
 import { DeleteConfirmModal } from './DeleteConfirmModal'
 
@@ -154,7 +154,7 @@ export default function MobileApp() {
       .then(r => r.json())
       .then((data: {projects?: Array<{id: string; name: string; slug: string; emoji?: string; color?: string}>} | Array<{id: string; name: string; slug: string; emoji?: string; color?: string}>) => {
         const list = Array.isArray(data) ? data : (data.projects || [])
-        setAvailableProjects(list.filter((p: any) => p.slug !== 'others' && !p.hide_from_sessions))
+        setAvailableProjects(list.filter((p: any) => p.slug !== 'others' && p.slug !== '__archived' && !p.hide_from_sessions))
         // Publish to global store so emoji prefixes + hide-from-sessions work everywhere
         const meta: Record<string, { emoji: string; name: string; color: string; hideFromSessions?: boolean }> = {}
         for (const p of list) meta[p.slug] = { emoji: (p as any).emoji || '📁', name: p.name, color: (p as any).color || '#6366f1', hideFromSessions: !!(p as any).hide_from_sessions }
@@ -162,7 +162,7 @@ export default function MobileApp() {
       })
       .catch(() => {})
   }, [])
-  const VALID_TABS = ['projects', 'sessions', 'costs', 'memory']
+  const VALID_TABS = ['projects', 'sessions', 'costs', 'memory', 'agents']
   const [tab, setTab] = useState(() => {
     // Hash first (refresh), sessionStorage fallback (PWA home screen launch strips hash)
     const h = window.location.hash.replace('#', '')
@@ -184,7 +184,12 @@ export default function MobileApp() {
   const [availableProjects, setAvailableProjects] = useState<Array<{id: string; name: string; slug: string; emoji?: string; color?: string}>>([])
   const [archiveToast, setArchiveToast] = useState<string | null>(null)
   const [showArchivedSection, setShowArchivedSection] = useState(false)
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem('octis-mobile-collapsed-groups')
+      return saved ? new Set(JSON.parse(saved) as string[]) : new Set()
+    } catch { return new Set() }
+  })
   // Reactive archived sessions — sorted by lastActivity desc (same as Projects ARCHIVED view)
   const hiddenSessionsRaw = useSessionStore(s => s.hiddenSessions)
   const archivedSessions = [...hiddenSessionsRaw].sort((a, b) => {
@@ -353,16 +358,34 @@ export default function MobileApp() {
 
   const handleUnarchive = useCallback(async (session: Session) => {
     const { unhide } = useHiddenStore.getState()
+    // Grab session data BEFORE unhide removes it from hiddenSessions
+    const hiddenSession = useSessionStore.getState().hiddenSessions.find(s => s.key === session.key)
     unhide(session.key)
     if (session.id) unhide(session.id)
     if (session.sessionId) unhide(session.sessionId)
-    // Restore project tag from DB
+    // Remove from hiddenSessions immediately — don’t call hydrateHiddenFromServer().
+    // That races with pushHideToServer (async/not awaited) and adds the session back.
+    useSessionStore.setState(s => ({
+      hiddenSessions: s.hiddenSessions.filter(h => h.key !== session.key)
+    }))
+    // Re-insert session into the visible sessions list.
+    const currentSessions = useSessionStore.getState().sessions
+    const alreadyVisible = currentSessions.some(s => s.key === session.key)
+    if (!alreadyVisible) {
+      const sessionToAdd = hiddenSession || session
+      useSessionStore.getState().setSessions([sessionToAdd, ...currentSessions])
+    }
+    // Restore project tag. API returns a map { sessionKey: projectSlug }, NOT an array.
     try {
       const r = await authFetch(`${API}/api/session-projects`)
       if (r.ok) {
-        const rows: { session_key: string; project: string }[] = await r.json()
-        const row = rows.find(r => r.session_key === session.key)
-        if (row?.project) useProjectStore.getState().setTag(session.key, row.project)
+        const map = await r.json() as Record<string, string>
+        const project = map[session.key]
+        if (project) {
+          useProjectStore.getState().setTag(session.key, project)
+        } else {
+          useProjectStore.getState().setTag(session.key, '')
+        }
       }
     } catch { /* best-effort */ }
     setArchiveToast(`↩ Unarchived: ${labels[session.key] || session.label || 'Session'}`)
@@ -445,8 +468,6 @@ export default function MobileApp() {
     const key = (s.key || '').toLowerCase()
     // Only hide true background subagents — NOT :acp: sessions (those are user-spawned harnesses like Codex/Claude Code)
     if (key.includes(':subagent:')) return true
-    // Hide uninitialized gateway sessions (WebSocket handshake artifacts with no real interaction)
-    if (s.channel === 'unknown') return true
     // Use getLabel (same as desktop) so server-side labels are checked, not just s.label
     const lbl = getLabel(s.key, s.label || '')
     if (lbl.startsWith('Continue where you left off')) return true
@@ -486,8 +507,9 @@ export default function MobileApp() {
 
   const filtered = useMemo(() => visibleSessions.filter((s: Session) => {
     const st = getStatus(s)
-    if (filter === 'active') return st === 'active'
-    if (filter === 'idle') return st === 'quiet'
+    // Always show working sessions regardless of filter — never lose a running session
+    if (filter === 'active') return st === 'active' || st === 'working'
+    if (filter === 'idle') return st === 'quiet' || st === 'working'
     return true
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [visibleSessions, filter])
@@ -666,6 +688,7 @@ export default function MobileApp() {
                     const toggleCollapse = () => setCollapsedGroups(prev => {
                       const next = new Set(prev)
                       if (next.has(slug)) next.delete(slug); else next.add(slug)
+                      localStorage.setItem('octis-mobile-collapsed-groups', JSON.stringify([...next]))
                       return next
                     })
                     return (

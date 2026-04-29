@@ -46,6 +46,10 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
   const [editEmojiValue, setEditEmojiValue] = useState('')
   const emojiInputRef = useRef<HTMLInputElement>(null)
 
+  // Delete confirmation state
+  const [deleteConfirm, setDeleteConfirm] = useState<{ id: string; name: string; sessionCount: number; activeCount: number; archivedCount: number } | null>(null)
+  const [deleting, setDeleting] = useState<string | null>(null)
+
   // Drag-and-drop reorder state
   const [dragIndex, setDragIndex] = useState<number | null>(null)
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
@@ -129,6 +133,69 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
       setNewName('')
       setNewEmoji('📁')
       setCreating(false)
+    }
+  }
+
+  const handleDelete = async (project: Project) => {
+    // Count sessions using the same logic as the project card
+    const activeCount = sessions.filter((s: Session) => 
+      isVisibleSession(s) && getTag(s.key).project === project.slug
+    ).length
+    
+    const archivedCount = hiddenSessions.filter((s: Session) => 
+      getTag(s.key).project === project.slug && !isAgentSession(s)
+    ).length
+    
+    const totalCount = activeCount + archivedCount
+    
+    // If no sessions, delete immediately without confirmation
+    if (totalCount === 0) {
+      setDeleting(project.id)
+      const r = await fetch(`${API}/api/projects/${project.id}?confirm=true`, {
+        method: 'DELETE',
+        credentials: 'include',
+      })
+      const d = await r.json()
+      if (d.ok) {
+        setProjects(prev => prev.filter(p => p.id !== project.id))
+        // Refresh projectMeta
+        const updatedList = projects.filter(p => p.id !== project.id)
+        const meta: Record<string, { emoji: string; name: string; color: string; hideFromSessions?: boolean }> = {}
+        for (const p of updatedList) meta[p.slug] = { emoji: p.emoji || '📁', name: p.name, color: p.color || '#6366f1', hideFromSessions: !!p.hide_from_sessions }
+        setProjectMeta(meta)
+      }
+      setDeleting(null)
+      return
+    }
+    
+    // Show confirmation dialog with frontend-calculated counts
+    setDeleteConfirm({ 
+      id: project.id, 
+      name: project.name, 
+      sessionCount: totalCount,
+      activeCount,
+      archivedCount
+    })
+  }
+
+  const confirmDelete = async () => {
+    if (!deleteConfirm) return
+    setDeleting(deleteConfirm.id)
+    const r = await fetch(`${API}/api/projects/${deleteConfirm.id}?confirm=true`, {
+      method: 'DELETE',
+      credentials: 'include',
+    })
+    const d = await r.json()
+    
+    if (d.ok) {
+      setProjects(prev => prev.filter(p => p.id !== deleteConfirm.id))
+      setDeleteConfirm(null)
+      setDeleting(null)
+      // Refresh projectMeta
+      const updatedList = projects.filter(p => p.id !== deleteConfirm.id)
+      const meta: Record<string, { emoji: string; name: string; color: string; hideFromSessions?: boolean }> = {}
+      for (const p of updatedList) meta[p.slug] = { emoji: p.emoji || '📁', name: p.name, color: p.color || '#6366f1', hideFromSessions: !!p.hide_from_sessions }
+      setProjectMeta(meta)
     }
   }
 
@@ -380,6 +447,19 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
                     >
                       {project.hide_from_sessions ? '📂 hidden' : '💬'}
                     </button>
+                    {/* Delete button */}
+                    <button
+                      type="button"
+                      title="Delete project"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        handleDelete(project)
+                      }}
+                      disabled={deleting === project.id}
+                      className="opacity-0 group-hover:opacity-100 transition-all text-[10px] px-1.5 py-0.5 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-50"
+                    >
+                      {deleting === project.id ? '⏳' : '🗑️'}
+                    </button>
                   </div>
                 </div>
               </div>
@@ -462,6 +542,48 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
           )}
         </div>
       </div>
+
+      {/* Delete confirmation dialog */}
+      {deleteConfirm && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[100]" onClick={() => setDeleteConfirm(null)}>
+          <div className="bg-[#0f1117] border border-red-500/40 rounded-2xl p-6 max-w-md mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div className="flex items-start gap-3 mb-4">
+              <div className="w-10 h-10 rounded-xl bg-red-500/20 flex items-center justify-center text-xl shrink-0">⚠️</div>
+              <div>
+                <h3 className="text-white font-semibold text-lg">Delete "{deleteConfirm.name}"?</h3>
+                <p className="text-[#9ca3af] text-sm mt-1">
+                  This project has <strong className="text-white">{deleteConfirm.sessionCount} session{deleteConfirm.sessionCount !== 1 ? 's' : ''}</strong>
+                  {deleteConfirm.activeCount > 0 && deleteConfirm.archivedCount > 0 && (
+                    <span> ({deleteConfirm.activeCount} active, {deleteConfirm.archivedCount} archived)</span>
+                  )}
+                  {deleteConfirm.activeCount > 0 && deleteConfirm.archivedCount === 0 && (
+                    <span> ({deleteConfirm.activeCount} active)</span>
+                  )}
+                  {deleteConfirm.activeCount === 0 && deleteConfirm.archivedCount > 0 && (
+                    <span> ({deleteConfirm.archivedCount} archived)</span>
+                  )}.
+                  The sessions will not be deleted, but their project tags will be removed.
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setDeleteConfirm(null)}
+                className="px-4 py-2 rounded-lg text-sm font-medium text-[#9ca3af] hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDelete}
+                disabled={!!deleting}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-red-500 hover:bg-red-600 text-white transition-colors disabled:opacity-50"
+              >
+                {deleting ? 'Deleting...' : 'Delete Project'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

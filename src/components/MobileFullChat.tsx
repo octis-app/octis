@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
 import { useGatewayStore, useSessionStore, useProjectStore, useLabelStore, useDraftStore, Session, DraftData } from '../store/gatewayStore'
 import { authFetch } from '../lib/authFetch'
 import { useTextareaUndo } from '../hooks/useTextareaUndo'
@@ -7,10 +7,10 @@ import DecisionButtons from './DecisionButtons'
 
 // Quick Commands helpers
 const QUICK_COMMAND_DEFAULTS = {
-  brief: "If you're a session that modified Octis app code, keep OCTIS_CHANGES.md updated with only relevant development work since the last log update. Record every code modification, bug fix, config/schema/API change, dependency change, important decision, known issue, and testing/verification result.",
-  away: "I'm stepping away for a while. Please do the following:\n1. Summarize what you're currently working on (1-2 sentences).\n2. List anything you're blocked on or need from me before I go - be specific (credentials, a decision, a file, etc.).\n3. List everything you CAN do autonomously while I'm gone, in order.\n4. Estimate how long you can run without me.\nBe concise. I'll read this on my phone.",
-  save: "💾 checkpoint - save any key decisions, context, or tasks from this session to MEMORY.md and TODOS.md now. One-line ack only.",
-  archive_msg: "💾 Final save - write any remaining decisions, tasks, or context to MEMORY.md and TODOS.md. Reply with NO_REPLY only.",
+  brief: "if applicable: update memory/module1-email-rules.md with all relevant decision and information in this session",
+  away: "I am stepping away for a while. Please do the following:\n1. Summarize what you are currently working on (1-2 sentences).\n2. List anything you are blocked on or need from me before I go - be specific (credentials, a decision, a file, etc.).\n3. List everything you CAN do autonomously while I am gone, in order.\n4. Estimate how long you can run without me.\nBe concise. I will read this on my phone.",
+  save: "Before ending, update MEMORY.md/TODOS.md, checked against full project context. MEMORY.md = durable reusable context; TODOS.md = clear pending tasks. For long updates, inspect current memory + verified project files first; preserve useful context, clean duplicates/conflicts, add missing recurring info/preferences/source-checking safeguards, and flag uncertainty instead of guessing. Do not save temporary noise, assumptions, secrets, or ambiguous info. Only claim saved if file update succeeded; summarize memory changes, TODOs, cleanup, and anything not confidently added.\n\nIf this session modified Octis code, update `/opt/octis/OCTIS_CHANGES.md` with only relevant dev work since last log update: code changes, fixes, config/schema/API/dependency changes, decisions, known issues, and test/verification results. Keep entries clear and specific so the original GitHub app owner understands what changed, why, what was tested, and what needs review. Never claim logged/fixed/tested unless actually done.",
+  archive_msg: "💾 Final save - If not already save - write any remaining decisions, tasks, or context to MEMORY.md and TODOS.md. Reply with NO_REPLY only.",
 }
 
 function getQuickCommands() {
@@ -98,13 +98,12 @@ function tryParseBlocks(raw: string): ContentBlock[] | null {
 }
 
 // Render an image block — handles both Anthropic format and OpenClaw native format
-function renderImageBlock(b: ContentBlock | Record<string, unknown>, key: number): React.ReactNode {
+function renderImageBlock(b: ContentBlock | Record<string, unknown>, key: number, onLightbox?: (src: string) => void): React.ReactNode {
   const block = b as Record<string, unknown>;
-  // Anthropic format: {type:'image', source:{type:'base64', media_type:..., data:...}}
   const src = block.source as { type?: string; data?: string; media_type?: string; url?: string } | undefined;
-  // OpenClaw native format: {type:'image', data:..., mimeType:...}
   const directData = block.data as string | undefined;
   const directMime = (block.mimeType || block.media_type) as string | undefined;
+  const API_BASE = (window as {VITE_API_URL?: string}).VITE_API_URL || '';
   let imgSrc = '';
   if (src?.type === 'base64' && src.data) {
     imgSrc = `data:${src.media_type || 'image/png'};base64,${src.data}`;
@@ -112,10 +111,22 @@ function renderImageBlock(b: ContentBlock | Record<string, unknown>, key: number
     imgSrc = src.url;
   } else if (directData) {
     imgSrc = `data:${directMime || 'image/png'};base64,${directData}`;
+  } else if (src?.type === 'file' && (src as Record<string,unknown>).path) {
+    const filename = ((src as Record<string,unknown>).path as string).split('/').pop() || '';
+    imgSrc = `${API_BASE}/api/media/${encodeURIComponent(filename)}`;
+  } else if (block.path || block.file_path) {
+    const filename = ((block.path || block.file_path) as string).split('/').pop() || '';
+    imgSrc = `${API_BASE}/api/media/${encodeURIComponent(filename)}`;
   }
-  return imgSrc
-    ? <img key={key} src={imgSrc} alt="attachment" className="max-w-full rounded-lg my-1 max-h-64 object-contain" style={{ maxWidth: '100%', borderRadius: '8px' }} />
-    : <span key={key} className="text-[#6b7280] text-xs italic">[Image]</span>;
+  if (!imgSrc) return null;
+  return (
+    <div key={key} className="my-1 cursor-pointer rounded-xl overflow-hidden inline-block" style={{ maxWidth: 220, maxHeight: 180 }}
+      onClick={() => onLightbox?.(imgSrc)}>
+      <img src={imgSrc} alt="image" className="w-full h-full object-cover hover:opacity-90 transition-opacity"
+        style={{ maxWidth: 220, maxHeight: 180 }}
+        onError={(e) => { (e.target as HTMLImageElement).parentElement!.style.display = 'none'; }} />
+    </div>
+  );
 }
 
 // Main content rendering function
@@ -298,6 +309,8 @@ function isHeartbeatMsg(msg: ChatMessage): boolean {
     // Async exec completion notifications injected by OpenClaw — always hide
     if (text.startsWith('System (untrusted):') || text.startsWith('System:') ||
         text.includes('An async command you ran earlier has completed')) return true
+    // System-injected lifecycle messages (memory flush, compaction, etc.)
+    if (text.startsWith('Pre-compaction memory flush') || text.startsWith('Pre-compaction context flush')) return true
   }
   if (msg.role === 'assistant') return text === 'HEARTBEAT_OK' || text.startsWith('HEARTBEAT_OK\n')
   return false
@@ -322,6 +335,168 @@ function isNoiseMsg(msg: ChatMessage): boolean {
 }
 
 const API = (import.meta.env.VITE_API_URL as string) || ''
+
+
+// ─── Mobile Model Badge ──────────────────────────────────────────────────────
+
+interface MobileModelInfo {
+  model: string
+  displayName: string
+  provider: string
+  isFallback: boolean
+  defaultModel: string
+  fallbacks: string[]
+}
+
+interface MobileProviderHealth {
+  errorCount: number
+  lastFailureAt: number | null
+  healthy: boolean
+}
+
+function mobileModelShortName(modelId: string): string {
+  const map: Record<string, string> = {
+    'anthropic/claude-sonnet-4-6': 'Sonnet',
+    'anthropic/claude-sonnet-4-5': 'Sonnet',
+    'anthropic/claude-opus-4-5': 'Opus',
+    'anthropic/claude-opus-4': 'Opus',
+    'anthropic/claude-haiku-4-5': 'Haiku',
+    'anthropic/claude-haiku-4': 'Haiku',
+    'google/gemini-2.0-flash': 'Gemini Flash',
+    'google/gemini-2.0-pro': 'Gemini Pro',
+    'google/gemini-1.5-pro': 'Gemini 1.5 Pro',
+    'google/gemini-1.5-flash': 'Gemini Flash',
+    'openai/gpt-4o': 'GPT-4o',
+    'openai/gpt-4o-mini': 'GPT-4o mini',
+  }
+  if (map[modelId]) return map[modelId]
+  const parts = modelId.split('/')
+  return parts[parts.length - 1] || modelId
+}
+
+function MobileModelBadge({ sessionKey }: { sessionKey: string }) {
+  const [modelInfo, setModelInfo] = useState<MobileModelInfo | null>(null)
+  const [providerHealth, setProviderHealth] = useState<Record<string, MobileProviderHealth>>({})
+  const [open, setOpen] = useState(false)
+  const [switching, setSwitching] = useState(false)
+  const { sendChat } = useGatewayStore()
+
+  const fetchModel = useCallback(async () => {
+    try {
+      const res = await authFetch(`${API}/api/session-model?sessionKey=${encodeURIComponent(sessionKey)}`)
+      if (res.ok) setModelInfo(await res.json())
+    } catch {}
+  }, [sessionKey])
+
+  const fetchHealth = useCallback(async () => {
+    try {
+      const res = await authFetch(`${API}/api/provider-health`)
+      if (res.ok) {
+        const data = await res.json()
+        setProviderHealth(data.providers || {})
+      }
+    } catch {}
+  }, [])
+
+  useEffect(() => {
+    fetchModel()
+    fetchHealth()
+    const t = setInterval(() => { fetchModel(); fetchHealth() }, 30000)
+    return () => clearInterval(t)
+  }, [fetchModel, fetchHealth])
+
+  const switchModel = async (modelId: string) => {
+    const shortName = modelId.split('/').pop() || modelId
+    setOpen(false)
+    setSwitching(true)
+    try {
+      const { ws, connected, sendChat } = useGatewayStore.getState()
+      
+      // Patch the session model
+      if (connected && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'req',
+          id: `model-switch-${Date.now()}`,
+          method: 'sessions.patch',
+          params: { key: sessionKey, model: modelId },
+        }))
+      }
+      
+      // Add a local-only notification that persists across fetchModel calls
+      const notificationMsg = {
+        id: `model-switch-${Date.now()}`,
+        role: 'assistant' as const,
+        content: `Model switched to ${shortName}`,
+        ts: new Date().toISOString(),
+        __localOnly: true // Flag to prevent it from being removed by setMessages
+      }
+      setMessages(prev => [...prev, notificationMsg])
+      
+      // Fetch the updated model info
+      await new Promise(r => setTimeout(r, 800))
+      await fetchModel()
+    } catch (err) {
+      console.error('Model switch error:', err)
+    } finally {
+      setSwitching(false)
+    }
+  }
+
+  if (!modelInfo) return null
+
+  const isFallback = modelInfo.isFallback
+  const pillClass = isFallback
+    ? 'bg-amber-900/40 text-amber-300 border-amber-600/50'
+    : 'bg-[#1e2330] text-[#a5b4fc] border-[#2a3142]'
+
+  const allModels = [modelInfo.defaultModel, ...modelInfo.fallbacks].filter(
+    (m, i, arr) => arr.indexOf(m) === i
+  )
+
+  return (
+    <div className="relative shrink-0">
+      <button
+        onClick={() => setOpen(o => !o)}
+        title={`Model: ${modelInfo.model}${isFallback ? ' (fallback)' : ''}`}
+        className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-mono select-none ${
+          switching ? 'opacity-50' : ''
+        } ${pillClass}`}
+      >
+        {isFallback && <span>⚡</span>}
+        <span>{switching ? '...' : modelInfo.displayName}</span>
+        <span className="text-[8px] opacity-60">▾</span>
+      </button>
+      {open && (
+        <div className="absolute right-0 top-8 z-50 bg-[#1a1f2e] border border-[#2a3142] rounded-xl shadow-2xl p-2 min-w-[190px] text-xs">
+          <div className="text-[#6b7280] text-[10px] font-medium px-2 pb-1.5">Switch model</div>
+          {allModels.map(m => {
+            const provName = m.split('/')[0]
+            const health = providerHealth[provName]
+            const hasError = health && health.errorCount > 0 && !health.healthy
+            const isCurrent = modelInfo.model === m
+            return (
+              <button
+                key={m}
+                onClick={() => switchModel(m)}
+                className={`w-full flex items-center gap-2 px-2 py-2 rounded-lg text-left ${
+                  isCurrent ? 'bg-[#6366f1]/20 text-[#a5b4fc]' : 'text-[#e8eaf0]'
+                }`}
+              >
+                <span className="flex-1">{mobileModelShortName(m)}</span>
+                {hasError && <span className="text-amber-400">⚠</span>}
+                {isCurrent && <span className="text-[#6366f1]">✓</span>}
+              </button>
+            )
+          })}
+          <button
+            onClick={() => setOpen(false)}
+            className="w-full text-center text-[#6b7280] text-[10px] pt-1.5 pb-0.5"
+          >Close</button>
+        </div>
+      )}
+    </div>
+  )
+}
 
 // ─── Reply helpers (mirrors ChatPane) ──────────────────────────────────────────────
 
@@ -445,30 +620,11 @@ function setMsgCache(sessionKey: string, msgs: ChatMessage[]): void {
   } catch {}
 }
 
-let cachedAgents: { id: string; name: string; emoji: string }[] = []
-
 export default function MobileFullChat({ session, onBack, recentSessions, onSwitch, onArchive, onNewSession }: MobileFullChatProps) {
-  const { send, sendChat, ws, connect, connected, agentId } = useGatewayStore()
+  const { send, sendChat, ws, connect, connected } = useGatewayStore()
   const { consumePendingProjectInit, getStatus } = useSessionStore()
   const { getLabel, setLabel } = useLabelStore()
   const { claimSession } = useAuthStore()
-  
-  const [agents, setAgents] = useState<{ id: string; name: string; emoji: string }[]>([])
-  const [, setForceUpdate] = useState({})  // Simple force-update trigger
-  
-  useEffect(() => {
-    if (cachedAgents.length === 0) {
-      authFetch(`${API}/api/agents`)
-        .then(r => r.json())
-        .then(d => { 
-          const fetched = d.agents || []
-          cachedAgents = fetched
-          setAgents(fetched)
-          setForceUpdate({})  // Ensure re-render when agents are loaded
-        })
-        .catch(() => {})
-    }
-  }, [])  // Empty dependency array to run only once
   // Initialize from cache if available
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
     const cached = session?.key ? getMsgCache(session.key) : null
@@ -498,6 +654,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
   // Sent queue: tracks recent sends for visual feedback (mirrors desktop behavior)
   type SentEntry = { id: number; text: string; status: 'sending' | 'queued' }
   const [sentQueue, setSentQueue] = useState<SentEntry[]>([])
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null)
   const confirmedSentRef = useRef<number | null>(null)
   // Track message count before send — used to unblock polls once server confirms receipt
   const preSendCountRef = useRef<number>(0)
@@ -1013,7 +1170,22 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
 
         // History response (match current reqId — handles re-sent requests after reconnect)
         if (msg.type === 'res' && msg.id === currentHistoryReqIdRef.current && msg.ok) {
-          const msgs = msg.payload?.messages || []
+          let msgs: ChatMessage[] = msg.payload?.messages || []
+          // WS strips base64 from image blocks. Restore from cache, fallback to HTTP.
+          const hasEmptyImages = msgs.some(m =>
+            m.role === 'user' && Array.isArray(m.content) &&
+            (m.content as ContentBlock[]).some(b => (b as {type:string}).type === 'image' && !(b as Record<string,unknown>).data)
+          )
+          if (hasEmptyImages) {
+            fetch(`${API}/api/chat-history?sessionKey=${encodeURIComponent(session.key)}&limit=${historyLimitRef.current}`, { credentials: 'include' })
+              .then(r => r.json())
+              .then((d: { ok?: boolean; messages?: ChatMessage[] }) => {
+                if (!d.ok || !d.messages?.length) return
+                setMessages(d.messages as ChatMessage[])
+                setMsgCache(session.key, d.messages as ChatMessage[])
+              })
+              .catch(() => {})
+          }
           // Refresh resilience: restore optimistic message if server hasn't committed it yet
           const pendingKey = `octis-pending-${session.key}`
           const pendingRaw = localStorage.getItem(pendingKey)
@@ -1085,6 +1257,27 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
                   next[idx] = { ...next[idx], content: payload.content || '' }
                   return next
                 }
+                // User echo: replace pending optimistic rather than appending a duplicate
+                if (payload.role === 'user') {
+                  const hasContent = !!(payload.content || '').trim()
+                  if (hasContent) {
+                    const optimisticIdx = prev.findIndex(m => typeof m.id === 'number')
+                    if (optimisticIdx >= 0) {
+                      const optimistic = prev[optimisticIdx]
+                      const echoHasImages = Array.isArray(payload.content) &&
+                        (payload.content as ContentBlock[]).some((b: {type:string}) => b.type === 'image')
+                      const optimisticHasImages = Array.isArray(optimistic.content) &&
+                        (optimistic.content as ContentBlock[]).some(b => (b as {type:string}).type === 'image')
+                      const mergedContent = (optimisticHasImages && !echoHasImages)
+                        ? optimistic.content
+                        : (payload.content || '')
+                      const next = [...prev]
+                      next[optimisticIdx] = { role: 'user', content: mergedContent, id: payload.id }
+                      return next
+                    }
+                  }
+                  return prev // let poll handle confirmation
+                }
                 return [...prev, { role: payload.role || 'assistant', content: payload.content || '', id: payload.id }]
               })
             }
@@ -1103,6 +1296,27 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
               const next = [...prev]
               next[idx] = { ...next[idx], content: flatMsg.content }
               return next
+            }
+            // User echo: replace pending optimistic rather than appending a duplicate
+            if (flatMsg.role === 'user') {
+              const hasContent = !!(flatMsg.content || '').trim()
+              if (hasContent) {
+                const optimisticIdx = prev.findIndex(m => typeof m.id === 'number')
+                if (optimisticIdx >= 0) {
+                  const optimistic = prev[optimisticIdx]
+                  const echoHasImages = Array.isArray(flatMsg.content) &&
+                    (flatMsg.content as ContentBlock[]).some(b => (b as {type:string}).type === 'image')
+                  const optimisticHasImages = Array.isArray(optimistic.content) &&
+                    (optimistic.content as ContentBlock[]).some(b => (b as {type:string}).type === 'image')
+                  const mergedMsg = (optimisticHasImages && !echoHasImages)
+                    ? { ...flatMsg, content: optimistic.content }
+                    : flatMsg
+                  const next = [...prev]
+                  next[optimisticIdx] = mergedMsg
+                  return next
+                }
+              }
+              return prev // let poll handle confirmation
             }
             return [...prev, flatMsg]
           })
@@ -1484,7 +1698,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
       const res = await fetch(`${API}/api/session-autoname`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: slim }),
+        body: JSON.stringify({ messages: slim, model: localStorage.getItem('octis-rename-model') || undefined }),
       })
       const data = await res.json() as { label?: string }
       if (data.label) {
@@ -1544,6 +1758,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
             {autoRenaming ? '…' : '✨'}
           </button>
         )}
+        <MobileModelBadge sessionKey={session.key} />
         <button
           onClick={() => setShowArchiveSheet(true)}
           className="text-[#4b5563] hover:text-white transition-colors shrink-0 px-1 text-base leading-none"
@@ -1713,15 +1928,45 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
             ? messages
             : []
           // Reverse so newest is first in DOM — flex-col-reverse makes it appear at visual bottom
-          const filtered = showMessages.filter((msg) => !isHeartbeatMsg(msg) && !(noiseHidden && isNoiseMsg(msg)) && !(msg.role === 'assistant' && extractText(msg.content).trimStart().startsWith('📁 **')))
+          const filtered = showMessages
+            .filter((msg) => !isHeartbeatMsg(msg) && !(noiseHidden && isNoiseMsg(msg)) && !(msg.role === 'assistant' && extractText(msg.content).trimStart().startsWith('📁 **')))
+            .filter((msg, idx, arr) => {
+              // Dedup by id (same as ChatPane)
+              if (msg.id !== undefined && msg.id !== null) {
+                return arr.findIndex(m => m.id === msg.id) === idx
+              }
+              const fp = `${msg.role}-${extractText(msg.content).substring(0, 100)}`
+              return arr.findIndex(m => m.id === undefined && `${m.role}-${extractText(m.content).substring(0, 100)}` === fp) === idx
+            })
           const reversed = [...filtered].reverse()
           return (<>
-            {reversed.map((msg, i) => (
-            <div
-              key={msg.id !== undefined ? String(msg.id) : i}
-              data-msg-key={msg.id !== undefined ? String(msg.id) : String(getMsgTs(msg) || i)}
-              className={`flex items-end gap-1 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-            >
+            {reversed.map((msg, i) => {
+              // Model switch detection — render as divider annotation
+              const msgText = extractText(msg.content)
+              const isModelSwitch = (
+                /^Model switched to /i.test(msgText) ||
+                /model (set|switched|now using|changed) to/i.test(msgText) ||
+                /^(switching|fallback|now using|using) (model|claude|gemini|gpt)/i.test(msgText) ||
+                /\/(model|switch) /i.test(msgText) ||
+                /fallback.*model/i.test(msgText) ||
+                /switch.*model/i.test(msgText)
+              ) && msgText.length < 200
+              return (
+                <React.Fragment key={msg.id !== undefined ? String(msg.id) : i}>
+                  {isModelSwitch && (
+                    <div className="flex items-center gap-2 px-4 py-1 my-1">
+                      <div className="flex-1 h-px bg-[#2a3142]" />
+                      <span className="text-[10px] text-[#6366f1] font-mono flex items-center gap-1">
+                        <span>⚡</span>
+                        <span>{msgText.slice(0, 80)}</span>
+                      </span>
+                      <div className="flex-1 h-px bg-[#2a3142]" />
+                    </div>
+                  )}
+                  <div
+                    data-msg-key={msg.id !== undefined ? String(msg.id) : String(getMsgTs(msg) || i)}
+                    className={`flex items-end gap-1 ${isModelSwitch ? 'hidden' : ''} ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                  >
               {/* Reply button — left of user messages (always visible, subtle) */}
               {msg.role === 'user' && (
                 <button
@@ -1740,39 +1985,40 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
                 }`}
                 style={highlightedMsgKey === (msg.id !== undefined ? String(msg.id) : String(getMsgTs(msg) || i)) ? { animation: 'octisFlash 1.4s ease-out forwards' } : {}}
               >
-                {msg.MediaPaths && msg.MediaPaths.length > 0
-                  ? msg.MediaPaths.map((p: string, i: number) => {
-                      const filename = p.split('/').pop() || ''
-                      const mime = (msg.MediaTypes?.[i] || msg.MediaType || '')
-                      const src = `${API}/api/media/${encodeURIComponent(filename)}`
-                      return mime.includes('pdf')
-                        ? <a key={i} href={src} target="_blank" rel="noopener noreferrer"
-                            className="flex items-center gap-2 bg-[#4f51c0] rounded-lg px-3 py-2 my-1 max-w-xs no-underline">
-                            <span className="text-2xl">📄</span>
-                            <span className="text-xs text-white truncate">{filename}</span>
-                          </a>
-                        : <img key={i} src={src} alt="attachment"
-                            className="max-w-full rounded-lg my-1 max-h-64 object-contain"
-                            style={{ maxWidth: '100%', borderRadius: '8px' }}
-                            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
-                    })
-                  : msg.MediaPath
-                    ? (() => {
-                        const filename = (msg.MediaPath as string).split('/').pop() || ''
-                        const src = `${API}/api/media/${encodeURIComponent(filename)}`
-                        return (msg.MediaType || '').includes('pdf')
-                          ? <a href={src} target="_blank" rel="noopener noreferrer"
-                              className="flex items-center gap-2 bg-[#4f51c0] rounded-lg px-3 py-2 my-1 max-w-xs no-underline">
+                {(() => {
+                    const paths: string[] = msg.MediaPaths && msg.MediaPaths.length > 0
+                      ? msg.MediaPaths as string[]
+                      : msg.MediaPath ? [msg.MediaPath as string] : []
+                    if (paths.length === 0) return null
+                    const count = paths.length
+                    const thumbSize = count === 1 ? 200 : count <= 4 ? 110 : 80
+                    return (
+                      <div className="flex flex-wrap gap-1 my-1" style={{ maxWidth: count === 1 ? 210 : Math.min(count, 3) * (thumbSize + 4) + 4 }}>
+                        {paths.map((p, i) => {
+                          const filename = p.split('/').pop() || ''
+                          const mime = msg.MediaPaths ? (msg.MediaTypes?.[i] || msg.MediaType || '') : (msg.MediaType || '')
+                          const src = `${API}/api/media/${encodeURIComponent(filename)}`
+                          if (mime.includes('pdf')) {
+                            return <a key={i} href={src} target="_blank" rel="noopener noreferrer"
+                              className="flex items-center gap-2 bg-[#4f51c0] rounded-lg px-3 py-2 max-w-xs no-underline">
                               <span className="text-2xl">📄</span>
                               <span className="text-xs text-white truncate">{filename}</span>
                             </a>
-                          : <img src={src} alt="attachment"
-                              className="max-w-full rounded-lg my-1 max-h-64 object-contain"
-                              style={{ maxWidth: '100%', borderRadius: '8px' }}
-                              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
-                      })()
-                    : null
-                }
+                          }
+                          return (
+                            <div key={i}
+                              className="cursor-pointer rounded-lg overflow-hidden flex-shrink-0 hover:opacity-90 transition-opacity"
+                              style={{ width: thumbSize, height: thumbSize }}
+                              onClick={() => setLightboxSrc(src)}
+                            >
+                              <img src={src} alt="attachment" className="w-full h-full object-cover"
+                                onError={(e) => { (e.target as HTMLImageElement).parentElement!.style.display = 'none' }} />
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )
+                  })()}
                 {/* Reply quote bubble */}
                 {(() => {
                   const rc = getMobileReplyCtx(msg.content)
@@ -1876,7 +2122,9 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
                 >{'\u21A9\uFE0E'}</button>
               )}
             </div>
-          ))}
+          </React.Fragment>
+        )})
+          }
             {/* Load-more: LAST in DOM = visual TOP in flex-col-reverse */}
             {hasMore && loadedKey === session?.key && (
               <div className="flex justify-center py-3">
@@ -2059,36 +2307,6 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
               </span>
             </button>
             <div className="border-t border-[#2a3142] my-1" />
-            {(() => {
-              const m = session.key?.match(/^agent:([^:]+)/);
-              const agentIdParsed = m?.[1] || 'main'
-              const agent = agents.find(a => a.id === agentIdParsed)
-            
-              return agent ? (
-                <div className="w-full px-4 py-3.5 rounded-xl bg-[#1a1d2e]">
-                  <div className="text-xs uppercase tracking-wider text-[#6b7280] mb-1">Agent</div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-lg">{agent.emoji}</span>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-white text-sm font-medium truncate">{agent.name}</div>
-                      <div className="text-[#a5b4fc] text-xs font-mono truncate">{agentIdParsed}</div>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="w-full px-4 py-3.5 rounded-xl bg-[#1a1d2e]">
-                  <div className="text-xs uppercase tracking-wider text-[#6b7280] mb-1">Agent</div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-lg">🤖</span>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-white text-sm font-medium truncate">Main</div>
-                      <div className="text-[#a5b4fc] text-xs font-mono truncate">main</div>
-                    </div>
-                  </div>
-                </div>
-              )
-            })()}
-            <div className="border-t border-[#2a3142] my-1" />
             <button
               onClick={() => { setShowArchiveSheet(false); setShowAssignSheet(true) }}
               className="w-full text-left px-4 py-3.5 rounded-xl text-white text-sm hover:bg-[#2a3142] transition-colors flex items-center gap-3"
@@ -2163,6 +2381,31 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
               )}
             </div>
           </div>
+        </div>
+      )}
+      {/* ─ Image lightbox ──────────────────────────────────────────────── */}
+      {lightboxSrc && (
+        <div
+          className="fixed inset-0 z-[300] bg-black/90 flex items-center justify-center"
+          onClick={() => setLightboxSrc(null)}
+        >
+          <button
+            className="absolute top-4 right-4 z-10 w-9 h-9 flex items-center justify-center rounded-full bg-white/10 active:bg-white/20 text-white text-xl"
+            onClick={() => setLightboxSrc(null)}
+          >×</button>
+          <img
+            src={lightboxSrc}
+            alt="Full size"
+            className="max-h-[90vh] max-w-[90vw] object-contain rounded-lg shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          />
+          <a
+            href={lightboxSrc}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="absolute bottom-4 right-4 text-xs text-white/50"
+            onClick={(e) => e.stopPropagation()}
+          >↗ open in new tab</a>
         </div>
       )}
     </div>
