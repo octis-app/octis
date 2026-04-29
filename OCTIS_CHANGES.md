@@ -12,29 +12,28 @@
 
 **Files changed:**
 - `server/index.js` (POST `/api/session-projects` endpoint)
+- `src/components/Sidebar.tsx` (new session with project)
+- `src/components/MobileProjectView.tsx` (mobile new session with project)
+- `src/components/ProjectView.tsx` (desktop new session with project)
 
 **Changes:**
-1. Made endpoint async to support chat injection
+1. Made `/api/session-projects` endpoint async to support chat injection
 2. Query old project before updating DB to detect state changes
-3. Inject project context message in ALL cases (not just switches):
-   - **First assignment** (null → project): "This session has been **filed under** the {emoji} {name} project"
-   - **Project change** (project A → project B): "This session has been **moved to** the {emoji} {name} project"
+3. Inject project context message ONLY when switching projects (not on initial assignment):
+   - **Project switch** (project A → project B): "This session has been **moved to** the {emoji} {name} project"
    - **Project removal** (project → null): "This session has been **removed from its project**"
+   - **Initial assignment** (null → project): Handled by existing `session-init` endpoint (no duplicate)
    - **No-op** (same → same): Skip injection
+4. Removed `[📁 Project]` prefix from injected message text (already rendered by `label` parameter)
+5. Added `skipInject: true` flag to frontend calls when creating new sessions with projects (preserves existing `session-init` flow)
 
 **Why:** 
-- New sessions created with a project never received initial context (relied on broken client-side `pendingProjectInit` flag)
-- Switching projects had no notification
-- Bot was unaware of project assignments
+- Switching projects had no notification (bot unaware of change)
+- Duplicate project context messages appeared (both `session-init` AND new injection fired)
 
-**Root cause:** Client-side `pendingProjectInit` flag (consumed by `ChatPane.tsx` on first message) was unreliable:
-- Flag cleared on page reload
-- Flag missing if session created in different tab
-- Flag never set when manually switching existing session's project
+**Fix:** Server-side switch detection in `/api/session-projects` endpoint supplements (not replaces) existing `session-init` flow. New sessions use the old flow (single message), switches use the new flow (switch notification).
 
-**Fix:** Server-side detection in `/api/session-projects` endpoint eliminates reliance on client-side flag. Every project assignment/change now injects context immediately.
-
-**Tested:** ✅ Syntax check passed (`node -c server/index.js`)
+**Tested:** ✅ Syntax check passed (`node -c server/index.js`), ⚠️ needs live testing
 
 ---
 

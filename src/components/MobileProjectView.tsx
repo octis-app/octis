@@ -211,7 +211,7 @@ export default function MobileProjectView({ project, onBack, onSwitchProject }: 
       authFetch(`${API}/api/session-projects`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionKey: realKey, projectTag: project.slug }),
+        body: JSON.stringify({ sessionKey: realKey, projectTag: project.slug, skipInject: true }),
       }).catch(() => {})
       // Transfer pending project init from placeholder to real key
       setPendingProjectInit(realKey, project.slug)
