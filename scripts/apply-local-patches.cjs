@@ -816,6 +816,43 @@ patch(
   (c) => c
 )
 
+// ─── Patch 42: SettingsPanel — remove QUICK_COMMAND_DEFAULTS merging ─────────
+// Users can now have fully custom quick commands with no hardcoded defaults.
+// getQuickCommands() returns only localStorage, resetQc deletes instead of reverting.
+patch(
+  'src/components/SettingsPanel.tsx',
+  'NO DEFAULTS - only use what\'s explicitly saved',
+  (c) => {
+    // Remove QUICK_COMMAND_DEFAULTS from getQuickCommands helper
+    c = c.replace(
+      /function getQuickCommands\(\): Record<string, string> \{\s*try \{\s*return \{ \.\.\.QUICK_COMMAND_DEFAULTS, \.\.\.JSON\.parse\(localStorage\.getItem\('octis-quick-commands'\) \|\| '\{\}'\) \}\s*\} catch \{ return \{ \.\.\.QUICK_COMMAND_DEFAULTS \} \}\s*\}/,
+      `function getQuickCommands(): Record<string, string> {
+  try {
+    return JSON.parse(localStorage.getItem('octis-quick-commands') || '{}')
+  } catch { return {} }
+}`
+    )
+    // Remove QUICK_COMMAND_DEFAULTS from mount effect merge
+    c = c.replace(
+      /const merged = \{ \.\.\.QUICK_COMMAND_DEFAULTS, \.\.\.serverVals, \.\.\.localVals \}/,
+      'const merged = { ...serverVals, ...localVals }'
+    )
+    // Change resetQc to delete instead of reverting to default
+    c = c.replace(
+      /const resetQc = useCallback\(\(key: string\) => \{[^}]*const def = QUICK_COMMAND_DEFAULTS\[key\][^}]*\}, \[persistQcToServer\]\)/,
+      `const resetQc = useCallback((key: string) => {
+    isDirtyRef.current = true
+    // Delete the command entirely (no defaults)
+    const current = getQuickCommands()
+    delete current[key]
+    localStorage.setItem('octis-quick-commands', JSON.stringify(current))
+    setQcValues(prev => { const next = { ...prev }; delete next[key]; persistQcToServer(next); return next })
+  }, [persistQcToServer])`
+    )
+    return c
+  }
+)
+
 // ─── DB migration: reset stale quick_commands to current defaults ─────────────
 // Quick command values stored in the DB override code defaults. When QUICK_COMMANDS_CONFIG
 // is updated in SettingsPanel.tsx, stale DB values persist across git pulls and shadow
