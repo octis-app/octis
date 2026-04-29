@@ -8,6 +8,73 @@
 
 ## Latest Changes — 2026-04-29
 
+### Hotkey Safety Fix (16:42 UTC)
+
+**Files changed:**
+- `src/hooks/useHotkeys.ts`
+
+**Problem:**
+- Bare-key shortcuts (N, E, R, ?) were firing when user browsed Sessions tab or any other UI
+- Pressing 'E' would archive sessions unexpectedly while scrolling through list
+- Pressing 'T' or other keys triggered unintended actions without warning
+- `ignoreInputs: true` only prevented hotkeys when focused on input/textarea, NOT when browsing general UI
+
+**Solution:**
+- Added comprehensive bare-key safety check in `useHotkeys.ts`
+- Bare-key shortcuts (no modifiers) now ONLY fire when `document.activeElement` is `body` or `null`
+- If ANY UI element has focus (button, div, session card, etc.), bare-key shortcuts are disabled
+- Modifier-based shortcuts (Cmd+Z, Cmd+Y) continue to work everywhere as expected
+- This prevents accidental hotkey triggers while browsing/navigating any part of the UI
+
+**Result:**
+- Users can safely browse Sessions tab, Projects grid, etc. without fear of accidental archives
+- Hotkeys still work when nothing is focused (user is "idle" on the page)
+- Much safer UX — prevents data loss from unintended keypress
+
+---
+
+### Project Delete with Session Warning (16:31 UTC)
+
+**Files changed:**
+- `server/index.js` (DELETE `/api/projects/:id` endpoint)
+- `src/components/ProjectsGrid.tsx` (delete handler + confirmation dialog)
+
+**Changes:**
+1. Enhanced DELETE endpoint to count associated sessions before deletion:
+   - First call without `?confirm=true` returns warning with session counts
+   - Counts split into `activeCount` (visible sessions) and `archivedCount` (hidden sessions)
+   - Applied visibility filters: agent isolation, exclude subagents/heartbeats/threads/"continue where you left off"
+2. Frontend `handleDelete` calculates counts using exact same logic as project card display:
+   - Active: `sessions` array filtered by `isVisibleSession` + project tag
+   - Archived: `hiddenSessions` filtered by project tag (excluding agent sessions)
+   - Shows confirmation dialog with breakdown: "X sessions (Y active, Z archived)"
+   - If 0 sessions, deletes immediately without confirmation
+3. Confirmation dialog shows detailed breakdown when both exist:
+   - Both: "23 sessions (20 active, 3 archived)"
+   - Active only: "5 sessions (5 active)"
+   - Archived only: "2 sessions (2 archived)"
+4. On confirmed deletion:
+   - Deletes project from `octis_projects`
+   - Removes ALL project tags from `octis_session_projects` (sessions remain, just untagged)
+5. Delete button (🗗️) appears on project card hover, next to visibility toggle
+
+**Why:**
+- Users couldn't delete projects (no UI option)
+- Risk of accidentally deleting projects with active work
+- Needed visibility into what would be affected before deletion
+
+**Fixes applied during development:**
+1. Initial backend count (v2.10-2.11) showed DB totals, mismatched UI (114 vs 6 for Slack)
+2. Added agent isolation filter (v2.12): `LIKE 'agent:main:%'` to match frontend store filter
+3. Added thread exclusion (v2.13): `NOT LIKE '%:thread:%'` — threads don't count as "sessions" in UI
+4. Final fix (v2.14): Frontend calculates counts using same logic as project card — guarantees exact match
+
+**Root cause of mismatch:** Backend counted sessions from DB (`octis_session_projects`), but frontend shows sessions from gateway's live `sessions.list` response. Old/dead sessions exist in DB but not in gateway list. Solution: frontend is source of truth for counts.
+
+**Tested:** ✅ Delete empty project → immediate deletion ✅ Delete project with sessions → warning shown with correct counts ✅ Confirm deletion → project deleted, tags removed ✅ Session tags verified removed from DB ✅ Counts match project card display exactly (Slack: 6, Module 1: 1)
+
+---
+
 ### Project Context Auto-Injection Fix (16:22 UTC)
 
 **Files changed:**
