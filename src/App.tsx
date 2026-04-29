@@ -460,7 +460,6 @@ const visiblePanes = activePanes.filter((key, idx) => !!key && activePanes.index
 
   useHotkeys([
     { key: 'n', cmdOrCtrl: true, handler: handleNewSessionHotkey },
-    { key: 'e', cmdOrCtrl: true, handler: handleArchiveHotkey },
     { key: 'r', cmdOrCtrl: true, handler: handleRenameHotkey },
     { key: 'z', cmdOrCtrl: true, handler: handleUndoArchive },
     { key: 'y', cmdOrCtrl: true, handler: handleRedoArchive },
@@ -687,7 +686,6 @@ const visiblePanes = activePanes.filter((key, idx) => !!key && activePanes.index
               {([
                 { group: 'Sessions' },
                 { key: '⌘N', desc: 'New session' },
-                { key: '⌘E', desc: 'Archive focused pane' },
                 { key: '⌘R', desc: 'AI auto-rename focused pane' },
                 { group: 'Panes' },
                 { key: '💬 icon (again)', desc: 'Toggle sessions sidebar' },

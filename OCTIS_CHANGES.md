@@ -8,6 +8,26 @@
 
 ## Latest Changes — 2026-04-29
 
+### Remove Archive Shortcut (17:02 UTC)
+
+**Files changed:**
+- `src/App.tsx` (hotkey bindings + help modal)
+
+**Change:**
+- Removed `Cmd+E` archive shortcut entirely
+- Archive action now only accessible through UI (right-click menu, delete button)
+- Prevents accidental archives even with modifier keys
+
+**Remaining shortcuts:**
+- `Cmd+N` → New session
+- `Cmd+R` → AI auto-rename
+- `Cmd+Z` / `Cmd+Y` → Undo/redo archive (still available to recover mistakes)
+- `Cmd+Shift+/` → Show shortcuts
+
+---
+
+## Latest Changes — 2026-04-29
+
 ### Hotkey Safety Fix - Remove Bare-Key Shortcuts (16:45 UTC)
 
 **Files changed:**
