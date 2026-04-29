@@ -459,12 +459,12 @@ const visiblePanes = activePanes.filter((key, idx) => !!key && activePanes.index
   }, [])
 
   useHotkeys([
-    { key: 'n', handler: handleNewSessionHotkey, ignoreInputs: true },
-    { key: 'e', handler: handleArchiveHotkey, ignoreInputs: true },
-    { key: 'r', handler: handleRenameHotkey, ignoreInputs: true },
+    { key: 'n', cmdOrCtrl: true, handler: handleNewSessionHotkey },
+    { key: 'e', cmdOrCtrl: true, handler: handleArchiveHotkey },
+    { key: 'r', cmdOrCtrl: true, handler: handleRenameHotkey },
     { key: 'z', cmdOrCtrl: true, handler: handleUndoArchive },
     { key: 'y', cmdOrCtrl: true, handler: handleRedoArchive },
-    { key: '?', handler: () => setShowHotkeys(v => !v), ignoreInputs: true },
+    { key: '/', cmdOrCtrl: true, shift: true, handler: () => setShowHotkeys(v => !v) },
   ])
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -686,15 +686,17 @@ const visiblePanes = activePanes.filter((key, idx) => !!key && activePanes.index
             <div className="space-y-1 text-sm">
               {([
                 { group: 'Sessions' },
-                { key: 'N', desc: 'New session' },
-                { key: 'E', desc: 'Archive focused pane' },
-                { key: 'R', desc: 'AI auto-rename focused pane' },
+                { key: '⌘N', desc: 'New session' },
+                { key: '⌘E', desc: 'Archive focused pane' },
+                { key: '⌘R', desc: 'AI auto-rename focused pane' },
                 { group: 'Panes' },
                 { key: '💬 icon (again)', desc: 'Toggle sessions sidebar' },
                 { key: 'all / none', desc: 'Open or close all panes' },
                 { group: 'History' },
                 { key: '⌘Z', desc: 'Undo archive' },
                 { key: '⌘Y', desc: 'Redo archive' },
+                { group: 'Help' },
+                { key: '⌘⇧/', desc: 'Show keyboard shortcuts' },
                 { group: 'Chat' },
                 { key: 'Enter', desc: 'Send message' },
                 { key: 'Shift+Enter', desc: 'New line' },

@@ -8,28 +8,34 @@
 
 ## Latest Changes — 2026-04-29
 
-### Hotkey Safety Fix (16:42 UTC)
+### Hotkey Safety Fix - Remove Bare-Key Shortcuts (16:45 UTC)
 
 **Files changed:**
-- `src/hooks/useHotkeys.ts`
+- `src/App.tsx` (hotkey bindings + help modal)
+- `src/hooks/useHotkeys.ts` (reverted previous safety check)
 
 **Problem:**
 - Bare-key shortcuts (N, E, R, ?) were firing when user browsed Sessions tab or any other UI
 - Pressing 'E' would archive sessions unexpectedly while scrolling through list
 - Pressing 'T' or other keys triggered unintended actions without warning
-- `ignoreInputs: true` only prevented hotkeys when focused on input/textarea, NOT when browsing general UI
+- Bare-key shortcuts are fundamentally unsafe in a web app where users can type anywhere
 
 **Solution:**
-- Added comprehensive bare-key safety check in `useHotkeys.ts`
-- Bare-key shortcuts (no modifiers) now ONLY fire when `document.activeElement` is `body` or `null`
-- If ANY UI element has focus (button, div, session card, etc.), bare-key shortcuts are disabled
-- Modifier-based shortcuts (Cmd+Z, Cmd+Y) continue to work everywhere as expected
-- This prevents accidental hotkey triggers while browsing/navigating any part of the UI
+- **Removed ALL bare-key shortcuts** - all hotkeys now require Cmd/Ctrl modifier
+- Updated bindings:
+  - `N` → `Cmd+N` (new session)
+  - `E` → `Cmd+E` (archive)
+  - `R` → `Cmd+R` (rename)
+  - `?` → `Cmd+Shift+/` (show shortcuts)
+  - `Cmd+Z` and `Cmd+Y` (undo/redo) unchanged
+- Updated help modal to show correct shortcuts with ⌘ prefix
+- Reverted previous bare-key safety check in useHotkeys.ts (no longer needed)
 
 **Result:**
-- Users can safely browse Sessions tab, Projects grid, etc. without fear of accidental archives
-- Hotkeys still work when nothing is focused (user is "idle" on the page)
-- Much safer UX — prevents data loss from unintended keypress
+- ✅ Zero risk of accidental hotkey triggers while browsing any UI
+- ✅ Users can type anywhere without fear of triggering actions
+- ✅ Standard app behavior - all shortcuts require explicit modifiers
+- ✅ Much safer UX - prevents data loss from unintended keystrokes
 
 ---
 
