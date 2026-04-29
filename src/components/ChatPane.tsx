@@ -78,6 +78,151 @@ function SessionCostBadge({ sessionKey }: { sessionKey: string }) {
 
 const API = (import.meta.env.VITE_API_URL as string) || ''
 
+
+// ─── Model Badge ────────────────────────────────────────────────────────────
+
+interface ModelInfo {
+  model: string
+  displayName: string
+  provider: string
+  isFallback: boolean
+  defaultModel: string
+  fallbacks: string[]
+}
+
+interface ProviderHealth {
+  errorCount: number
+  lastFailureAt: number | null
+  healthy: boolean
+}
+
+function modelShortName(modelId: string): string {
+  const map: Record<string, string> = {
+    'anthropic/claude-sonnet-4-6': 'Sonnet',
+    'anthropic/claude-sonnet-4-5': 'Sonnet',
+    'anthropic/claude-opus-4-5': 'Opus',
+    'anthropic/claude-opus-4': 'Opus',
+    'anthropic/claude-haiku-4-5': 'Haiku',
+    'anthropic/claude-haiku-4': 'Haiku',
+    'google/gemini-2.0-flash': 'Gemini Flash',
+    'google/gemini-2.0-pro': 'Gemini Pro',
+    'google/gemini-1.5-pro': 'Gemini 1.5 Pro',
+    'google/gemini-1.5-flash': 'Gemini Flash',
+    'openai/gpt-4o': 'GPT-4o',
+    'openai/gpt-4o-mini': 'GPT-4o mini',
+  }
+  if (map[modelId]) return map[modelId]
+  const parts = modelId.split('/')
+  return parts[parts.length - 1] || modelId
+}
+
+function ModelBadge({ sessionKey }: { sessionKey: string }) {
+  const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null)
+  const [providerHealth, setProviderHealth] = useState<Record<string, ProviderHealth>>({})
+  const [open, setOpen] = useState(false)
+  const [switching, setSwitching] = useState(false)
+  const dropdownRef = useRef<HTMLDivElement>(null)
+  const { sendChat } = useGatewayStore()
+
+  const fetchModel = useCallback(async () => {
+    try {
+      const res = await authFetch(`${API}/api/session-model?sessionKey=${encodeURIComponent(sessionKey)}`)
+      if (res.ok) setModelInfo(await res.json())
+    } catch {}
+  }, [sessionKey])
+
+  const fetchHealth = useCallback(async () => {
+    try {
+      const res = await authFetch(`${API}/api/provider-health`)
+      if (res.ok) {
+        const data = await res.json()
+        setProviderHealth(data.providers || {})
+      }
+    } catch {}
+  }, [])
+
+  useEffect(() => {
+    fetchModel()
+    fetchHealth()
+    const t = setInterval(() => { fetchModel(); fetchHealth() }, 30000)
+    return () => clearInterval(t)
+  }, [fetchModel, fetchHealth])
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  const switchModel = async (modelId: string) => {
+    setOpen(false)
+    setSwitching(true)
+    void sendChat({ sessionKey, message: `/model ${modelId}` })
+    // Refresh after a short delay to pick up the new model
+    setTimeout(() => { void fetchModel(); setSwitching(false) }, 3000)
+  }
+
+  if (!modelInfo) return null
+
+  const isFallback = modelInfo.isFallback
+  const pillClass = isFallback
+    ? 'bg-amber-900/40 text-amber-300 border-amber-600/50 hover:border-amber-500'
+    : 'bg-[#1e2330] text-[#a5b4fc] border-[#2a3142] hover:border-[#6366f1]'
+
+  // All available models to pick from
+  const allModels = [modelInfo.defaultModel, ...modelInfo.fallbacks].filter(
+    (m, i, arr) => arr.indexOf(m) === i
+  )
+
+  return (
+    <div className="relative shrink-0" ref={dropdownRef}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        title={`Model: ${modelInfo.model}${isFallback ? ' (fallback)' : ''}`}
+        className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-mono transition-colors select-none ${
+          switching ? 'opacity-50 cursor-wait' : 'cursor-pointer'
+        } ${pillClass}`}
+      >
+        {isFallback && <span className="leading-none">⚡</span>}
+        <span className="leading-none">{switching ? '...' : modelInfo.displayName}</span>
+        <span className="text-[8px] opacity-60">▾</span>
+      </button>
+      {open && (
+        <div className="absolute right-0 top-7 z-50 bg-[#1a1f2e] border border-[#2a3142] rounded-xl shadow-2xl p-2 min-w-[190px] text-xs">
+          <div className="text-[#6b7280] text-[10px] font-medium px-2 pb-1.5">Switch model</div>
+          {allModels.map(m => {
+            const provName = m.split('/')[0]
+            const health = providerHealth[provName]
+            const hasError = health && health.errorCount > 0 && !health.healthy
+            const isCurrent = modelInfo.model === m
+            return (
+              <button
+                key={m}
+                onClick={() => switchModel(m)}
+                className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg transition-colors text-left ${
+                  isCurrent
+                    ? 'bg-[#6366f1]/20 text-[#a5b4fc]'
+                    : 'text-[#e8eaf0] hover:bg-[#2a3142]'
+                }`}
+              >
+                <span className="flex-1">{modelShortName(m)}</span>
+                {hasError && <span title="Provider has recent errors" className="text-amber-400 text-[10px]">⚠</span>}
+                {isCurrent && <span className="text-[#6366f1] text-[10px]">✓</span>}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface ChatMessage {
@@ -2181,6 +2326,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               </span>
             )}
             <SessionCostBadge sessionKey={sessionKey} />
+            <ModelBadge sessionKey={sessionKey} />
             <button
               onClick={onClose}
               className="h-6 w-6 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-xs text-[#6b7280] hover:text-red-400 shrink-0"
@@ -2371,11 +2517,29 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               const msgTs = getMsgTs(msg)
               const showTs = msgTs > 0
               const msgKey = msg.id !== undefined ? String(msg.id) : String(getMsgTs(msg) || `${msg.role}-${i}`)
+              // Model switch detection — render as divider annotation instead of a bubble
+              const msgText = extractText(msg.content)
+              const isModelSwitch = msg.role === 'assistant' && (
+                /model (set|switched|now using|changed) to/i.test(msgText) ||
+                /^(switching|fallback|now using|using) (model|claude|gemini|gpt)/i.test(msgText) ||
+                /\/(model|switch) /i.test(msgText)
+              ) && msgText.length < 200
+
               return (
               <React.Fragment key={msgKey}>
+              {isModelSwitch && (
+                <div className="flex items-center gap-2 px-4 py-1 my-1">
+                  <div className="flex-1 h-px bg-[#2a3142]" />
+                  <span className="text-[10px] text-[#6366f1] font-mono flex items-center gap-1">
+                    <span>⚡</span>
+                    <span>{msgText.slice(0, 80)}</span>
+                  </span>
+                  <div className="flex-1 h-px bg-[#2a3142]" />
+                </div>
+              )}
               <div
                 data-msg-key={msgKey}
-                className={`flex gap-2 items-end ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                className={`flex gap-2 items-end ${isModelSwitch ? 'hidden' : ''} ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
                 onMouseEnter={() => setHoveredMsgKey(msgKey)}
                 onMouseLeave={() => setHoveredMsgKey(null)}
               >
