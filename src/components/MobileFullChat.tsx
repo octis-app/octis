@@ -409,7 +409,7 @@ function MobileModelBadge({ sessionKey }: { sessionKey: string }) {
     setOpen(false)
     setSwitching(true)
     void sendChat({ sessionKey, message: `/model ${modelId}` })
-    setTimeout(() => { void fetchModel(); setSwitching(false) }, 3000)
+    setTimeout(() => { void fetchModel(); setSwitching(false) }, 5000)
   }
 
   if (!modelInfo) return null

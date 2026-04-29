@@ -1122,9 +1122,10 @@ app.get('/api/session-model', requireAuth, async (req, res) => {
         const sessions = JSON.parse(await fs.readFile(SESSIONS_JSON_PATH, 'utf8'))
         const sess = sessions[sessionKey]
         if (sess) {
-          // sessions.json stores provider + model separately
-          const provider = sess.modelProvider
-          const model = sess.model
+          // Prefer modelOverride/providerOverride (set by /model command)
+          // Fall back to modelProvider/model (last-used model)
+          const provider = sess.providerOverride || sess.modelProvider
+          const model = sess.modelOverride || sess.model
           if (provider && model) {
             sessionModel = `${provider}/${model}`
           }
