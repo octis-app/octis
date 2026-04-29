@@ -137,34 +137,45 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
   }
 
   const handleDelete = async (project: Project) => {
-    // First call: check if there are sessions
-    setDeleting(project.id)
-    const r = await fetch(`${API}/api/projects/${project.id}`, {
-      method: 'DELETE',
-      credentials: 'include',
-    })
-    const d = await r.json()
+    // Count sessions using the same logic as the project card
+    const activeCount = sessions.filter((s: Session) => 
+      isVisibleSession(s) && getTag(s.key).project === project.slug
+    ).length
     
-    if (d.warning) {
-      // Show confirmation dialog
-      setDeleteConfirm({ 
-        id: project.id, 
-        name: project.name, 
-        sessionCount: d.sessionCount,
-        activeCount: d.activeCount || 0,
-        archivedCount: d.archivedCount || 0
+    const archivedCount = hiddenSessions.filter((s: Session) => 
+      getTag(s.key).project === project.slug && !isAgentSession(s)
+    ).length
+    
+    const totalCount = activeCount + archivedCount
+    
+    // If no sessions, delete immediately without confirmation
+    if (totalCount === 0) {
+      setDeleting(project.id)
+      const r = await fetch(`${API}/api/projects/${project.id}?confirm=true`, {
+        method: 'DELETE',
+        credentials: 'include',
       })
+      const d = await r.json()
+      if (d.ok) {
+        setProjects(prev => prev.filter(p => p.id !== project.id))
+        // Refresh projectMeta
+        const updatedList = projects.filter(p => p.id !== project.id)
+        const meta: Record<string, { emoji: string; name: string; color: string; hideFromSessions?: boolean }> = {}
+        for (const p of updatedList) meta[p.slug] = { emoji: p.emoji || '📁', name: p.name, color: p.color || '#6366f1', hideFromSessions: !!p.hide_from_sessions }
+        setProjectMeta(meta)
+      }
       setDeleting(null)
-    } else if (d.ok) {
-      // Deleted successfully
-      setProjects(prev => prev.filter(p => p.id !== project.id))
-      setDeleting(null)
-      // Refresh projectMeta
-      const updatedList = projects.filter(p => p.id !== project.id)
-      const meta: Record<string, { emoji: string; name: string; color: string; hideFromSessions?: boolean }> = {}
-      for (const p of updatedList) meta[p.slug] = { emoji: p.emoji || '📁', name: p.name, color: p.color || '#6366f1', hideFromSessions: !!p.hide_from_sessions }
-      setProjectMeta(meta)
+      return
     }
+    
+    // Show confirmation dialog with frontend-calculated counts
+    setDeleteConfirm({ 
+      id: project.id, 
+      name: project.name, 
+      sessionCount: totalCount,
+      activeCount,
+      archivedCount
+    })
   }
 
   const confirmDelete = async () => {
