@@ -152,7 +152,7 @@ export default function ProjectView({ project, onBack }: ProjectViewProps) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-      body: JSON.stringify({ sessionKey: key, projectTag: project.slug }),
+      body: JSON.stringify({ sessionKey: key, projectTag: project.slug, skipInject: true }),
     })
     setTag(key, project.slug)
     // Defer context injection until user actually sends a message
