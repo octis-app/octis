@@ -1345,7 +1345,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
                     authFetch(`${API}/api/session-projects`, {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ sessionKey: key, projectTag: p.slug }),
+                      body: JSON.stringify({ sessionKey: key, projectTag: p.slug, skipInject: true }),
                     }).catch(() => {})
                     setPendingPaneKey(key)
                   } catch (e) { console.error('Failed to create session:', e) }

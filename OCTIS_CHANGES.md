@@ -1,12 +1,42 @@
 # Octis — Local Changes & Fixes Log
 
 > **Base commit:** `f42ceb3` ("fix: resolve 9 bugs from Kennan's fresh-pull report")
-> **Changed files:** 16 files across frontend, backend, DB schema, and build config
+> **Changed files:** 17 files across frontend, backend, DB schema, and build config
 > **Purpose:** This document describes every change made locally since the initial pull, intended for the upstream maintainer before any merge.
 
 ---
 
 ## Latest Changes — 2026-04-29
+
+### Project Context Auto-Injection Fix (16:22 UTC)
+
+**Files changed:**
+- `server/index.js` (POST `/api/session-projects` endpoint)
+
+**Changes:**
+1. Made endpoint async to support chat injection
+2. Query old project before updating DB to detect state changes
+3. Inject project context message in ALL cases (not just switches):
+   - **First assignment** (null → project): "This session has been **filed under** the {emoji} {name} project"
+   - **Project change** (project A → project B): "This session has been **moved to** the {emoji} {name} project"
+   - **Project removal** (project → null): "This session has been **removed from its project**"
+   - **No-op** (same → same): Skip injection
+
+**Why:** 
+- New sessions created with a project never received initial context (relied on broken client-side `pendingProjectInit` flag)
+- Switching projects had no notification
+- Bot was unaware of project assignments
+
+**Root cause:** Client-side `pendingProjectInit` flag (consumed by `ChatPane.tsx` on first message) was unreliable:
+- Flag cleared on page reload
+- Flag missing if session created in different tab
+- Flag never set when manually switching existing session's project
+
+**Fix:** Server-side detection in `/api/session-projects` endpoint eliminates reliance on client-side flag. Every project assignment/change now injects context immediately.
+
+**Tested:** ✅ Syntax check passed (`node -c server/index.js`)
+
+---
 
 ### Mobile Project Switcher Fix (11:18 UTC)
 
