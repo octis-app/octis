@@ -165,7 +165,7 @@ function ModelBadge({ sessionKey }: { sessionKey: string }) {
     setSwitching(true)
     void sendChat({ sessionKey, message: `/model ${modelId}` })
     // Refresh after a short delay to pick up the new model
-    setTimeout(() => { void fetchModel(); setSwitching(false) }, 3000)
+    setTimeout(() => { void fetchModel(); setSwitching(false) }, 5000)
   }
 
   if (!modelInfo) return null
