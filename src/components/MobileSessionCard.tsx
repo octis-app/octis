@@ -173,7 +173,7 @@ function MobileSessionCard({ session, onOpenFull, onArchive }: MobileSessionCard
     void fetch(`${API}/api/session-autoname`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: slim, model: localStorage.getItem('octis-rename-model') || undefined }),
+      body: JSON.stringify({ messages: slim, sessionKey: session.key, model: localStorage.getItem('octis-rename-model') || undefined }),
     }).then(r => r.json()).then((data: { label?: string }) => {
       const lbl = data.label
       if (!lbl) return

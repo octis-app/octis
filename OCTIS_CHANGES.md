@@ -1,12 +1,45 @@
 # Octis — Local Changes & Fixes Log
 
 > **Base commit:** `f42ceb3` ("fix: resolve 9 bugs from Kennan's fresh-pull report")
-> **Changed files:** 17 files across frontend, backend, DB schema, and build config
+> **Changed files:** 18 files across frontend, backend, DB schema, and build config
 > **Purpose:** This document describes every change made locally since the initial pull, intended for the upstream maintainer before any merge.
 
 ---
 
-## Latest Changes — 2026-04-29
+## Latest Changes — 2026-04-30
+
+### Fix: ✨ Star Auto-Rename Now Includes Project Context (19:28 UTC)
+
+**Files changed:**
+- `server/index.js` (session-autoname endpoint)
+- `src/components/ChatPane.tsx`
+- `src/components/MobileFullChat.tsx`
+- `src/components/MobileSessionCard.tsx`
+
+**Problem:**
+- When clicking the ✨ star button to auto-rename a session, the generated title did NOT include the project context
+- Sessions filed under specific projects (e.g. "Module 1", "Octis") would get generic titles that didn't reflect which project they belonged to
+- The `/api/session-autoname` endpoint was only using the first 6 messages, without checking which project the session was filed under
+
+**Solution:**
+- Modified `/api/session-autoname` endpoint to:
+  - Accept a new `sessionKey` parameter
+  - Look up the session's project from `octis_session_projects` table
+  - If a project is found, append project context to the AI prompt: `"Project context: This session is filed under the \"🐙 Octis\" project."`
+- Updated all frontend components that call `/api/session-autoname` to pass `sessionKey` in the request body:
+  - `ChatPane.tsx` (desktop rename button)
+  - `MobileFullChat.tsx` (mobile rename button)
+  - `MobileSessionCard.tsx` (mobile auto-rename)
+
+**Impact:**
+- Auto-generated session titles now reflect the project context
+- Example: A session under "Module 1" about email automation will generate "Module 1 Email Automation" instead of just "Email Automation"
+- Improves session organization and discoverability
+- Backward compatible — if `sessionKey` is not provided or no project is assigned, behavior is unchanged
+
+---
+
+## Previous Changes — 2026-04-29
 
 ### Fix localStorage Quota Error (17:47 UTC)
 
@@ -2218,4 +2251,72 @@ This is a fundamental limitation — when sessions are cleaned up by OpenClaw's 
 
 ### Recommendation for Upstream
 Consider adding a note in the cost tab UI: "Shows active session costs only. Check Anthropic Console for full billing."
+
+
+---
+
+## Session 2026-04-30 19:00–19:28 UTC — Image Persistence, Thinking Indicator, Database Schema Fix
+
+### Issues Fixed
+
+#### 1. Image Display After Page Reload
+**Problem:** Images sent via Octis chat would display correctly on first send (optimistic base64), but after page reload they'd show as `[image]` text instead of rendering.
+
+**Root Cause:** Gateway stores images as `[media attached: media://inbound/xxx.png]` text references (not structured image content blocks). Octis only recognized the older `[media attached: /path (mime/type)]` format.
+
+**Solution:** Added regex pattern matching for webchat media format in both `ChatPane.tsx` and `MobileFullChat.tsx`:
+```javascript
+const webchatMediaMatch = !mediaMatch && text.match(/\[media attached:\s*media:\/\/inbound\/([^\]\s]+)/)
+```
+When matched, extracts filename and renders via `/api/media/:filename` endpoint.
+
+#### 2. "Thinking" Indicator Stuck Forever
+**Problem:** After sending an image, the thinking indicator would stay on indefinitely, even after receiving the assistant's reply. User had to refresh to see the response.
+
+**Root Cause:** WebSocket lifecycle:end events weren't being received (tab switching, connection issues), and the existing 90s timeout only triggered if `runActiveRef.current === false`.
+
+**Solution:** Added stronger fallback in ChatPane.tsx poll handler:
+```javascript
+// When poll detects assistant reply after our last sent message, force-clear working state
+if (lastMsg?.role === 'assistant' && lastMsgTs > lastSentRef.current) {
+  runActiveRef.current = false
+  setIsWorking(false)
+  // ...
+}
+```
+Now clears working state on poll regardless of lifecycle events.
+
+#### 3. Database Schema — Cost Tables in Wrong Schema
+**Problem:** Cost data was being written to `raw_nexus` schema (Casin's) instead of `kennan` schema (Kennan's).
+
+**Root Cause:** `sync-costs.js` was hardcoded to write to `raw_nexus.claw_session_costs` and `raw_nexus.claw_user_daily_costs`.
+
+**Solution:**
+1. Created `kennan.claw_session_costs` and `kennan.octis_session_labels` tables
+2. Migrated 99 session cost rows from `raw_nexus` → `kennan`
+3. Updated `scripts/sync-costs.js` to write to `kennan` schema
+4. Updated `server/index.js` to read from `kennan` schema consistently
+5. Fixed PostgreSQL "inconsistent types" error by adding `::text` cast
+
+### Files Changed
+
+| File | Change |
+|---|---|
+| `src/components/ChatPane.tsx` | Added webchat media pattern matching + stronger poll-based working state clear |
+| `src/components/MobileFullChat.tsx` | Added webchat media pattern matching |
+| `scripts/sync-costs.js` | Changed all `raw_nexus` references to `kennan` schema |
+| `server/index.js` | Changed all `raw_nexus` references to `kennan` schema |
+
+### Database Changes
+- Created `kennan.claw_session_costs` (mirroring `raw_nexus.claw_session_costs` structure)
+- Created `kennan.octis_session_labels` for session labels
+- Added `input_tokens` and `output_tokens` columns to `kennan.claw_user_daily_costs`
+- Added unique constraint on `(cost_date, user_id)` for upsert support
+
+### Tested
+- ✅ Image sent → displays correctly on send
+- ✅ Page reload → image persists and displays
+- ✅ Thinking indicator clears when reply received
+- ✅ `node scripts/sync-costs.js` runs without errors
+- ✅ Cost data in `kennan` schema verified (101 sessions, 7 days of data)
 

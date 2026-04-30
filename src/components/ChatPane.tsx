@@ -2281,7 +2281,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
       const res = await fetch(`${API}/api/session-autoname`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: slim, model: localStorage.getItem('octis-rename-model') || undefined }),
+        body: JSON.stringify({ messages: slim, sessionKey, model: localStorage.getItem('octis-rename-model') || undefined }),
       })
       const data = await res.json() as { label?: string; error?: string }
       const label = data.label

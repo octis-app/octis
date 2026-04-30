@@ -414,7 +414,7 @@ app.get('/api/me', requireAuth, (req, res) => {
 
 app.post('/api/session-autoname', async (req, res) => {
   try {
-    const { messages } = req.body
+    const { messages, sessionKey } = req.body
     if (!Array.isArray(messages) || messages.length === 0)
       return res.status(400).json({ error: 'No messages provided' })
 
@@ -438,7 +438,23 @@ app.post('/api/session-autoname', async (req, res) => {
     if (!excerpt.trim() || excerpt.replace(/User:|Assistant:/g, '').trim().length < 10)
       return res.status(400).json({ error: 'Not enough conversation content' })
 
-    const prompt = `Generate a 3-5 word session title for this conversation. Reply with ONLY the title — no quotes, no punctuation, no explanation.\nExamples: Octis Sidebar Layout Fixes | Sage GL Batch Push | Centurion Deal Analysis\n\n${excerpt}\n\nTitle:`
+    // Look up project context if sessionKey provided
+    let projectContext = ''
+    if (sessionKey) {
+      try {
+        const projectRow = db.prepare('SELECT project FROM octis_session_projects WHERE session_key = ?').get(sessionKey)
+        if (projectRow?.project) {
+          const project = db.prepare('SELECT name, emoji FROM octis_projects WHERE slug = ?').get(projectRow.project)
+          if (project) {
+            projectContext = `\n\nProject context: This session is filed under the "${project.emoji} ${project.name}" project.`
+          }
+        }
+      } catch (projErr) {
+        console.warn('[octis] session-autoname project lookup error:', projErr.message)
+      }
+    }
+
+    const prompt = `Generate a 3-5 word session title for this conversation. Reply with ONLY the title — no quotes, no punctuation, no explanation.\nExamples: Octis Sidebar Layout Fixes | Sage GL Batch Push | Centurion Deal Analysis\n\n${excerpt}${projectContext}\n\nTitle:`
 
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
