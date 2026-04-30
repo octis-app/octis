@@ -15,7 +15,7 @@ try {
 } catch {}
 
 const baseConfig = defineConfig({
-  base: '/',
+  base: '/octis/',
   plugins: [
     react(),
     VitePWA({

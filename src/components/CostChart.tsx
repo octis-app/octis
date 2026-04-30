@@ -38,6 +38,13 @@ export default function CostChart({ data, maDays = 3 }: Props) {
   // Round up to a nice number for Y axis
   const yMax = Math.ceil(maxVal * 1.2 * 100) / 100
 
+  // Format currency with appropriate precision based on magnitude
+  const fmtCost = (val: number) => {
+    if (val >= 1000) return '$' + val.toLocaleString('en-US', { maximumFractionDigits: 0 })
+    if (val >= 10) return '$' + val.toFixed(2)
+    return '$' + val.toFixed(3)
+  }
+
   const xScale = (i: number) => (i / (sorted.length - 1)) * CHART_W
   const yScale = (v: number) => CHART_H - (v / yMax) * CHART_H
 
@@ -85,7 +92,7 @@ export default function CostChart({ data, maDays = 3 }: Props) {
                 textAnchor="end" dominantBaseline="middle"
                 fontSize={9} fill="#6b7280"
               >
-                ${tick.toFixed(2)}
+                {fmtCost(tick)}
               </text>
             </g>
           ))}
@@ -195,13 +202,13 @@ export default function CostChart({ data, maDays = 3 }: Props) {
           </div>
           <div className="flex items-center gap-2">
             <div className="w-2 h-2 rounded-sm bg-[#6366f1]" />
-            <span className="text-white font-semibold">${tooltip.day.total_cost_usd.toFixed(3)}</span>
+            <span className="text-white font-semibold">{fmtCost(tooltip.day.total_cost_usd)}</span>
             <span className="text-[#6b7280]">· {tooltip.day.session_count} sessions</span>
           </div>
           {tooltip.ma !== null && (
             <div className="flex items-center gap-2 mt-1">
               <div className="w-2 h-0.5 bg-[#f59e0b] rounded-full" />
-              <span className="text-[#f59e0b]">${tooltip.ma.toFixed(3)}</span>
+              <span className="text-[#f59e0b]">{fmtCost(tooltip.ma)}</span>
               <span className="text-[#6b7280]">{maDays}-day avg</span>
             </div>
           )}

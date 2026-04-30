@@ -88,6 +88,13 @@ function timeAgo(ts: string | null): string {
   return `${days}d ago`
 }
 
+// Format currency with appropriate precision and commas for large values
+function fmtCost(val: number, precision: 'short' | 'full' = 'full'): string {
+  if (val >= 1000) return '$' + val.toLocaleString('en-US', { maximumFractionDigits: precision === 'short' ? 0 : 2 })
+  if (val >= 10) return '$' + val.toFixed(2)
+  return '$' + val.toFixed(precision === 'short' ? 2 : 3)
+}
+
 export default function CostsPanel() {
   const { labels } = useLabelStore()
   const [data, setData] = useState<CostsData | null>(null)
@@ -122,6 +129,17 @@ export default function CostsPanel() {
       void load(true)
     }, 60_000)
     return () => clearInterval(interval)
+  }, [])
+
+  // Refresh on visibility change (when tab becomes visible)
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void load(true)
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => document.removeEventListener('visibilitychange', handleVisibility)
   }, [])
 
   if (loading && !data) return <div className="p-6 text-[#6b7280] text-sm">Loading costs…</div>
@@ -191,7 +209,7 @@ export default function CostsPanel() {
         {/* Today + delta vs yesterday */}
         <div className="bg-[#181c24] border border-[#2a3142] rounded-xl p-4">
           <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-1">Today</div>
-          <div className="text-2xl font-bold text-white">${data.today.toFixed(2)}</div>
+          <div className="text-2xl font-bold text-white">{fmtCost(data.today, 'short')}</div>
           {todayDelta !== null && (
             <div className={`text-xs mt-1 font-medium flex items-center gap-1 ${todayDelta > 0 ? 'text-amber-400' : 'text-emerald-400'}`}>
               <span>{todayDelta > 0 ? '↑' : '↓'}</span>
@@ -228,10 +246,10 @@ export default function CostsPanel() {
         <div className="bg-[#181c24] border border-[#2a3142] rounded-xl p-4">
           <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-1">7-Day Avg</div>
           <div className="text-2xl font-bold text-white">
-            {avgPerDay > 0 ? `$${avgPerDay.toFixed(2)}` : '—'}
+            {avgPerDay > 0 ? fmtCost(avgPerDay, 'short') : '—'}
           </div>
           <div className="text-xs text-[#6b7280] mt-1">
-            ${weekTotal.toFixed(2)} total
+            {fmtCost(weekTotal, 'short')} total
           </div>
         </div>
       </div>

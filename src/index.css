@@ -88,3 +88,276 @@ html { -webkit-text-size-adjust: 100%; }
   60%  { box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.35); }
   100% { box-shadow: 0 0 0 0px rgba(99, 102, 241, 0); }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   Messenger-Style Chat Enhancements (2026-04-30)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+/* Smooth message entry animation */
+@keyframes messageSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.msg-animate-in {
+  animation: messageSlideIn 0.2s ease-out forwards;
+}
+
+/* Subtle hover effect on message bubbles */
+.msg-bubble-hover {
+  transition: transform 0.1s ease, box-shadow 0.15s ease;
+}
+.msg-bubble-hover:hover {
+  transform: scale(1.005);
+}
+
+/* Smooth send button pulse when ready */
+@keyframes sendPulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+}
+.send-btn-ready {
+  animation: sendPulse 1.5s ease-in-out infinite;
+}
+.send-btn-ready:hover {
+  animation: none;
+  transform: scale(1.08);
+}
+
+/* Typing indicator dots */
+@keyframes typingDot {
+  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
+}
+.typing-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  background: #6b7280;
+  border-radius: 50%;
+  margin: 0 2px;
+}
+.typing-dot:nth-child(1) { animation: typingDot 1.4s ease-in-out infinite; }
+.typing-dot:nth-child(2) { animation: typingDot 1.4s ease-in-out 0.2s infinite; }
+.typing-dot:nth-child(3) { animation: typingDot 1.4s ease-in-out 0.4s infinite; }
+
+/* Image loading shimmer */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.img-loading-shimmer {
+  background: linear-gradient(90deg, #1e2330 25%, #2a3142 50%, #1e2330 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+/* Read receipt / delivered indicator */
+.delivery-indicator {
+  font-size: 10px;
+  color: #4b5563;
+  transition: color 0.2s;
+}
+.delivery-indicator.sent { color: #6b7280; }
+.delivery-indicator.delivered { color: #22c55e; }
+
+/* Message reaction emoji */
+.msg-reaction {
+  position: absolute;
+  bottom: -8px;
+  right: 8px;
+  background: #1e2330;
+  border: 1px solid #2a3142;
+  border-radius: 10px;
+  padding: 2px 6px;
+  font-size: 12px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+  transform-origin: center;
+  transition: transform 0.15s ease;
+}
+.msg-reaction:hover {
+  transform: scale(1.15);
+}
+
+/* Action buttons (copy, reply) reveal */
+.msg-actions {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  display: flex;
+  gap: 4px;
+}
+.msg-wrapper:hover .msg-actions {
+  opacity: 1;
+}
+.msg-action-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #2a3142;
+  border: none;
+  color: #9ca3af;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  transition: background 0.15s, color 0.15s, transform 0.1s;
+}
+.msg-action-btn:hover {
+  background: #3d4766;
+  color: white;
+  transform: scale(1.1);
+}
+.msg-action-btn:active {
+  transform: scale(0.95);
+}
+
+/* Input area focus glow */
+.input-area-focus {
+  transition: box-shadow 0.2s ease;
+}
+.input-area-focus:focus-within {
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.25);
+}
+
+/* File attachment pill style */
+.file-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: rgba(99, 102, 241, 0.15);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: 16px;
+  font-size: 12px;
+  color: #a5b4fc;
+  transition: all 0.15s ease;
+}
+.file-pill:hover {
+  background: rgba(99, 102, 241, 0.25);
+  border-color: rgba(99, 102, 241, 0.5);
+}
+
+/* Smooth scroll snap for chat */
+.chat-scroll-snap {
+  scroll-behavior: smooth;
+}
+
+/* Emoji picker button */
+.emoji-btn {
+  opacity: 0.5;
+  transition: opacity 0.15s, transform 0.1s;
+}
+.emoji-btn:hover {
+  opacity: 1;
+  transform: scale(1.1);
+}
+
+/* Date separator line */
+.date-separator {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0;
+  color: #4b5563;
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.date-separator::before,
+.date-separator::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: #2a3142;
+}
+
+/* New message indicator */
+.new-msg-indicator {
+  position: fixed;
+  bottom: 100px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #6366f1;
+  color: white;
+  padding: 8px 16px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
+  cursor: pointer;
+  z-index: 50;
+  animation: slideUp 0.3s ease-out;
+}
+@keyframes slideUp {
+  from { opacity: 0; transform: translateX(-50%) translateY(20px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+/* Voice message waveform placeholder */
+.voice-waveform {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 24px;
+}
+.voice-bar {
+  width: 3px;
+  background: #6366f1;
+  border-radius: 2px;
+  animation: voiceBar 0.8s ease-in-out infinite;
+}
+@keyframes voiceBar {
+  0%, 100% { height: 8px; }
+  50% { height: 20px; }
+}
+
+/* Mobile touch feedback */
+@media (hover: none) {
+  .msg-bubble-hover:active {
+    transform: scale(0.98);
+    opacity: 0.9;
+  }
+}
+
+/* Smooth transitions for all interactive elements */
+button, a, input, textarea {
+  transition: all 0.15s ease;
+}
+
+/* Better focus outlines */
+:focus-visible {
+  outline: 2px solid #6366f1;
+  outline-offset: 2px;
+}
+
+/* Prevent layout shift on image load */
+.img-container {
+  aspect-ratio: auto;
+  min-height: 40px;
+  position: relative;
+}
+
+/* Mobile safe areas and better touch targets */
+@media (max-width: 768px) {
+  button, [role="button"] {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  
+  /* Larger touch targets for message actions */
+  .msg-action-btn {
+    width: 36px;
+    height: 36px;
+    font-size: 16px;
+  }
+}

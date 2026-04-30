@@ -287,6 +287,22 @@ interface ChatPaneProps {
   isFeatured?: boolean
 }
 
+// ─── Image data helpers ──────────────────────────────────────────────────────
+// Check if an image block has actual base64 data (handles both formats)
+// OpenClaw native: {type:'image', data:'...', mimeType:'...'}
+// Anthropic format: {type:'image', source:{type:'base64', data:'...', media_type:'...'}}
+function imageBlockHasData(block: unknown): boolean {
+  if (!block || typeof block !== 'object') return false
+  const b = block as Record<string, unknown>
+  if (b.type !== 'image') return false
+  // OpenClaw native format
+  if (b.data) return true
+  // Anthropic format
+  const src = b.source as Record<string, unknown> | undefined
+  if (src?.data) return true
+  return false
+}
+
 // ─── Markdown renderer ────────────────────────────────────────────────────────
 
 
@@ -543,6 +559,29 @@ function fmtMsgTs(ms: number): string {
   if (sameDay) return time
   if (isYesterday) return `Yesterday ${time}`
   return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`
+}
+
+// Get date label for date separator
+function getDateLabel(ms: number): string {
+  const d = new Date(ms)
+  const now = new Date()
+  const sameDay = d.toDateString() === now.toDateString()
+  if (sameDay) return 'Today'
+  const yesterday = new Date(now)
+  yesterday.setDate(yesterday.getDate() - 1)
+  if (d.toDateString() === yesterday.toDateString()) return 'Yesterday'
+  const thisYear = d.getFullYear() === now.getFullYear()
+  return thisYear
+    ? d.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' })
+    : d.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+}
+
+// Check if two timestamps are on different days
+function isDifferentDay(ts1: number, ts2: number): boolean {
+  if (!ts1 || !ts2) return false
+  const d1 = new Date(ts1)
+  const d2 = new Date(ts2)
+  return d1.toDateString() !== d2.toDateString()
 }
 
 function isNoiseMsg(msg: ChatMessage): boolean {
@@ -863,6 +902,8 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   const [hoveredMsgKey, setHoveredMsgKey] = useState<string | null>(null)
   const [replyingTo, setReplyingTo] = useState<{ id: string | number | undefined; role: 'user' | 'assistant'; preview: string } | null>(null)
   const [highlightedMsgKey, setHighlightedMsgKey] = useState<string | null>(null)
+  const [copiedMsgKey, setCopiedMsgKey] = useState<string | null>(null)
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const userScrolledUpRef = useRef(false)
@@ -1127,6 +1168,21 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               setIsWorking(false)
               setWorkingTool(null)
             }
+            // STRONGER FALLBACK: If poll shows an assistant reply after our last sent message,
+            // clear working state even if lifecycle:end wasn't received (WebSocket may have missed it)
+            const lastMsg = msgs[msgs.length - 1]
+            const lastMsgText = lastMsg ? extractText(lastMsg.content).trim() : ''
+            const lastMsgTs = getMsgTs(lastMsg)
+            if (lastMsg?.role === 'assistant' && lastMsgText && !isHeartbeatResponse(lastMsg.content)) {
+              // Assistant replied — clear working state regardless of lifecycle
+              if (lastSentRef.current > 0 && lastMsgTs > lastSentRef.current) {
+                // This assistant message came after we sent — we got our reply
+                runActiveRef.current = false
+                setIsWorking(false)
+                setWorkingTool(null)
+                if (workingTimeoutRef.current) { clearTimeout(workingTimeoutRef.current); workingTimeoutRef.current = null }
+              }
+            }
           }
           setMessages((prev) => {
             // Preserve local-only messages (like model switch notifications)
@@ -1147,7 +1203,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               base = msgs.map(serverMsg => {
                 if (serverMsg.role !== 'user' || !Array.isArray(serverMsg.content)) return serverMsg
                 const blocks = serverMsg.content as ContentBlock[]
-                const hasEmptyImage = blocks.some(b => b.type === 'image' && !(b as Record<string,unknown>).data)
+                const hasEmptyImage = blocks.some(b => b.type === 'image' && !imageBlockHasData(b))
                 if (!hasEmptyImage) return serverMsg
                 const localMsg = prevServer.find(m =>
                   (m.id !== undefined && m.id === serverMsg.id) ||
@@ -1155,7 +1211,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                 )
                 if (!localMsg || !Array.isArray(localMsg.content)) return serverMsg
                 const localBlocks = localMsg.content as ContentBlock[]
-                const localHasImageData = localBlocks.some(b => b.type === 'image' && !!(b as Record<string,unknown>).data)
+                const localHasImageData = localBlocks.some(b => imageBlockHasData(b))
                 return localHasImageData ? { ...serverMsg, content: localMsg.content } : serverMsg
               })
             } else {
@@ -1189,9 +1245,9 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                     if (hasMissingTs || hasMissingMedia) {
                       // Don't overwrite content when local has image data and server stripped it
                       const localHasImgData = Array.isArray(m.content) &&
-                        (m.content as ContentBlock[]).some(b => b.type === 'image' && !!(b as Record<string,unknown>).data)
+                        (m.content as ContentBlock[]).some(b => imageBlockHasData(b))
                       const serverHasEmptyImg = Array.isArray(pm.content) &&
-                        (pm.content as ContentBlock[]).some(b => b.type === 'image' && !(b as Record<string,unknown>).data)
+                        (pm.content as ContentBlock[]).some(b => b.type === 'image' && !imageBlockHasData(b))
                       return localHasImgData && serverHasEmptyImg
                         ? { ...m, ...pm, content: m.content }
                         : { ...m, ...pm }
@@ -1287,7 +1343,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
           // Restore from: 1) current state 2) localStorage cache 3) async HTTP (server enriches from JSONL)
           const hasEmptyImages = msgs.some(m =>
             m.role === 'user' && Array.isArray(m.content) &&
-            (m.content as ContentBlock[]).some(b => b.type === 'image' && !(b as Record<string,unknown>).data)
+            (m.content as ContentBlock[]).some(b => b.type === 'image' && !imageBlockHasData(b))
           )
           if (hasEmptyImages) {
             // WS chat.history strips base64 from image blocks (gateway optimization).
@@ -1807,11 +1863,14 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
       )
     }
     // Match: [media attached: /root/.openclaw/media/inbound/FILENAME.EXT (mime/type) | ...]
+    // Also match webchat format: [media attached: media://inbound/image---xxx.png]
     const mediaMatch = text.match(/\[media attached:\s*([^\s)]+)\s+\(([^)]+)\)/)
-    if (mediaMatch) {
-      const filePath = mediaMatch[1]
-      const mimeType = mediaMatch[2] || ''
-      const filename = filePath.split('/').pop() || ''
+    const webchatMediaMatch = !mediaMatch && text.match(/\[media attached:\s*media:\/\/inbound\/([^\]\s]+)/)
+    if (mediaMatch || webchatMediaMatch) {
+      const filePath = mediaMatch ? mediaMatch[1] : `media://inbound/${webchatMediaMatch![1]}`
+      const mimeType = mediaMatch ? (mediaMatch[2] || '') : ''
+      // For webchat format, extract filename from media://inbound/xxx path
+      const filename = webchatMediaMatch ? webchatMediaMatch[1] : (filePath.split('/').pop() || '')
       const mediaSrc = `${API}/api/media/${encodeURIComponent(filename)}`
       // Strip metadata lines so only actual user text remains
       const afterMeta = text
@@ -2598,6 +2657,8 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             // Consider "at bottom" if within 80px of bottom
             const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
             userScrolledUpRef.current = !atBottom
+            // Show scroll-to-bottom button when scrolled up more than 200px
+            setShowScrollToBottom(el.scrollHeight - el.scrollTop - el.clientHeight > 200)
             // Auto-load older messages when scrolled within 150px of the top
             if (el.scrollTop < 150 && hasMore && !isLoadingOlderRef.current) {
               isLoadingOlderRef.current = true
@@ -2672,6 +2733,9 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               const msgTs = getMsgTs(msg)
               const showTs = msgTs > 0
               const msgKey = msg.id !== undefined ? String(msg.id) : String(getMsgTs(msg) || `${msg.role}-${i}`)
+              // Check if we need a date separator (different day from previous message)
+              const prevMsgTs = i > 0 ? getMsgTs(arr[i - 1]) : 0
+              const needsDateSeparator = msgTs > 0 && (i === 0 || isDifferentDay(prevMsgTs, msgTs))
               // Model switch detection — render as divider annotation instead of a bubble
               const msgText = extractText(msg.content)
               const isModelSwitch = (
@@ -2685,6 +2749,12 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
 
               return (
               <React.Fragment key={msgKey}>
+              {/* Date separator */}
+              {needsDateSeparator && (
+                <div className="date-separator my-4">
+                  {getDateLabel(msgTs)}
+                </div>
+              )}
               {isModelSwitch && (
                 <div className="flex items-center gap-2 px-4 py-1 my-1">
                   <div className="flex-1 h-px bg-[#2a3142]" />
@@ -2812,13 +2882,43 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                     />
                   )}
                 </div>
-                {/* Reply button — appears right of assistant messages on hover */}
+                {/* Action buttons — appears right of assistant messages on hover */}
                 {msg.role === 'assistant' && (
-                  <button
-                    onClick={() => setReplyingTo({ id: msg.id, role: 'assistant', preview: stripReplyCtxText(extractText(msg.content)).slice(0, 120) })}
-                    className={`bg-transparent border-0 outline-none text-[#a0aec0] hover:text-white transition-all duration-100 shrink-0 mb-2 leading-none select-none p-0 text-base ${hoveredMsgKey === msgKey ? 'opacity-70 hover:opacity-100' : 'opacity-0 pointer-events-none'}`}
-                    title="Reply"
-                  >{'\u21A9'}</button>
+                  <div className={`flex items-center gap-1 shrink-0 mb-2 transition-opacity duration-100 ${hoveredMsgKey === msgKey ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+                    {/* Copy button */}
+                    <button
+                      onClick={() => {
+                        const text = stripReplyCtxText(extractText(msg.content))
+                        navigator.clipboard.writeText(text).then(() => {
+                          setCopiedMsgKey(msgKey)
+                          setTimeout(() => setCopiedMsgKey(null), 1800)
+                        }).catch(() => {
+                          // Fallback for iOS/older browsers
+                          const ta = document.createElement('textarea')
+                          ta.value = text
+                          ta.style.position = 'fixed'
+                          ta.style.opacity = '0'
+                          document.body.appendChild(ta)
+                          ta.focus()
+                          ta.select()
+                          document.execCommand('copy')
+                          document.body.removeChild(ta)
+                          setCopiedMsgKey(msgKey)
+                          setTimeout(() => setCopiedMsgKey(null), 1800)
+                        })
+                      }}
+                      className="bg-transparent border-0 outline-none text-[#6b7280] hover:text-white transition-colors p-1 rounded"
+                      title="Copy"
+                    >
+                      {copiedMsgKey === msgKey ? <span className="text-[10px] text-[#22c55e] font-medium">✓</span> : <span className="text-sm">⎘</span>}
+                    </button>
+                    {/* Reply button */}
+                    <button
+                      onClick={() => setReplyingTo({ id: msg.id, role: 'assistant', preview: stripReplyCtxText(extractText(msg.content)).slice(0, 120) })}
+                      className="bg-transparent border-0 outline-none text-[#6b7280] hover:text-white transition-colors p-1 rounded"
+                      title="Reply"
+                    >{'\u21A9'}</button>
+                  </div>
                 )}
               </div>
               </React.Fragment>
@@ -2866,6 +2966,21 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               </div>
             ))}
           </div>
+        )}
+
+        {/* Scroll to bottom button */}
+        {showScrollToBottom && (
+          <button
+            onClick={() => {
+              bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+              setShowScrollToBottom(false)
+              userScrolledUpRef.current = false
+            }}
+            className="absolute bottom-20 left-1/2 -translate-x-1/2 bg-[#6366f1] hover:bg-[#818cf8] text-white px-4 py-2 rounded-full text-xs font-medium shadow-lg shadow-[#6366f1]/30 transition-all hover:scale-105 flex items-center gap-1.5 z-20"
+          >
+            <span>↓</span>
+            <span>New messages</span>
+          </button>
         )}
 
         {/* Input */}

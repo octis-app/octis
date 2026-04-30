@@ -70,7 +70,46 @@ function fmtMsgTs(ms: number): string {
   return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`
 }
 
+// Get date label for date separator
+function getDateLabel(ms: number): string {
+  const d = new Date(ms)
+  const now = new Date()
+  const sameDay = d.toDateString() === now.toDateString()
+  if (sameDay) return 'Today'
+  const yesterday = new Date(now)
+  yesterday.setDate(yesterday.getDate() - 1)
+  if (d.toDateString() === yesterday.toDateString()) return 'Yesterday'
+  const thisYear = d.getFullYear() === now.getFullYear()
+  return thisYear
+    ? d.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' })
+    : d.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+}
+
+// Check if two timestamps are on different days
+function isDifferentDay(ts1: number, ts2: number): boolean {
+  if (!ts1 || !ts2) return false
+  const d1 = new Date(ts1)
+  const d2 = new Date(ts2)
+  return d1.toDateString() !== d2.toDateString()
+}
+
 // ─── Content Rendering ────────────────────────────────────────────────────────
+
+// ─── Image data helpers ───────────────────────────────────────────────────────
+// Check if an image block has actual base64 data (handles both formats)
+// OpenClaw native: {type:'image', data:'...', mimeType:'...'}
+// Anthropic format: {type:'image', source:{type:'base64', data:'...', media_type:'...'}}
+function imageBlockHasData(block: unknown): boolean {
+  if (!block || typeof block !== 'object') return false
+  const b = block as Record<string, unknown>
+  if (b.type !== 'image') return false
+  // OpenClaw native format
+  if (b.data) return true
+  // Anthropic format
+  const src = b.source as Record<string, unknown> | undefined
+  if (src?.data) return true
+  return false
+}
 
 // Try to parse content that looks like a JSON content-block array (or single object).
 // Returns the parsed blocks, or null if it doesn't look like one / fails to parse.
@@ -164,11 +203,14 @@ function renderTextWithMedia(text: string, key: number): React.ReactNode {
       </span>
     )
   }
+  // Match: [media attached: /path (mime)] or webchat format: [media attached: media://inbound/xxx]
   const mediaMatch = text.match(/\[media attached:\s*([^\s)]+)\s+\(([^)]+)\)/)
-  if (mediaMatch) {
-    const filePath = mediaMatch[1]
-    const mimeType = mediaMatch[2] || ''
-    const filename = filePath.split('/').pop() || ''
+  const webchatMediaMatch = !mediaMatch && text.match(/\[media attached:\s*media:\/\/inbound\/([^\]\s]+)/)
+  if (mediaMatch || webchatMediaMatch) {
+    const filePath = mediaMatch ? mediaMatch[1] : `media://inbound/${webchatMediaMatch![1]}`
+    const mimeType = mediaMatch ? (mediaMatch[2] || '') : ''
+    // For webchat format, extract filename from media://inbound/xxx path
+    const filename = webchatMediaMatch ? webchatMediaMatch[1] : (filePath.split('/').pop() || '')
     const mediaSrc = `${API}/api/media/${encodeURIComponent(filename)}`
     const afterMeta = text
       .replace(/\[media attached:[^\]]+\]/g, '')
@@ -714,6 +756,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
   // Reply state
   const [replyingTo, setReplyingTo] = useState<{ id: string | number | undefined; role: 'user' | 'assistant'; preview: string } | null>(null)
   const [highlightedMsgKey, setHighlightedMsgKey] = useState<string | null>(null)
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const [swipeHint, setSwipeHint] = useState<string | null>(null)
   const touchStartX = useRef(0)
   const touchStartY = useRef(0)
@@ -1174,7 +1217,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
           // WS strips base64 from image blocks. Restore from cache, fallback to HTTP.
           const hasEmptyImages = msgs.some(m =>
             m.role === 'user' && Array.isArray(m.content) &&
-            (m.content as ContentBlock[]).some(b => (b as {type:string}).type === 'image' && !(b as Record<string,unknown>).data)
+            (m.content as ContentBlock[]).some(b => (b as {type:string}).type === 'image' && !imageBlockHasData(b))
           )
           if (hasEmptyImages) {
             fetch(`${API}/api/chat-history?sessionKey=${encodeURIComponent(session.key)}&limit=${historyLimitRef.current}`, { credentials: 'include' })
@@ -1878,6 +1921,8 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
           if (!el) return
           // With flex-col-reverse, scrollTop=0 is the bottom. User scrolled up = scrollTop > 80
           userScrolledUpRef.current = el.scrollTop > 80
+          // Show scroll-to-bottom button when scrolled up more than 200px
+          setShowScrollToBottom(el.scrollTop > 200)
           // Auto-trigger load-more when user scrolls near the top (visual top = high scrollTop in col-reverse)
           if (hasMore && loadedKey === session?.key && !isLoadingMoreRef.current) {
             const nearTop = el.scrollTop >= el.scrollHeight - el.clientHeight - 150
@@ -1940,7 +1985,11 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
             })
           const reversed = [...filtered].reverse()
           return (<>
-            {reversed.map((msg, i) => {
+            {reversed.map((msg, i, arr) => {
+              const msgTs = getMsgTs(msg)
+              // Check if we need a date separator (different day from previous message in reversed order)
+              const prevMsgTs = i > 0 ? getMsgTs(arr[i - 1]) : 0
+              const needsDateSeparator = msgTs > 0 && (i === 0 || isDifferentDay(prevMsgTs, msgTs))
               // Model switch detection — render as divider annotation
               const msgText = extractText(msg.content)
               const isModelSwitch = (
@@ -1953,6 +2002,12 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
               ) && msgText.length < 200
               return (
                 <React.Fragment key={msg.id !== undefined ? String(msg.id) : i}>
+                  {/* Date separator */}
+                  {needsDateSeparator && (
+                    <div className="date-separator my-4 px-4">
+                      {getDateLabel(msgTs)}
+                    </div>
+                  )}
                   {isModelSwitch && (
                     <div className="flex items-center gap-2 px-4 py-1 my-1">
                       <div className="flex-1 h-px bg-[#2a3142]" />
@@ -2155,6 +2210,23 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
 
       </div>
       </div>
+      {/* Scroll to bottom button */}
+      {showScrollToBottom && (
+        <button
+          onClick={() => {
+            const el = scrollRef.current
+            if (el) {
+              el.scrollTop = 0 // In flex-col-reverse, scrollTop=0 is bottom
+              setShowScrollToBottom(false)
+              userScrolledUpRef.current = false
+            }
+          }}
+          className="absolute bottom-24 left-1/2 -translate-x-1/2 bg-[#6366f1] active:bg-[#818cf8] text-white px-4 py-2.5 rounded-full text-xs font-medium shadow-lg shadow-[#6366f1]/30 transition-all active:scale-95 flex items-center gap-1.5 z-20"
+        >
+          <span>↓</span>
+          <span>New messages</span>
+        </button>
+      )}
       <div
         className="px-3 pt-2 pb-2 bg-[#181c24] border-t border-[#2a3142] shrink-0"
       >

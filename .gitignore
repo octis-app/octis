@@ -18,3 +18,5 @@ VERSION
 OCTIS_CHANGES.md
 CHANGELOG.md
 vite.config.local.js
+scripts/sync-anthropic-api-costs.js
+scripts/sync-anthropic-costs-api.js

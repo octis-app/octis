@@ -908,11 +908,21 @@ app.get('/api/sessions-list', requireAuth, async (req, res) => {
 // ─── Enrich image blocks stripped by gateway chat.history ───────────────────
 // The gateway strips base64 data from image blocks for bandwidth efficiency.
 // This helper reads the local JSONL to restore image data for user messages.
+// Handles both OpenClaw native format ({type:'image', data:...}) and
+// Anthropic format ({type:'image', source:{type:'base64', data:...}})
+function hasImageData(block) {
+  if (block.type !== 'image') return false
+  // OpenClaw native format: data directly on block
+  if (block.data) return true
+  // Anthropic format: data inside source object
+  if (block.source?.data) return true
+  return false
+}
 async function enrichImageBlocks(sessionKey, messages) {
-  // Find user messages with image blocks that have empty data
+  // Find user messages with image blocks that have empty data (either format)
   const needsEnrich = messages.some(m =>
     m.role === 'user' && Array.isArray(m.content) &&
-    m.content.some(b => b.type === 'image' && !b.data)
+    m.content.some(b => b.type === 'image' && !hasImageData(b))
   )
   if (!needsEnrich) return messages
 
@@ -955,7 +965,7 @@ async function enrichImageBlocks(sessionKey, messages) {
       try {
         const evt = JSON.parse(line)
         if (evt.message?.role === 'user' && Array.isArray(evt.message.content)) {
-          const hasImgData = evt.message.content.some(b => b.type === 'image' && b.data)
+          const hasImgData = evt.message.content.some(b => hasImageData(b))
           if (hasImgData) {
             const key = textKey(evt.message.content, true) // strip envelope for matching
             if (key) imageMap.set(key, evt.message.content)
@@ -967,7 +977,7 @@ async function enrichImageBlocks(sessionKey, messages) {
 
     return messages.map(m => {
       if (m.role !== 'user' || !Array.isArray(m.content)) return m
-      const hasEmptyImage = m.content.some(b => b.type === 'image' && !b.data)
+      const hasEmptyImage = m.content.some(b => b.type === 'image' && !hasImageData(b))
       if (!hasEmptyImage) return m
       const key = textKey(m.content)
       const richContent = key && imageMap.get(key)
@@ -1040,13 +1050,12 @@ app.get('/api/costs', requireAuth, async (req, res) => {
     const days = Math.min(parseInt(req.query.days || '30'), 90)
     const userId = 'kennan'  // Kennan's data only
     
-    // Get daily aggregates
+    // Get daily aggregates from trajectory-based cost extraction
     const { rows: daily } = await pgPool.query(`
-      SELECT cost_date AS date, SUM(total_cost_usd) AS total_cost_usd,
-        SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, SUM(session_count) AS session_count
-      FROM raw_nexus.claw_user_daily_costs
+      SELECT cost_date AS date, total_cost_usd, 0 AS input_tokens, 0 AS output_tokens, sessions_count AS session_count
+      FROM kennan.claw_user_daily_costs
       WHERE user_id = $1 AND cost_date >= CURRENT_DATE - ($2 || ' days')::INTERVAL
-      GROUP BY cost_date ORDER BY cost_date ASC
+      ORDER BY cost_date ASC
     `, [userId, days])
     
     // Get top sessions (last N days)
@@ -1054,30 +1063,31 @@ app.get('/api/costs', requireAuth, async (req, res) => {
       SELECT cs.session_id AS session_key, COALESCE(ol.label, cs.first_message) AS session_label,
         cs.sender_name, SUM(cs.total_cost_usd) AS cost, MAX(cs.last_ts) AS last_activity,
         SUM(cs.input_tokens) AS input_tokens, SUM(cs.output_tokens) AS output_tokens
-      FROM raw_nexus.claw_session_costs cs
-      LEFT JOIN raw_nexus.octis_session_labels ol ON ol.session_key = cs.session_id
+      FROM kennan.claw_session_costs cs
+      LEFT JOIN kennan.octis_session_labels ol ON ol.session_key = cs.session_id
       WHERE cs.user_id = $1 AND cs.session_date >= CURRENT_DATE - ($2 || ' days')::INTERVAL
       GROUP BY cs.session_id, cs.first_message, cs.sender_name, ol.label
       ORDER BY cost DESC LIMIT 50
     `, [userId, days])
     
-    // Get today's total (FIXED: use CURRENT_DATE directly)
+    // Get today's total from trajectory costs
     const { rows: todayRow } = await pgPool.query(`
-      SELECT COALESCE(SUM(total_cost_usd), 0) AS today_cost,
-        COALESCE(SUM(input_tokens), 0) AS input_tokens,
-        COALESCE(SUM(output_tokens), 0) AS output_tokens,
-        COALESCE(SUM(session_count), 0) AS session_count
-      FROM raw_nexus.claw_user_daily_costs 
+      SELECT COALESCE(SUM(total_cost_usd), 0) AS today_cost, 0 AS input_tokens, 0 AS output_tokens, 0 AS session_count
+      FROM kennan.claw_user_daily_costs 
       WHERE user_id = $1 AND cost_date = CURRENT_DATE
     `, [userId])
+    
+    console.log('[DEBUG] todayRow from kennan.claw_user_daily_costs:', JSON.stringify(todayRow))
+    const todayCostTotal = parseFloat(todayRow[0]?.today_cost || 0)
+    console.log('[DEBUG] todayCostTotal:', todayCostTotal)
     
     // Get today's top sessions (FIXED: use session_date for better performance)
     const { rows: todaySessionRows } = await pgPool.query(`
       SELECT cs.session_id AS session_key, COALESCE(ol.label, cs.first_message) AS session_label,
         cs.sender_name, SUM(cs.total_cost_usd) AS cost, MAX(cs.last_ts) AS last_activity,
         SUM(cs.input_tokens) AS input_tokens, SUM(cs.output_tokens) AS output_tokens
-      FROM raw_nexus.claw_session_costs cs
-      LEFT JOIN raw_nexus.octis_session_labels ol ON ol.session_key = cs.session_id
+      FROM kennan.claw_session_costs cs
+      LEFT JOIN kennan.octis_session_labels ol ON ol.session_key = cs.session_id
       WHERE cs.user_id = $1 AND cs.session_date = CURRENT_DATE
       GROUP BY cs.session_id, cs.first_message, cs.sender_name, ol.label
       ORDER BY cost DESC LIMIT 20
@@ -1086,17 +1096,17 @@ app.get('/api/costs', requireAuth, async (req, res) => {
     // Get yesterday's total for comparison
     const { rows: yesterdayRow } = await pgPool.query(`
       SELECT COALESCE(SUM(total_cost_usd), 0) AS yesterday_cost
-      FROM raw_nexus.claw_user_daily_costs 
+      FROM kennan.claw_user_daily_costs 
       WHERE user_id = $1 AND cost_date = CURRENT_DATE - INTERVAL '1 day'
     `, [userId])
     
     // Get last sync time (newest session updated_at)
     const { rows: syncRow } = await pgPool.query(`
-      SELECT MAX(last_ts) AS last_sync FROM raw_nexus.claw_session_costs WHERE user_id = $1
+      SELECT MAX(last_ts) AS last_sync FROM kennan.claw_session_costs WHERE user_id = $1
     `, [userId])
     
     res.json({
-      today: parseFloat(todayRow[0]?.today_cost || 0),
+      today: todayCostTotal,
       todayInputTokens: parseInt(todayRow[0]?.input_tokens || 0),
       todayOutputTokens: parseInt(todayRow[0]?.output_tokens || 0),
       todaySessionCount: parseInt(todayRow[0]?.session_count || 0),
@@ -1141,7 +1151,7 @@ app.get('/api/sessions/history', async (req, res) => {
       SELECT session_id AS session_key, first_message AS session_label, sender_name,
         SUM(total_cost_usd) AS cost, MIN(session_date) AS first_date,
         MAX(last_ts) AS last_activity, SUM(turn_count) AS turn_count
-      FROM raw_nexus.claw_session_costs
+      FROM kennan.claw_session_costs
       WHERE session_date >= CURRENT_DATE - INTERVAL '${days} days'
       GROUP BY session_id, first_message, sender_name
       ORDER BY MAX(last_ts) DESC LIMIT 200
@@ -1551,3 +1561,5 @@ app.listen(PORT, () => {
   console.log(`[octis] Data: ${path.join(DATA_DIR, 'octis.db')}`)
 })
 
+
+// DEBUG endpoint for cost tracking

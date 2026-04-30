@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * sync-costs.js — ETL: OpenClaw sessions.json → raw_nexus cost tables
+ * sync-costs.js — ETL: OpenClaw sessions.json → kennan cost tables
  *
  * Reads all agent sessions.json files and syncs cost data into Postgres.
  * Designed to run on a schedule (every 15min via cron or pm2-cron).
@@ -18,6 +18,11 @@ import os from 'os'
 const OPENCLAW_HOME = process.env.OPENCLAW_HOME || path.join(os.homedir(), '.openclaw')
 const COSTS_DB_URL = process.env.COSTS_DB_URL
 const DRY_RUN = process.env.DRY_RUN === '1'
+
+// User identification for multi-user separation
+// Set COSTS_USER_ID in .env to identify whose data this is
+// Default: 'kennan' for Kennan's instance, 'casin' for Casin's, etc.
+const USER_ID = process.env.COSTS_USER_ID || 'kennan'
 
 if (!COSTS_DB_URL) {
   // Try to load from octis .env
@@ -153,10 +158,10 @@ async function sync() {
       }
 
       await client.query(`
-        INSERT INTO raw_nexus.claw_session_costs
+        INSERT INTO kennan.claw_session_costs
           (session_id, first_message, sender_name, total_cost_usd, last_ts, session_date, input_tokens, output_tokens, turn_count, user_id)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-        ON CONFLICT (session_id, session_date) DO UPDATE SET
+        ON CONFLICT (session_id, session_date, user_id) DO UPDATE SET
           total_cost_usd = EXCLUDED.total_cost_usd,
           first_message = EXCLUDED.first_message,
           sender_name = EXCLUDED.sender_name,
@@ -165,45 +170,51 @@ async function sync() {
           output_tokens = EXCLUDED.output_tokens,
           turn_count = EXCLUDED.turn_count,
           user_id = EXCLUDED.user_id
-      `, [sessionId, msg, sender, cost, updatedAt, sessionDate, inputTok, outputTok, 0, 'kennan'])
+      `, [sessionId, msg, sender, cost, updatedAt, sessionDate, inputTok, outputTok, 0, USER_ID])
     }
 
     if (!DRY_RUN) {
-      // Rebuild daily aggregates from session data (Kennan only)
+      // Rebuild daily aggregates from session data (user-specific)
       await client.query(`
-        INSERT INTO raw_nexus.claw_user_daily_costs (cost_date, total_cost_usd, input_tokens, output_tokens, session_count, user_id)
+        INSERT INTO kennan.claw_user_daily_costs (cost_date, total_cost_usd, input_tokens, output_tokens, sessions_count, user_id, source)
         SELECT
           session_date AS cost_date,
           SUM(total_cost_usd) AS total_cost_usd,
           SUM(input_tokens) AS input_tokens,
           SUM(output_tokens) AS output_tokens,
-          COUNT(DISTINCT session_id) AS session_count,
-          'kennan' AS user_id
-        FROM raw_nexus.claw_session_costs
-        WHERE user_id = 'kennan'
+          COUNT(DISTINCT session_id) AS sessions_count,
+          $1::text AS user_id,
+          'sync-costs' AS source
+        FROM kennan.claw_session_costs
+        WHERE user_id = $1::text
         GROUP BY session_date
-        ON CONFLICT (cost_date) DO UPDATE SET
+        ON CONFLICT (cost_date, user_id) DO UPDATE SET
           total_cost_usd = EXCLUDED.total_cost_usd,
           input_tokens = EXCLUDED.input_tokens,
           output_tokens = EXCLUDED.output_tokens,
-          session_count = EXCLUDED.session_count
-      `)
+          sessions_count = EXCLUDED.sessions_count,
+          source = 'sync-costs',
+          updated_at = NOW()
+      `, [USER_ID])
     }
 
-    // Print summary
+    // Print summary (user-specific)
     const { rows: daily } = await client.query(`
-      SELECT cost_date, total_cost_usd, session_count
-      FROM raw_nexus.claw_user_daily_costs
+      SELECT cost_date, total_cost_usd, sessions_count
+      FROM kennan.claw_user_daily_costs
+      WHERE user_id = $1
       ORDER BY cost_date DESC LIMIT 7
-    `)
+    `, [USER_ID])
     const { rows: total } = await client.query(`
-      SELECT COUNT(*) as sessions, SUM(total_cost_usd) as total FROM raw_nexus.claw_session_costs
-    `)
+      SELECT COUNT(*) as sessions, SUM(total_cost_usd) as total 
+      FROM kennan.claw_session_costs
+      WHERE user_id = $1
+    `, [USER_ID])
 
     console.log(`[sync-costs] ✅ Done — ${total[0].sessions} sessions, $${parseFloat(total[0].total || 0).toFixed(4)} total`)
     console.log('[sync-costs] Daily breakdown:')
     for (const row of daily) {
-      console.log(`  ${String(row.cost_date).slice(0,10)} | $${parseFloat(row.total_cost_usd).toFixed(4)} | ${row.session_count} sessions`)
+      console.log(`  ${String(row.cost_date).slice(0,10)} | $${parseFloat(row.total_cost_usd).toFixed(4)} | ${row.sessions_count} sessions`)
     }
   } finally {
     client.release()
