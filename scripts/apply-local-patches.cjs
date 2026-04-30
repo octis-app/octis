@@ -853,6 +853,71 @@ patch(
   }
 )
 
+// ─── Patch: session-autoname includes project context (v2.20) ───────────────
+patch(
+  'server/index.js',
+  'Project context: This session is filed under',
+  (c) => {
+    // Add sessionKey param and project context lookup to /api/session-autoname
+    c = c.replace(
+      /const \{ messages \} = req\.body/,
+      'const { messages, sessionKey } = req.body'
+    )
+    c = c.replace(
+      /(if \(!excerpt\.trim\(\) \|\| excerpt\.replace\(\/User:\|Assistant:\/g, ''\)\.trim\(\)\.length < 10\)\s+return res\.status\(400\)\.json\(\{ error: 'Not enough conversation content' \}\))/,
+      `$1
+
+    // Look up project context if sessionKey provided
+    let projectContext = ''
+    if (sessionKey) {
+      try {
+        const projectRow = db.prepare('SELECT project FROM octis_session_projects WHERE session_key = ?').get(sessionKey)
+        if (projectRow?.project) {
+          const project = db.prepare('SELECT name, emoji FROM octis_projects WHERE slug = ?').get(projectRow.project)
+          if (project) {
+            projectContext = \`\\n\\nProject context: This session is filed under the \"\${project.emoji} \${project.name}\" project.\`
+          }
+        }
+      } catch (projErr) {
+        console.warn('[octis] session-autoname project lookup error:', projErr.message)
+      }
+    }`
+    )
+    c = c.replace(
+      /const prompt = `Generate a 3-5 word session title[^`]+\$\{excerpt\}\\n\\nTitle:`/,
+      'const prompt = `Generate a 3-5 word session title for this conversation. Reply with ONLY the title — no quotes, no punctuation, no explanation.\\nExamples: Octis Sidebar Layout Fixes | Sage GL Batch Push | Centurion Deal Analysis\\n\\n${excerpt}${projectContext}\\n\\nTitle:`'
+    )
+    return c
+  }
+)
+
+patch(
+  'src/components/ChatPane.tsx',
+  'sessionKey, model:',
+  (c) => c.replace(
+    /body: JSON\.stringify\(\{ messages: slim, model:/,
+    'body: JSON.stringify({ messages: slim, sessionKey, model:'
+  )
+)
+
+patch(
+  'src/components/MobileFullChat.tsx',
+  'sessionKey: session.key, model:',
+  (c) => c.replace(
+    /body: JSON\.stringify\(\{ messages: slim, model:/,
+    'body: JSON.stringify({ messages: slim, sessionKey: session.key, model:'
+  )
+)
+
+patch(
+  'src/components/MobileSessionCard.tsx',
+  'sessionKey: session.key, model:',
+  (c) => c.replace(
+    /body: JSON\.stringify\(\{ messages: slim, model:/,
+    'body: JSON.stringify({ messages: slim, sessionKey: session.key, model:'
+  )
+)
+
 // ─── DB migration: reset stale quick_commands to current defaults ─────────────
 // Quick command values stored in the DB override code defaults. When QUICK_COMMANDS_CONFIG
 // is updated in SettingsPanel.tsx, stale DB values persist across git pulls and shadow
