@@ -8,7 +8,7 @@
 
 ## Latest Changes — 2026-04-30
 
-### Fix: ✨ Star Auto-Rename Now Includes Project Context (19:28 UTC)
+### Fix: ✨ Star Auto-Rename Button Now Works + Includes Project Context (19:36 UTC)
 
 **Files changed:**
 - `server/index.js` (session-autoname endpoint)
@@ -17,23 +17,24 @@
 - `src/components/MobileSessionCard.tsx`
 
 **Problem:**
-- When clicking the ✨ star button to auto-rename a session, the generated title did NOT include the project context
-- Sessions filed under specific projects (e.g. "Module 1", "Octis") would get generic titles that didn't reflect which project they belonged to
-- The `/api/session-autoname` endpoint was only using the first 6 messages, without checking which project the session was filed under
+- The ✨ star button did nothing when clicked — sessions would not rename at all
+- Root cause #1: `/api/session-autoname` endpoint was missing `requireAuth` middleware, causing unauthenticated requests to fall through to the SPA catch-all route (returning HTML instead of JSON)
+- Root cause #2: Frontend components were using plain `fetch` instead of `authFetch`, so no authentication cookie was sent
+- Secondary issue: The endpoint didn't check which project the session was filed under, so even when it worked, titles didn't reflect project context
 
 **Solution:**
-- Modified `/api/session-autoname` endpoint to:
-  - Accept a new `sessionKey` parameter
-  - Look up the session's project from `octis_session_projects` table
-  - If a project is found, append project context to the AI prompt: `"Project context: This session is filed under the \"🐙 Octis\" project."`
-- Updated all frontend components that call `/api/session-autoname` to pass `sessionKey` in the request body:
-  - `ChatPane.tsx` (desktop rename button)
-  - `MobileFullChat.tsx` (mobile rename button)
-  - `MobileSessionCard.tsx` (mobile auto-rename)
+- **Backend fix (`server/index.js`):**
+  - Added `requireAuth` middleware to `/api/session-autoname` endpoint (was missing, causing 401 → SPA catch-all HTML response)
+  - Added `sessionKey` parameter support
+  - Added project context lookup: queries `octis_session_projects` table and appends `"Project context: This session is filed under the \"🐙 Octis\" project."` to the AI prompt when a project is assigned
+- **Frontend fix (ChatPane, MobileFullChat, MobileSessionCard):**
+  - Changed all `fetch()` calls to `authFetch()` so authentication cookies are sent
+  - Added `sessionKey` to request body for project context support
 
 **Impact:**
-- Auto-generated session titles now reflect the project context
-- Example: A session under "Module 1" about email automation will generate "Module 1 Email Automation" instead of just "Email Automation"
+- ✨ Star button now works — clicking it actually renames the session
+- Auto-generated session titles now reflect project context
+  - Example: A session under "Module 1" about email automation will generate "Module 1 Email Automation" instead of just "Email Automation"
 - Improves session organization and discoverability
 - Backward compatible — if `sessionKey` is not provided or no project is assigned, behavior is unchanged
 

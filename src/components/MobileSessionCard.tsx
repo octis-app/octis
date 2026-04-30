@@ -170,7 +170,7 @@ function MobileSessionCard({ session, onOpenFull, onArchive }: MobileSessionCard
       .filter(m => m.role === 'user' || m.role === 'assistant')
       .slice(0, 6)
       .map(m => ({ role: m.role, content: normalizeContent(m.content).slice(0, 300) }))
-    void fetch(`${API}/api/session-autoname`, {
+    void authFetch(`${API}/api/session-autoname`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages: slim, sessionKey: session.key, model: localStorage.getItem('octis-rename-model') || undefined }),

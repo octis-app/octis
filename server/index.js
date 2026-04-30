@@ -412,7 +412,7 @@ app.get('/api/me', requireAuth, (req, res) => {
 
 // ─── Session autoname ─────────────────────────────────────────────────────────
 
-app.post('/api/session-autoname', async (req, res) => {
+app.post('/api/session-autoname', requireAuth, async (req, res) => {
   try {
     const { messages, sessionKey } = req.body
     if (!Array.isArray(messages) || messages.length === 0)

@@ -1691,10 +1691,10 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
       .map((m) => ({ role: m.role, content: extractText(m.content).slice(0, 300) }))
       .filter((m) => m.content.trim().length > 0)
       .slice(0, 6)
-    void fetch(`${API}/api/session-autoname`, {
+    void authFetch(`${API}/api/session-autoname`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: slim, model: localStorage.getItem('octis-rename-model') || undefined }),
+      body: JSON.stringify({ messages: slim, sessionKey, model: localStorage.getItem('octis-rename-model') || undefined }),
     }).then((r) => r.json()).then((data: { label?: string }) => {
       const label = data.label
       if (!label) return
@@ -2278,7 +2278,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
         .map((m) => ({ role: m.role, content: extractText(m.content).slice(0, 400) }))
         .filter((m) => m.content.trim().length > 0)
         .slice(0, 8)
-      const res = await fetch(`${API}/api/session-autoname`, {
+      const res = await authFetch(`${API}/api/session-autoname`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: slim, sessionKey, model: localStorage.getItem('octis-rename-model') || undefined }),

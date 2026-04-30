@@ -1738,7 +1738,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
       .filter(m => m.content.trim().length > 0)
       .slice(0, 6)
     try {
-      const res = await fetch(`${API}/api/session-autoname`, {
+      const res = await authFetch(`${API}/api/session-autoname`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: slim, sessionKey: session.key, model: localStorage.getItem('octis-rename-model') || undefined }),
