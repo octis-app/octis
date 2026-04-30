@@ -853,6 +853,16 @@ patch(
   }
 )
 
+// ─── Patch: dotenv import for .env loading (v2.24) ─────────────────────
+patch(
+  'server/index.js',
+  "import 'dotenv/config'",
+  (c) => c.replace(
+    /^import express from 'express'/m,
+    "import 'dotenv/config'\nimport express from 'express'"
+  )
+)
+
 // ─── Patch: session-autoname includes project context + requireAuth (v2.20/v2.22) ───
 patch(
   'server/index.js',
