@@ -8,28 +8,33 @@
 
 ## Latest Changes — 2026-04-30
 
-### Fix: ✨ Star Auto-Rename Button Now Works + Includes Project Context (19:36 UTC)
+### Fix: ✨ Star Auto-Rename Button Now Works + Includes Project Context (19:36-19:43 UTC)
 
 **Files changed:**
-- `server/index.js` (session-autoname endpoint)
+- `server/index.js` (session-autoname endpoint + dotenv config)
 - `src/components/ChatPane.tsx`
 - `src/components/MobileFullChat.tsx`
 - `src/components/MobileSessionCard.tsx`
+- `package.json` (added dotenv dependency)
 
 **Problem:**
 - The ✨ star button did nothing when clicked — sessions would not rename at all
 - Root cause #1: `/api/session-autoname` endpoint was missing `requireAuth` middleware, causing unauthenticated requests to fall through to the SPA catch-all route (returning HTML instead of JSON)
 - Root cause #2: Frontend components were using plain `fetch` instead of `authFetch`, so no authentication cookie was sent
+- Root cause #3: Server wasn't loading `.env` file, so `ANTHROPIC_API_KEY` was undefined → endpoint returned 500 error
 - Secondary issue: The endpoint didn't check which project the session was filed under, so even when it worked, titles didn't reflect project context
 
 **Solution:**
 - **Backend fix (`server/index.js`):**
+  - Added `import 'dotenv/config'` at top of file to load `.env` variables (including `ANTHROPIC_API_KEY`)
   - Added `requireAuth` middleware to `/api/session-autoname` endpoint (was missing, causing 401 → SPA catch-all HTML response)
   - Added `sessionKey` parameter support
   - Added project context lookup: queries `octis_session_projects` table and appends `"Project context: This session is filed under the \"🐙 Octis\" project."` to the AI prompt when a project is assigned
 - **Frontend fix (ChatPane, MobileFullChat, MobileSessionCard):**
   - Changed all `fetch()` calls to `authFetch()` so authentication cookies are sent
   - Added `sessionKey` to request body for project context support
+- **Dependencies:**
+  - Added `dotenv` package to load environment variables from `.env` file
 
 **Impact:**
 - ✨ Star button now works — clicking it actually renames the session
