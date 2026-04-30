@@ -853,12 +853,17 @@ patch(
   }
 )
 
-// ─── Patch: session-autoname includes project context (v2.20) ───────────────
+// ─── Patch: session-autoname includes project context + requireAuth (v2.20/v2.22) ───
 patch(
   'server/index.js',
   'Project context: This session is filed under',
   (c) => {
-    // Add sessionKey param and project context lookup to /api/session-autoname
+    // Add requireAuth middleware to session-autoname endpoint (was missing)
+    c = c.replace(
+      /app\.post\('\/api\/session-autoname', async \(req, res\) =>/,
+      "app.post('/api/session-autoname', requireAuth, async (req, res) =>"
+    )
+    // Add sessionKey param and project context lookup
     c = c.replace(
       /const \{ messages \} = req\.body/,
       'const { messages, sessionKey } = req.body'
@@ -893,29 +898,56 @@ patch(
 
 patch(
   'src/components/ChatPane.tsx',
-  'sessionKey, model:',
-  (c) => c.replace(
-    /body: JSON\.stringify\(\{ messages: slim, model:/,
-    'body: JSON.stringify({ messages: slim, sessionKey, model:'
-  )
+  'authFetch(`${API}/api/session-autoname`',
+  (c) => {
+    // Use authFetch instead of fetch for authentication
+    c = c.replace(
+      /await fetch\(`\$\{API\}\/api\/session-autoname`,/g,
+      'await authFetch(`${API}/api/session-autoname`,'
+    )
+    c = c.replace(
+      /void fetch\(`\$\{API\}\/api\/session-autoname`,/g,
+      'void authFetch(`${API}/api/session-autoname`,'
+    )
+    // Add sessionKey to request body
+    c = c.replace(
+      /body: JSON\.stringify\(\{ messages: slim, model:/g,
+      'body: JSON.stringify({ messages: slim, sessionKey, model:'
+    )
+    return c
+  }
 )
 
 patch(
   'src/components/MobileFullChat.tsx',
-  'sessionKey: session.key, model:',
-  (c) => c.replace(
-    /body: JSON\.stringify\(\{ messages: slim, model:/,
-    'body: JSON.stringify({ messages: slim, sessionKey: session.key, model:'
-  )
+  'authFetch(`${API}/api/session-autoname`',
+  (c) => {
+    c = c.replace(
+      /await fetch\(`\$\{API\}\/api\/session-autoname`,/g,
+      'await authFetch(`${API}/api/session-autoname`,'
+    )
+    c = c.replace(
+      /body: JSON\.stringify\(\{ messages: slim, model:/,
+      'body: JSON.stringify({ messages: slim, sessionKey: session.key, model:'
+    )
+    return c
+  }
 )
 
 patch(
   'src/components/MobileSessionCard.tsx',
-  'sessionKey: session.key, model:',
-  (c) => c.replace(
-    /body: JSON\.stringify\(\{ messages: slim, model:/,
-    'body: JSON.stringify({ messages: slim, sessionKey: session.key, model:'
-  )
+  'authFetch(`${API}/api/session-autoname`',
+  (c) => {
+    c = c.replace(
+      /void fetch\(`\$\{API\}\/api\/session-autoname`,/g,
+      'void authFetch(`${API}/api/session-autoname`,'
+    )
+    c = c.replace(
+      /body: JSON\.stringify\(\{ messages: slim, model:/,
+      'body: JSON.stringify({ messages: slim, sessionKey: session.key, model:'
+    )
+    return c
+  }
 )
 
 // ─── DB migration: reset stale quick_commands to current defaults ─────────────
