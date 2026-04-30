@@ -346,6 +346,22 @@ app.get('/api/agents', requireAuth, (req, res) => {
   }
 })
 
+// ─── Agents config (renameAgentId etc.) ─────────────────────────────────────
+app.patch('/api/agents-config', requireAuth, (req, res) => {
+  try {
+    const { renameAgentId } = req.body
+    const agentsFile = path.join(__serverDir, 'config', 'agents.json')
+    const sourcefile = existsSync(agentsFile) ? agentsFile : path.join(__serverDir, 'config', 'agents.example.json')
+    const raw = JSON.parse(readFileSync(sourcefile, 'utf8'))
+    const toWrite = Array.isArray(raw) ? { agents: raw } : { ...raw }
+    if (renameAgentId !== undefined) toWrite.renameAgentId = renameAgentId
+    writeFileSync(agentsFile, JSON.stringify(toWrite, null, 2))
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 app.patch('/api/agents/:id/meta', requireAuth, (req, res) => {
   try {
     const { emoji, description, name, model, soul, visibleInPicker } = req.body
@@ -418,9 +434,25 @@ app.post('/api/session-autoname', async (req, res) => {
     if (!Array.isArray(messages) || messages.length === 0)
       return res.status(400).json({ error: 'No messages provided' })
 
-    // Use Anthropic (claude-haiku) for autoname
+    // Use renameAgentId from agents.json to pick the model, fall back to gemini-flash
+    const openrouterKey = process.env.OPENROUTER_API_KEY
     const anthropicKey = process.env.ANTHROPIC_API_KEY
-    if (!anthropicKey) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not set' })
+    if (!openrouterKey && !anthropicKey) return res.status(500).json({ error: 'No API key configured for autoname (set OPENROUTER_API_KEY or ANTHROPIC_API_KEY)' })
+
+    // Read renameAgentId + resolve model from agents.json + openclaw.json
+    let renameModel = 'google/gemini-2.5-flash'
+    try {
+      const agentsFile = existsSync(path.join(__serverDir, 'config', 'agents.json'))
+        ? path.join(__serverDir, 'config', 'agents.json')
+        : path.join(__serverDir, 'config', 'agents.example.json')
+      const agentsCfg = JSON.parse(readFileSync(agentsFile, 'utf8'))
+      const renameAgentId = agentsCfg.renameAgentId || 'bulk'
+      const clawConfig = JSON.parse(readFileSync(path.join(HOME, '.openclaw', 'openclaw.json'), 'utf8'))
+      const agentEntry = (clawConfig.agents?.list || []).find(a => a.id === renameAgentId)
+      if (agentEntry?.model) renameModel = agentEntry.model
+    } catch {}
+    // OpenRouter format: strip 'openrouter/' prefix if present
+    const orModel = renameModel.startsWith('openrouter/') ? renameModel.slice('openrouter/'.length) : renameModel
 
     const excerpt = messages
       .filter(m => m.role === 'user' || m.role === 'assistant')
@@ -440,15 +472,26 @@ app.post('/api/session-autoname', async (req, res) => {
 
     const prompt = `Generate a 3-5 word session title for this conversation. Reply with ONLY the title — no quotes, no punctuation, no explanation.\nExamples: Octis Sidebar Layout Fixes | Sage GL Batch Push | Centurion Deal Analysis\n\n${excerpt}\n\nTitle:`
 
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'claude-haiku-4-5', max_tokens: 30, messages: [{ role: 'user', content: prompt }] }),
-      signal: AbortSignal.timeout(8000),
-    })
-    const data = await r.json()
-    // Anthropic format: content[0].text
-    const raw = (data?.content?.[0]?.text || '').trim()
+    let raw = ''
+    if (openrouterKey) {
+      const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${openrouterKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: orModel, max_tokens: 30, messages: [{ role: 'user', content: prompt }] }),
+        signal: AbortSignal.timeout(8000),
+      })
+      const data = await r.json()
+      raw = (data?.choices?.[0]?.message?.content || '').trim()
+    } else {
+      const r = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'claude-haiku-4-5', max_tokens: 30, messages: [{ role: 'user', content: prompt }] }),
+        signal: AbortSignal.timeout(8000),
+      })
+      const data = await r.json()
+      raw = (data?.content?.[0]?.text || '').trim()
+    }
     const label = raw.split('\n')[0].replace(/^['"`*\-•]+|['"`*\-•]+$/g, '').trim().slice(0, 60)
     if (!label) return res.status(500).json({ error: 'Empty label from model' })
     res.json({ label })
