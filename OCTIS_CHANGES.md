@@ -36,6 +36,15 @@
 - **Dependencies:**
   - Added `dotenv` package to load environment variables from `.env` file
 
+**Testing:**
+Manually verified with curl after each fix attempt:
+```bash
+curl -X POST http://localhost:3747/api/session-autoname \
+  -H "Content-Type: application/json" \
+  -d '{"messages": [{"role": "user", "content": "Fix the star rename button"}], "sessionKey": "test-key"}'
+# Response: {"label":"Star Rename Button Fix"} ✓
+```
+
 **Impact:**
 - ✨ Star button now works — clicking it actually renames the session
 - Auto-generated session titles now reflect project context
