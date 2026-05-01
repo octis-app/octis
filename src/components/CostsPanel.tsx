@@ -11,6 +11,8 @@ interface SessionCost {
   cost: number
   input_tokens: number
   output_tokens: number
+  cache_write_tokens: number
+  cache_read_tokens: number
   last_activity?: string
 }
 
@@ -20,6 +22,8 @@ interface DayCost {
   session_count: number
   input_tokens: number
   output_tokens: number
+  cache_write_tokens: number
+  cache_read_tokens: number
 }
 
 interface CostsData {
@@ -27,11 +31,21 @@ interface CostsData {
   yesterday: number
   todayInputTokens: number
   todayOutputTokens: number
+  todayCacheWriteTokens: number
+  todayCacheReadTokens: number
   todaySessionCount: number
   lastSync: string | null
   sessions: SessionCost[]
   todaySessions: SessionCost[]
   daily: DayCost[]
+}
+
+// Anthropic pricing (per million tokens)
+const CACHE_WRITE_RATE = 3.75 / 1_000_000
+const CACHE_READ_RATE = 0.30 / 1_000_000
+
+function computeOverhead(cacheWrite: number, cacheRead: number): number {
+  return (cacheWrite * CACHE_WRITE_RATE) + (cacheRead * CACHE_READ_RATE)
 }
 
 function Bar({ value, max }: { value: number; max: number }) {
@@ -147,6 +161,10 @@ export default function CostsPanel() {
   const maxSessionCost = Math.max(...(data.sessions?.map((s) => s.cost) || [0]), 0.001)
   const maxTodaySessionCost = Math.max(...(data.todaySessions?.map((s) => s.cost) || [0]), 0.001)
 
+  const todayOverhead = computeOverhead(data.todayCacheWriteTokens ?? 0, data.todayCacheReadTokens ?? 0)
+  const todayCompute = Math.max(0, data.today - todayOverhead)
+  const todayOverheadPct = data.today > 0 ? Math.round((todayOverhead / data.today) * 100) : 0
+
   // Calculate stats
   const todayDelta = data.yesterday > 0
     ? ((data.today - data.yesterday) / data.yesterday) * 100
@@ -224,6 +242,25 @@ export default function CostsPanel() {
           </div>
         </div>
 
+        {/* Cache overhead */}
+        {todayOverhead > 0 && (
+          <div className="col-span-4 bg-[#181c24] border border-[#2a3142] rounded-xl p-3">
+            <div className="flex items-center justify-between text-xs mb-2">
+              <span className="text-[#6b7280] uppercase tracking-wider">Cost breakdown</span>
+              <span className="text-[#6b7280]">
+                Compute <span className="text-white font-mono">${todayCompute.toFixed(3)}</span>
+                <span className="mx-2 text-[#3a4152]">|</span>
+                Cache overhead <span className="text-amber-400 font-mono">${todayOverhead.toFixed(3)}</span>
+                <span className="ml-1 text-[#6b7280]">({todayOverheadPct}%)</span>
+              </span>
+            </div>
+            <div className="h-1.5 bg-[#2a3142] rounded-full overflow-hidden flex">
+              <div className="h-full bg-[#6366f1] rounded-l-full transition-all" style={{ width: `${100 - todayOverheadPct}%` }} />
+              <div className="h-full bg-amber-500 rounded-r-full transition-all" style={{ width: `${todayOverheadPct}%` }} />
+            </div>
+          </div>
+        )}
+
         {/* 7-day average */}
         <div className="bg-[#181c24] border border-[#2a3142] rounded-xl p-4">
           <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-1">7-Day Avg</div>
@@ -254,6 +291,9 @@ export default function CostsPanel() {
             {data.todaySessions.map((s) => {
               const label = labels[s.session_key] || s.session_label || formatSessionKey(s.session_key)
               const tokensStr = `${formatTokens(s.input_tokens + s.output_tokens)} tok`
+              const sessionOverhead = computeOverhead(s.cache_write_tokens ?? 0, s.cache_read_tokens ?? 0)
+              const sessionCompute = Math.max(0, s.cost - sessionOverhead)
+              const hasCache = (s.cache_write_tokens ?? 0) + (s.cache_read_tokens ?? 0) > 0
               return (
               <div key={s.session_key}>
                 <div className="flex items-center gap-2 mb-1">
@@ -266,6 +306,13 @@ export default function CostsPanel() {
                   </div>
                 </div>
                 <Bar value={s.cost} max={maxTodaySessionCost} />
+                {hasCache && (
+                  <div className="text-[10px] text-[#6b7280] mt-0.5 font-mono">
+                    Compute <span className="text-[#a5b4fc]">${sessionCompute.toFixed(3)}</span>
+                    <span className="mx-1 text-[#3a4152]">·</span>
+                    Cache <span className="text-amber-400">${sessionOverhead.toFixed(3)}</span>
+                  </div>
+                )}
               </div>
             )
           })}
@@ -282,6 +329,9 @@ export default function CostsPanel() {
           {data.sessions?.slice(0, 20).map((s) => {
             const label = labels[s.session_key] || s.session_label || formatSessionKey(s.session_key)
             const tokensStr = `${formatTokens(s.input_tokens + s.output_tokens)} tok`
+            const sessionOverhead = computeOverhead(s.cache_write_tokens ?? 0, s.cache_read_tokens ?? 0)
+            const sessionCompute = Math.max(0, s.cost - sessionOverhead)
+            const hasCache = (s.cache_write_tokens ?? 0) + (s.cache_read_tokens ?? 0) > 0
             return (
             <div key={s.session_key}>
               <div className="flex items-center gap-2 mb-1">
@@ -294,6 +344,13 @@ export default function CostsPanel() {
                 </div>
               </div>
               <Bar value={s.cost} max={maxSessionCost} />
+              {hasCache && (
+                <div className="text-[10px] text-[#6b7280] mt-0.5 font-mono">
+                  Compute <span className="text-[#a5b4fc]">${sessionCompute.toFixed(3)}</span>
+                  <span className="mx-1 text-[#3a4152]">·</span>
+                  Cache <span className="text-amber-400">${sessionOverhead.toFixed(3)}</span>
+                </div>
+              )}
             </div>
           )
           })}

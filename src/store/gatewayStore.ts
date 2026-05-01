@@ -367,6 +367,8 @@ export const useGatewayStore = create<GatewayState>()(
                 })
               )
             }
+            // Enrich session cost pills from DB (gateway only has live in-memory costs)
+            void useSessionStore.getState().fetchDbCosts()
           } else {
             console.error('[octis] Auth failed:', msg.error)
             set({ connected: false })
@@ -707,16 +709,12 @@ export const useHiddenStore = create<HiddenState>()(
         // (in-flight archives not yet persisted — race condition on fast WS reconnect).
         const serverSet = new Set(keys)
         set(s => {
-          const preserved = new Set<string>()
-          const cutoff = Date.now() - 90_000
-          s.hidden.forEach(k => {
-            // Keep locally-added keys not on the server only if they are very recent.
-            // We don't have a timestamp per key, so keep ALL local keys that are
-            // absent from the server only if the store was just hydrated < 90s ago.
-            // If already hydrated (second call), trust the server fully.
-            if (!s.hydrated && !serverSet.has(k)) preserved.add(k)
-          })
-          return { hydrated: true, hidden: new Set([...serverSet, ...preserved]) }
+          // Always union local + server: never wipe local hides on reconnect.
+          // Local hides are explicitly removed by unhide(); hydration must not
+          // silently discard hides that are still in-flight to the server
+          // (race between pushHideToServer and the next reconnect hydration call).
+          // Unhide() removes from both local state and server, so this is safe.
+          return { hydrated: true, hidden: new Set([...s.hidden, ...serverSet]) }
         })
         // Re-filter sessions so any unarchived sessions immediately reappear.
         const sessionStore = useSessionStore.getState()
@@ -995,6 +993,8 @@ interface SessionState {
   clearUnread: (sessionKey: string) => void
   getUnreadCount: (sessionKey: string) => number
   setLastExchangeCost: (sessionKey: string, cost: number) => void
+  fetchDbCosts: () => Promise<void>
+  dbCosts: Record<string, number>
   getStatus: (session: Session) => SessionStatus
   getLastActivityMs: (session: Session) => number | null
   getSortedSessions: () => Session[]
@@ -1016,6 +1016,7 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
   sessionActivity: {},
   sessionMeta: {},
   costHistory: {},
+  dbCosts: {} as Record<string, number>,
   streamingTimers: {}, // always empty — timers live in external streamingTimerMap
   activePanes: [null, null, null, null, null, null, null, null],
   paneCount: 2,
@@ -1137,7 +1138,8 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
     const prev = history[history.length - 2]
     const deltaMs = last.ts - prev.ts
     if (deltaMs < 5000) return null // too close together
-    return last.cost - prev.cost
+    const delta = last.cost - prev.cost
+    return delta > 0 ? delta : null // 0 = no turn happened, null = show neutral badge
   },
 
   touchSession: (sessionKey) => {
@@ -1199,6 +1201,16 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
         [sessionKey]: { ...(s.sessionMeta[sessionKey] || {}), lastExchangeCost: cost },
       },
     }))
+  },
+
+  fetchDbCosts: async () => {
+    try {
+      const r = await fetch('/api/sessions/costs-map', { credentials: 'include' })
+      if (r.ok) {
+        const map = await r.json()
+        set({ dbCosts: map })
+      }
+    } catch {}
   },
 
   markStreaming: (sessionKey) => {

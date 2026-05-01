@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
 import { useGatewayStore, useSessionStore, useProjectStore, useLabelStore, useDraftStore, Session, DraftData } from '../store/gatewayStore'
+import { useUIStore } from '../store/uiStore'
 import { authFetch } from '../lib/authFetch'
 import { useTextareaUndo } from '../hooks/useTextareaUndo'
 import { useAuthStore } from '../store/authStore'
@@ -206,47 +207,158 @@ function renderTextWithMedia(text: string, key: number): React.ReactNode {
       onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
   }
 
-  // Render text with clickable URLs and inline images
+  // Render text with clickable URLs, inline images, and markdown tables
   const lines = text.split('\n')
-  const rendered = lines.flatMap((line, li) => {
+  const rendered: React.ReactNode[] = []
+  let li = 0
+
+  const renderLine = (line: string, lineKey: string | number, addNewline: boolean): React.ReactNode => {
     // Markdown image: ![alt](url)
     const mdImg = line.match(/^!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)$/)
     if (mdImg) {
-      return [<img key={`img-${li}`} src={mdImg[2]} alt={mdImg[1]}
+      return <img key={lineKey} src={mdImg[2]} alt={mdImg[1]}
         className="max-w-full rounded-lg my-1 max-h-64 object-contain"
-        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />]
+        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
     }
     // MEDIA:<url> directive
     const mediaLine = line.match(/^MEDIA:(https?:\/\/\S+)$/)
     if (mediaLine) {
       const mUrl = mediaLine[1]
       const isImg = /\.(png|jpg|jpeg|gif|webp)(\?|$)/i.test(mUrl)
-      return [isImg
-        ? <img key={`m-${li}`} src={mUrl} alt="image"
+      return isImg
+        ? <img key={lineKey} src={mUrl} alt="image"
             className="max-w-full rounded-lg my-1 max-h-64 object-contain"
             onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
-        : <a key={`m-${li}`} href={mUrl} target="_blank" rel="noopener noreferrer"
-            className="text-[#818cf8] underline break-all">{mUrl}</a>]
+        : <a key={lineKey} href={mUrl} target="_blank" rel="noopener noreferrer"
+            className="text-[#818cf8] underline break-all">{mUrl}</a>
     }
     // Data URI image on its own line
     if (/^data:image\/(png|jpeg|gif|webp);base64,/.test(line.trim())) {
-      return [<img key={`di-${li}`} src={line.trim()} alt="image"
+      return <img key={lineKey} src={line.trim()} alt="image"
         className="max-w-full rounded-lg my-1 max-h-64 object-contain"
         style={{ maxWidth: '100%', borderRadius: '8px' }}
-        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />]
+        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
+    }
+    // Default: parse inline markdown (bold, italic, code) + clickable URLs
+    const inlineParts = line.split(/(https?:\/\/[^\s<>"{}|\\^`\[\]*]+|`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g)
+    const lineNodes = inlineParts.map((p, pi) => {
+      if (/^https?:\/\//.test(p))
+        return <a key={pi} href={p} target="_blank" rel="noopener noreferrer" style={{ color: '#818cf8', textDecoration: 'underline', wordBreak: 'break-all' }}>{p}</a>
+      if (p.startsWith('**') && p.endsWith('**') && p.length > 4)
+        return <strong key={pi} style={{ fontWeight: 600, color: 'white' }}>{p.slice(2, -2)}</strong>
+      if (p.startsWith('`') && p.endsWith('`') && p.length > 2)
+        return <code key={pi} style={{ background: '#0f1117', color: '#a5b4fc', padding: '1px 5px', borderRadius: 3, fontSize: 11, fontFamily: 'monospace' }}>{p.slice(1, -1)}</code>
+      if (p.startsWith('*') && p.endsWith('*') && p.length > 2)
+        return <em key={pi} style={{ opacity: 0.85 }}>{p.slice(1, -1)}</em>
+      return <span key={pi}>{p}</span>
+    })
+    return <span key={lineKey}>{lineNodes}{addNewline ? '\n' : ''}</span>
+  }
+
+  // Inline renderer used by structured blocks (headings, bullets) that need markdown within them
+  const renderInline = (text: string, baseKey: string | number): React.ReactNode[] => {
+    const parts = text.split(/(https?:\/\/[^\s<>"{}|\\^`\[\]*]+|`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g)
+    return parts.map((p, pi) => {
+      if (/^https?:\/\//.test(p))
+        return <a key={`${baseKey}-${pi}`} href={p} target="_blank" rel="noopener noreferrer" style={{ color: '#818cf8', textDecoration: 'underline', wordBreak: 'break-all' }}>{p}</a>
+      if (p.startsWith('**') && p.endsWith('**') && p.length > 4)
+        return <strong key={`${baseKey}-${pi}`} style={{ fontWeight: 600, color: 'white' }}>{p.slice(2, -2)}</strong>
+      if (p.startsWith('`') && p.endsWith('`') && p.length > 2)
+        return <code key={`${baseKey}-${pi}`} style={{ background: '#0f1117', color: '#a5b4fc', padding: '1px 5px', borderRadius: 3, fontSize: 11, fontFamily: 'monospace' }}>{p.slice(1, -1)}</code>
+      if (p.startsWith('*') && p.endsWith('*') && p.length > 2)
+        return <em key={`${baseKey}-${pi}`} style={{ opacity: 0.85 }}>{p.slice(1, -1)}</em>
+      return <span key={`${baseKey}-${pi}`}>{p}</span>
+    })
+  }
+
+  while (li < lines.length) {
+    const line = lines[li]
+
+    // Markdown table block — table-layout:fixed so columns wrap instead of overflowing
+    if (line.trimStart().startsWith('|')) {
+      const tableLines: string[] = []
+      while (li < lines.length && lines[li].trimStart().startsWith('|')) {
+        tableLines.push(lines[li])
+        li++
+      }
+      const parseRow = (row: string) => row.split('|').slice(1, -1).map(c => c.trim())
+      const isSep = (row: string) => /^[\|\s\-:]+$/.test(row)
+      if (tableLines.length >= 2 && isSep(tableLines[1])) {
+        const headers = parseRow(tableLines[0])
+        const rows = tableLines.slice(2).map(parseRow)
+        rendered.push(
+          <div key={`tbl-${li}`} style={{ margin: '8px 0', borderRadius: 8, border: '1px solid #2a3142', width: '100%' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, tableLayout: 'fixed' }}>
+              <thead>
+                <tr style={{ background: '#1a1d2e' }}>
+                  {headers.map((h, hi) => (
+                    <th key={hi} style={{ padding: '6px 8px', textAlign: 'left', color: '#a5b4fc', fontWeight: 600, borderBottom: '1px solid #2a3142', wordBreak: 'break-word', overflowWrap: 'anywhere' }}>
+                      {renderInline(h, `th-${li}-${hi}`)}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, ri) => (
+                  <tr key={ri} style={{ background: ri % 2 === 0 ? '#0f1117' : '#131720' }}>
+                    {row.map((cell, ci) => (
+                      <td key={ci} style={{ padding: '6px 8px', color: '#cbd5e1', borderBottom: '1px solid #1e2130', verticalAlign: 'top', wordBreak: 'break-word', overflowWrap: 'anywhere' }}>
+                        {renderInline(cell, `td-${li}-${ri}-${ci}`)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
+      } else {
+        // Not a valid table — render as plain lines
+        tableLines.forEach((tl, tli) => {
+          rendered.push(renderLine(tl, `tl-${li}-${tli}`, tli < tableLines.length - 1))
+        })
+      }
+      continue
     }
 
-    // Split by URLs to make them clickable
-    const urlParts = line.split(/(https?:\/\/[^\s<>"{}|\\^`\[\]*]+)/g)
-    const lineNodes = urlParts.map((p, pi) =>
-      /^https?:\/\//.test(p)
-        ? <a key={pi} href={p} target="_blank" rel="noopener noreferrer"
-            className="text-[#818cf8] underline break-all">{p}</a>
-        : <span key={pi}>{p}</span>
-    )
-    return [<span key={`line-${li}`}>{lineNodes}{li < lines.length - 1 ? '\n' : ''}</span>]
-  })
-  return <span key={key} style={{ whiteSpace: 'pre-wrap' }}>{rendered}</span>
+    // Markdown headings
+    const headingMatch = line.match(/^(#{1,3}) (.*)/)
+    if (headingMatch) {
+      const level = headingMatch[1].length
+      const headText = headingMatch[2]
+      const sz = level === 1 ? 15 : level === 2 ? 13 : 12
+      const col = level === 1 ? 'white' : level === 2 ? '#a5b4fc' : '#818cf8'
+      rendered.push(<div key={`h-${li}`} style={{ fontWeight: 700, fontSize: sz, color: col, marginTop: level === 1 ? 10 : 6, marginBottom: 2 }}>{renderInline(headText, `h-${li}`)}</div>)
+      li++
+      continue
+    }
+
+    // Horizontal rule
+    if (line.trim() === '---' || line.trim() === '***' || line.trim() === '___') {
+      rendered.push(<hr key={`hr-${li}`} style={{ border: 'none', borderBottom: '1px solid #2a3142', margin: '8px 0' }} />)
+      li++
+      continue
+    }
+
+    // Bullet list item
+    const bulletMatch = line.match(/^(\s*)[-*] (.*)/)
+    if (bulletMatch) {
+      const indent = bulletMatch[1].length
+      rendered.push(
+        <div key={`b-${li}`} style={{ display: 'flex', gap: 6, paddingTop: 2, paddingBottom: 2, marginLeft: indent > 0 ? 14 : 0 }}>
+          <span style={{ color: '#6366f1', fontSize: 10, marginTop: 5, flexShrink: 0 }}>•</span>
+          <span style={{ fontSize: 14, lineHeight: 1.5 }}>{renderInline(bulletMatch[2], `b-${li}`)}</span>
+        </div>
+      )
+      li++
+      continue
+    }
+
+    rendered.push(renderLine(line, `line-${li}`, li < lines.length - 1))
+    li++
+  }
+
+  return <div key={key} style={{ whiteSpace: 'pre-wrap' }}>{rendered}</div>
 }
 
 function renderMessageContent(content: MessageContent): React.ReactNode {
@@ -658,9 +770,8 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
   const confirmedSentRef = useRef<number | null>(null)
   // Track message count before send — used to unblock polls once server confirms receipt
   const preSendCountRef = useRef<number>(0)
-  const [noiseHidden, setNoiseHidden] = useState(() => {
-    try { return localStorage.getItem('octis-noise-hidden') !== 'false' } catch { return true }
-  })
+  const noiseHidden = useUIStore(s => s.noiseHidden)
+  const toggleNoiseMobile = useUIStore(s => s.toggleNoise)
   const [editing, setEditing] = useState(false)
   const [renameValue, setRenameValue] = useState('')
   const [autoRenaming, setAutoRenaming] = useState(false)
@@ -1829,7 +1940,21 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
         >
           {recentSessions.map((s) => {
             const pillEmoji = getProjectEmoji(getTag(s.key).project || '')
-            const lbl = (getLabel(s.key) || s.label || s.key).slice(0, 14)
+            const rawLbl = getLabel(s.key) || s.label || ''
+            const lbl = (rawLbl || (() => {
+              // agent:main:session-<timestamp> → show time
+              const tsMatch = s.key.match(/:session-(\d{13})/)
+              if (tsMatch) return new Date(parseInt(tsMatch[1])).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+              // agent:main:dashboard:UUID → Control UI / webchat session
+              if (s.key.includes(':dashboard:')) return 'Webchat'
+              // Slack thread → DM · time
+              const slackTs = s.key.match(/:thread:([\d.]+)$/)
+              if (slackTs) {
+                const d = new Date(parseFloat(slackTs[1]) * 1000)
+                return 'DM \u00b7 ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+              }
+              return s.key
+            })()).slice(0, 16)
             const isCurrent = s.key === session.key
             const st = getStatus(s)
             const dotColor =
@@ -2298,7 +2423,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
             <div className="w-10 h-1 bg-[#2a3142] rounded-full mx-auto mb-4" />
             {/* Noise toggle */}
             <button
-              onClick={() => setNoiseHidden((v) => { const next = !v; try { localStorage.setItem('octis-noise-hidden', String(next)) } catch {} return next })}
+              onClick={toggleNoiseMobile}
               className="w-full flex items-center justify-between px-4 py-3.5 rounded-xl hover:bg-[#2a3142] transition-colors"
             >
               <span className="text-sm text-white">{noiseHidden ? 'Show tool calls' : 'Hide tool calls'}</span>

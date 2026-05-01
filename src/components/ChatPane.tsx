@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { useGatewayStore, useSessionStore, useProjectStore, useLabelStore, useDraftStore, useHiddenStore, Session, DraftData } from '../store/gatewayStore'
+import { useUIStore } from '../store/uiStore'
 import { authFetch } from '../lib/authFetch'
 import { useAuthStore } from '../store/authStore'
 import DecisionButtons from './DecisionButtons'
@@ -21,25 +22,40 @@ function getQuickCommands() {
 
 // ─── Session cost/health badge (for panel header) ─────────────────────────────
 function SessionCostBadge({ sessionKey }: { sessionKey: string }) {
-  const { sessions, sessionMeta } = useSessionStore()
+  const { sessions, sessionMeta, getCostDelta, dbCosts } = useSessionStore()
+  const { labels } = useLabelStore()
   const { send, sendChat } = useGatewayStore()
   const [expanded, setExpanded] = useState(false)
 
   const session = sessions.find((s: Session) => s.key === sessionKey)
-  const cost = session?.estimatedCostUsd
-  if (cost == null || cost < 0.01) return null
+  // DB stores costs by UUID; gateway session keys have 'agent:main:' prefix.
+  // Resolve via the __uuid__ label that gets set during sessions.list processing.
+  const sessionUuid = labels['__uuid__' + sessionKey] ?? null
+  // Use max of gateway (live) vs DB (persisted) — gateway resets on restart so DB is the floor
+  const gatewayCost = session?.estimatedCostUsd ?? null
+  const dbCost = (sessionUuid ? dbCosts?.[sessionUuid] : null) ?? dbCosts?.[sessionKey] ?? null
+  const cost = (gatewayCost != null || dbCost != null)
+    ? Math.max(gatewayCost ?? 0, dbCost ?? 0)
+    : null
+  if (cost == null || cost < 0.001) return null
 
-  const exchangeCost = sessionMeta[sessionKey]?.lastExchangeCost ?? null
-  if (exchangeCost == null) return null
+  // Per-turn overhead: prefer explicit send-delta; fall back to passive poll-delta
+  const exchangeCost = sessionMeta[sessionKey]?.lastExchangeCost ?? getCostDelta(sessionKey) ?? null
 
   // Per-message cost overhead - color tells you when to start a new session
-  let icon = '🟢'
-  let level = 'Light'
-  let pillClass = 'bg-emerald-900/40 text-emerald-400 border-emerald-700/40'
-  if (exchangeCost > 0.15) {
-    icon = '🔴'; level = 'Heavy'; pillClass = 'bg-red-900/40 text-red-400 border-red-700/40'
-  } else if (exchangeCost > 0.05) {
-    icon = '🟡'; level = 'Growing'; pillClass = 'bg-amber-900/40 text-amber-400 border-amber-700/40'
+  // Only apply color coding when exchangeCost is known; fall back to neutral badge
+  let icon = '💰'
+  let level = 'Unknown'
+  let pillClass = 'bg-[#1e2330] text-[#9ca3af] border-[#2a3142]'
+  if (exchangeCost != null) {
+    icon = '🟢'
+    level = 'Light'
+    pillClass = 'bg-emerald-900/40 text-emerald-400 border-emerald-700/40'
+    if (exchangeCost > 0.15) {
+      icon = '🔴'; level = 'Heavy'; pillClass = 'bg-red-900/40 text-red-400 border-red-700/40'
+    } else if (exchangeCost > 0.05) {
+      icon = '🟡'; level = 'Growing'; pillClass = 'bg-amber-900/40 text-amber-400 border-amber-700/40'
+    }
   }
 
   const sendCompact = (e: React.MouseEvent) => {
@@ -60,14 +76,26 @@ function SessionCostBadge({ sessionKey }: { sessionKey: string }) {
       {expanded && (
         <div className="absolute right-0 top-7 z-50 bg-[#1a1f2e] border border-[#2a3142] rounded-xl shadow-2xl p-3 min-w-[180px] text-xs">
           <div className="text-white font-semibold mb-1">Context overhead</div>
-          <div className="text-[#e8eaf0] mb-0.5">
-            Per message: <span className="font-mono" style={{ color: level === 'Heavy' ? '#ef4444' : level === 'Growing' ? '#f59e0b' : '#22c55e' }}>${exchangeCost.toFixed(3)}</span>
+          {exchangeCost != null ? (
+            <>
+              <div className="text-[#e8eaf0] mb-0.5">
+                Per message: <span className="font-mono" style={{ color: level === 'Heavy' ? '#ef4444' : level === 'Growing' ? '#f59e0b' : '#22c55e' }}>${exchangeCost.toFixed(3)}</span>
+              </div>
+              <div className="text-[10px] text-[#6b7280] mb-1">{level === 'Heavy' ? '🔴 Heavy - compact or start a new session' : level === 'Growing' ? '🟡 Growing - consider compacting soon' : '🟢 Light - context is healthy'}</div>
+            </>
+          ) : (
+            <div className="text-[#9ca3af] mb-1">Send a message to see per-turn cost</div>
+          )}
+          {exchangeCost != null && level === 'Heavy' && (
+            <div className="text-[10px] text-amber-400/80 mt-1">~60% of session cost is typically cache overhead on long sessions</div>
+          )}
+          <div className="text-[10px] text-[#6b7280] mt-1">
+            Cache writes grow with session length. Use /compact or start a new session to reset.
           </div>
-          <div className="text-[10px] text-[#6b7280] mb-2">{level === 'Heavy' ? '🔴 Heavy - compact or start a new session' : level === 'Growing' ? '🟡 Growing - consider compacting soon' : '🟢 Light - context is healthy'}</div>
-          {level !== 'Light' && (
+          {exchangeCost != null && level !== 'Light' && level !== 'Unknown' && (
             <button
               onClick={sendCompact}
-              className="w-full bg-[#6366f1] hover:bg-[#818cf8] text-white rounded px-2 py-1 text-[10px] font-medium transition-colors"
+              className="w-full bg-[#6366f1] hover:bg-[#818cf8] text-white rounded px-2 py-1 text-[10px] font-medium transition-colors mt-1.5"
             >Compact context</button>
           )}
         </div>
@@ -478,6 +506,53 @@ function ChatMarkdown({ text }: { text: string }) {
       continue
     }
 
+    // Markdown table
+    if (line.trimStart().startsWith('|')) {
+      const tableLines: string[] = []
+      while (i < lines.length && lines[i].trimStart().startsWith('|')) {
+        tableLines.push(lines[i])
+        i++
+      }
+      const parseRow = (row: string) => row.split('|').slice(1, -1).map(c => c.trim())
+      const isSep = (row: string) => /^[\|\s\-:]+$/.test(row)
+      if (tableLines.length >= 2 && isSep(tableLines[1])) {
+        const headers = parseRow(tableLines[0])
+        const rows = tableLines.slice(2).map(parseRow)
+        elements.push(
+          <div key={`tbl-${i}`} className="my-2 rounded-lg border border-[#2a3142] w-full">
+            <table className="w-full text-xs border-collapse" style={{ tableLayout: 'fixed' }}>
+              <thead>
+                <tr className="bg-[#1a1d2e]">
+                  {headers.map((h, hi) => (
+                    <th key={hi} className="px-3 py-2 text-left font-semibold text-[#a5b4fc] border-b border-[#2a3142] whitespace-nowrap">
+                      {renderInline(h)}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, ri) => (
+                  <tr key={ri} className={ri % 2 === 0 ? 'bg-[#0f1117]' : 'bg-[#131720]'}>
+                    {row.map((cell, ci) => (
+                      <td key={ci} className="px-3 py-2 text-[#cbd5e1] border-b border-[#1e2130] align-top">
+                        {renderInline(cell)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
+      } else {
+        // Not a valid table — render as plain text
+        for (const tl of tableLines) {
+          elements.push(<div key={`tl-${i}`} className="text-sm leading-relaxed py-0.5">{renderInline(tl)}</div>)
+        }
+      }
+      continue
+    }
+
     elements.push(
       <div key={i} className="text-sm leading-relaxed py-0.5">
         {renderInline(line)}
@@ -852,13 +927,8 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     (Date.now() - lastSentRef.current) < 300000
   const showWorking = isWorking || globalStreaming || awaitingRender || runActiveRef.current
   const textareaRef = useRef<HTMLTextAreaElement>(null)
-  const [noiseHidden, setNoiseHidden] = useState(() => {
-    try {
-      return localStorage.getItem('octis-noise-hidden') !== 'false'
-    } catch {
-      return true
-    }
-  })
+  const noiseHidden = useUIStore(s => s.noiseHidden)
+  const toggleNoise = useUIStore(s => s.toggleNoise)
   // Reply state
   const [hoveredMsgKey, setHoveredMsgKey] = useState<string | null>(null)
   const [replyingTo, setReplyingTo] = useState<{ id: string | number | undefined; role: 'user' | 'assistant'; preview: string } | null>(null)
@@ -871,16 +941,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   const isLoadingOlderRef = useRef(false) // true while an older-messages fetch is in flight
   const wasLoadingOlderRef = useRef(false) // set in useLayoutEffect, consumed in useEffect to block scroll-to-bottom
 
-  const toggleNoise = () =>
-    setNoiseHidden((v) => {
-      const next = !v
-      try {
-        localStorage.setItem('octis-noise-hidden', String(next))
-      } catch {}
-      return next
-    })
-
-  // "Quiet run" detector: runActive but no events for >60s → amber indicator
+    // "Quiet run" detector: runActive but no events for >60s → amber indicator
   useEffect(() => {
     const interval = setInterval(() => {
       const quiet = runActiveRef.current && !isWorking && !globalStreaming &&

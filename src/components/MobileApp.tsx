@@ -134,7 +134,7 @@ export default function MobileApp() {
       if (c) return // WS is fine, no need
       try {
         const url = `${API}/api/sessions-list${agentId ? `?agentId=${encodeURIComponent(agentId)}` : ''}`
-        const r = await authFetch(url)
+        const r = await fetch(url, { credentials: 'include' })
         if (!r.ok) return
         const data = await r.json() as { ok: boolean; sessions?: Session[] }
         if (data.ok && data.sessions?.length) {
@@ -471,6 +471,10 @@ export default function MobileApp() {
     // Use getLabel (same as desktop) so server-side labels are checked, not just s.label
     const lbl = getLabel(s.key, s.label || '')
     if (lbl.startsWith('Continue where you left off')) return true
+    // Hide unlabeled Control UI (webchat) sessions — agent:main:dashboard:UUID with no label.
+    // These are created by the OpenClaw web UI; they clutter the list until auto-renamed.
+    // Once a label is assigned, they reappear correctly.
+    if (key.includes(':dashboard:') && !lbl.trim()) return true
     return false
   }
   const hideHeartbeat = localStorage.getItem('octis-show-heartbeat-sessions') !== 'true'
@@ -480,7 +484,7 @@ export default function MobileApp() {
     const key = (s.key || '').toLowerCase()
     if (key.includes(':cron:')) return true
     const lbl = (getLabel(s.key, s.label || s.key) || '').toLowerCase()
-    return lbl.includes('heartbeat') || lbl.startsWith('read heartbeat')
+    return lbl.includes('heartbeat') || lbl.startsWith('read heartbeat') || lbl.startsWith('cron:')
   }
 
   // Stable session fingerprint — only recompute visibleSessions when keys/statuses actually change
@@ -543,13 +547,25 @@ export default function MobileApp() {
             <img src={`${import.meta.env.BASE_URL}octis-logo.svg`} alt="Octis" className="w-6 h-6" />
             <span className="text-white font-semibold text-base tracking-tight">Octis</span>
           </div>
-          <button
-            onClick={() => setShowConnect(true)}
-            className="flex items-center gap-1.5 text-xs text-[#6b7280] hover:text-white transition-colors"
-          >
-            <div className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`} />
-            {connected ? 'Connected' : 'Disconnected'}
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setShowConnect(true)}
+              className="flex items-center gap-1.5 text-xs text-[#6b7280] hover:text-white transition-colors"
+            >
+              <div className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`} />
+              {connected ? 'Connected' : 'Disconnected'}
+            </button>
+            <button
+              onClick={async () => {
+                await fetch(API + '/api/auth/logout', { method: 'POST', credentials: 'include' })
+                window.location.reload()
+              }}
+              className="text-xs text-[#6b7280] hover:text-white transition-colors px-1"
+              title="Sign out"
+            >
+              ⏻
+            </button>
+          </div>
         </div>
       </div>
 
@@ -669,7 +685,20 @@ export default function MobileApp() {
                           <span className="flex-1 text-sm text-white truncate min-w-0">{lbl}</span>
                           <span className="text-xs shrink-0 font-medium" style={{ color: statusColor }}>{statusLabel}</span>
                           {ago && <span className="text-xs text-[#4b5563] shrink-0">{ago}</span>}
-                          {(() => { const cost = useSessionStore.getState().sessionMeta[s.key]?.lastExchangeCost; return cost != null ? <span className="text-[10px] text-[#4b5563] shrink-0 font-mono">${(cost * 100).toFixed(1)}¢</span> : null })()}
+                          {(() => {
+                            const meta = useSessionStore.getState().sessionMeta[s.key]
+                            const totalCost = s.estimatedCostUsd
+                            const lastCost = meta?.lastExchangeCost ?? null
+                            if (totalCost == null || totalCost < 0.01) return null
+                            const costColor = totalCost > 5 ? '#ef4444' : totalCost > 1 ? '#f59e0b' : '#22c55e'
+                            const highOverhead = lastCost != null && lastCost > 0.05
+                            return (
+                              <span className="text-[10px] font-mono shrink-0 flex items-center gap-0.5">
+                                {highOverhead && <span style={{ fontSize: '8px' }}>🔴</span>}
+                                <span style={{ color: costColor }}>${totalCost.toFixed(2)}</span>
+                              </span>
+                            )
+                          })()}
                           <span className="text-[#4b5563] shrink-0">›</span>
                         </button>
                         <button

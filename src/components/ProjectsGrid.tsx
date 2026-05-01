@@ -36,7 +36,8 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
   const isVisibleSession = (s: Session) =>
     !isHidden(s.key) && !isHidden((s as Session & {id?: string}).id || '') && !isAgentSession(s) && !/^session-\d+$/.test(s.key)
   const [projects, setProjects] = useState<Project[]>([])
-  const [loading, setLoading] = useState(true)
+  // Skip loading flash on remount — if projectMeta already has data, projects were loaded before
+  const [loading, setLoading] = useState(() => Object.keys(useProjectStore.getState().projectMeta).length === 0)
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
   const [newEmoji, setNewEmoji] = useState('📁')
@@ -82,7 +83,7 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
   }, [])
 
   useEffect(() => {
-    fetch(`${API}/api/projects`)
+    fetch(`${API}/api/projects`, { credentials: 'include' })
       .then(r => r.json())
       .then(d => {
         const list = d.projects || []
@@ -532,8 +533,8 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
             )
           })()}
 
-          {/* Empty state */}
-          {projects.length === 0 && (
+          {/* Empty state — only show when no projects AND no sessions (virtual cards cover the rest) */}
+          {projects.length === 0 && sessions.length === 0 && hiddenSessions.length === 0 && (
             <div className="col-span-3 text-center py-16 text-[#4b5563]">
               <div className="text-5xl mb-4">🐙</div>
               <div className="text-base font-medium text-[#6b7280]">No projects yet</div>

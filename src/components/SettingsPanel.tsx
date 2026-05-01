@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useAuth } from '../lib/auth'
 import { useLabelStore, useSessionStore } from '../store/gatewayStore'
+import { useUIStore } from '../store/uiStore'
 import { usePushNotifications } from '../hooks/usePushNotifications'
 import { useAuthStore } from '../store/authStore'
 import { authFetch } from '../lib/authFetch'
@@ -140,9 +141,8 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [renameModel, setRenameModel] = useState(() =>
     localStorage.getItem('octis-rename-model') || ''
   )
-  const [noiseHidden, setNoiseHidden] = useState(() =>
-    localStorage.getItem('octis-noise-hidden') !== 'false'
-  )
+  const noiseHidden = useUIStore(s => s.noiseHidden)
+  const setNoiseHiddenStore = useUIStore(s => s.setNoiseHidden)
   const [showHeartbeatSessions, setShowHeartbeatSessions] = useState(() =>
     localStorage.getItem('octis-show-heartbeat-sessions') === 'true'
   )
@@ -391,7 +391,7 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
           <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-3 mt-1">Display</div>
           <Toggle
             value={noiseHidden}
-            onChange={v => { setNoiseHidden(v); save('octis-noise-hidden', v) }}
+            onChange={v => setNoiseHiddenStore(v)}
             label="Hide tool calls & system messages"
             description="Show only chat messages in panes (chat only mode)"
           />

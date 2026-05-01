@@ -897,11 +897,12 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
   const isHeartbeatSession = (s: Session) => {
     const lbl = (getLabel(s.key, s.label || s.key) || '').toLowerCase()
     const key = (s.key || '').toLowerCase()
-    return key.includes(':cron:') || lbl.includes('heartbeat') || lbl.startsWith('read heartbeat')
+    return key.includes(':cron:') || lbl.includes('heartbeat') || lbl.startsWith('read heartbeat') || lbl.startsWith('cron:')
   }
   const isCronSession = (s: Session) => {
     const key = (s.key || '').toLowerCase()
-    return key.includes(':cron:')
+    const lbl = (getLabel(s.key, s.label || s.key) || '').toLowerCase()
+    return key.includes(':cron:') || lbl.startsWith('cron:')
   }
   // Background subagents: spawned by Byte as workers (runtime=subagent).
   // ACP sessions (:acp:) are user-spawned harnesses (Codex, Claude Code, etc.) — keep visible.
@@ -912,6 +913,8 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     if (lbl.startsWith('Continue where you left off')) return true
     return false
   }
+  // Gateway Control UI connection sessions — created when any UI client connects, not real chats
+  const isDashboardSession = (s: Session) => (s.key || '').toLowerCase().includes(':dashboard:')
 
   const sorted = getSortedSessions()
   // Sessions in projects with hide_from_sessions=true are excluded from the Sessions tab
@@ -928,6 +931,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     return false
   }
   const filtered = sorted.filter((s: Session) => {
+    if (isDashboardSession(s)) return false
     if (hideHeartbeat && isHeartbeatSession(s)) return false
     if (hideCron && isCronSession(s)) return false
     if (hideAgentSessions && isAgentSession(s)) return false
@@ -946,6 +950,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
 
   // Only count sessions that pass the heartbeat/cron/agent filter (i.e. are actually visible)
   const visibleSessions = sorted.filter((s: Session) => {
+    if (isDashboardSession(s)) return false
     if (hideHeartbeat && isHeartbeatSession(s)) return false
     if (hideCron && isCronSession(s)) return false
     if (hideAgentSessions && isAgentSession(s)) return false

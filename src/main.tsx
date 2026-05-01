@@ -4,10 +4,13 @@ import './index.css'
 import App from './App'
 import ErrorBoundary from './components/ErrorBoundary'
 
-// SW registration — autoUpdate mode; check for new version every 5 min
+// SW registration — autoUpdate mode.
+// controllerchange reload removed: with multiple rapid deploys it caused a reload loop
+// (each pending SW update triggered a page reload, which found the next pending update).
+// autoUpdate + skipWaiting + clientsClaim handles SW activation without a reload loop.
+// Users get fresh code on next natural app open/tab load.
 function SWRegistrar() {
   useRegisterSW({
-    onRegistered(r) { r && setInterval(() => r.update(), 5 * 60 * 1000) },
     onOfflineReady() { /* silent */ },
   })
   return null

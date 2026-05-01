@@ -17,6 +17,13 @@ import { WebSocket, WebSocketServer } from 'ws'
 const _require = createRequire(import.meta.url)
 const pdfParse = _require('pdf-parse')
 
+// Safety net: log unhandled rejections instead of crashing.
+// The adminGwCall fix above prevents the main crash path, but this guards
+// against any other dangling promise rejection.
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[octis] Unhandled rejection (non-fatal):', reason instanceof Error ? reason.message : reason)
+})
+
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 const HOME = process.env.HOME || '/root'
@@ -163,7 +170,7 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
   if (!ok) return res.status(401).json({ error: 'Invalid credentials' })
   const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' })
   res.cookie('octis_token', token, {
-    httpOnly: true, secure: true, sameSite: 'strict',
+    httpOnly: true, secure: true, sameSite: 'lax',
     maxAge: 7 * 24 * 60 * 60 * 1000
   })
   res.json({ ok: true, user: { id: user.id, email: user.email, role: user.role } })
@@ -174,8 +181,153 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ ok: true })
 })
 
+// GET /logout — full client reset page
+// Clears cookie + localStorage + service worker cache, then redirects to /
+// Use this URL directly when the app is inaccessible (e.g. blinking auth loop on mobile)
+app.get('/logout', (req, res) => {
+  res.clearCookie('octis_token', { httpOnly: true, secure: true, sameSite: 'lax' })
+  res.send(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Signing out…</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{background:#0f1117;color:#9ca3af;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;text-align:center}p{font-size:14px}</style>
+</head><body>
+<div><p>Clearing session…</p></div>
+<script>
+async function reset() {
+  try { localStorage.clear() } catch(e) {}
+  try { sessionStorage.clear() } catch(e) {}
+  if ('serviceWorker' in navigator) {
+    const regs = await navigator.serviceWorker.getRegistrations()
+    await Promise.all(regs.map(r => r.unregister()))
+  }
+  if ('caches' in window) {
+    const keys = await caches.keys()
+    await Promise.all(keys.map(k => caches.delete(k)))
+  }
+  window.location.replace('/')
+}
+reset()
+<\/script>
+</body></html>`)
+})
+
+// ─── Persistent admin WS singleton ───────────────────────────────────────────
+let _adminWs = null
+let _adminWsReady = false
+let _adminReqId = 100
+const _adminPending = new Map()
+let _adminReconnectTimer = null
+
+function getAdminWs() {
+  if (_adminWs && _adminWsReady) return _adminWs
+
+  if (_adminReconnectTimer) { clearTimeout(_adminReconnectTimer); _adminReconnectTimer = null }
+
+  const ws = new WebSocket('ws://localhost:18789/gateway', {
+    headers: { Authorization: `Bearer ${GATEWAY_TOKEN}`, Origin: 'http://localhost:18789' }
+  })
+  _adminWs = ws
+  _adminWsReady = false
+
+  ws.on('message', async (raw) => {
+    let msg
+    try { msg = JSON.parse(raw.toString()) } catch { return }
+
+    if (msg.type === 'event' && msg.event === 'connect.challenge') {
+      try {
+        const id = String(_adminReqId++)
+        const p = new Promise((res, rej) => {
+          _adminPending.set(id, { resolve: res, reject: rej })
+          setTimeout(() => { if (_adminPending.has(id)) { _adminPending.delete(id); rej(new Error('connect timeout')) } }, 8000)
+        })
+        ws.send(JSON.stringify({ type: 'req', id, method: 'connect', params: {
+          minProtocol: 3, maxProtocol: 3,
+          client: { id: 'openclaw-control-ui', version: '2026.4.10', platform: 'linux', mode: 'ui' },
+          caps: [], auth: { token: GATEWAY_TOKEN }, role: 'operator', scopes: ['operator.admin']
+        }}))
+        await p
+        _adminWsReady = true
+      } catch (err) { ws.close() }
+    }
+
+    if (msg.type === 'res') {
+      const p = _adminPending.get(msg.id)
+      if (p) {
+        _adminPending.delete(msg.id)
+        if (msg.ok) p.resolve(msg.payload)
+        else p.reject(new Error(msg.error?.message || 'RPC failed'))
+      }
+    }
+  })
+
+  ws.on('close', () => {
+    _adminWs = null
+    _adminWsReady = false
+    // Reject all pending
+    for (const [, p] of _adminPending) p.reject(new Error('Admin WS closed'))
+    _adminPending.clear()
+    // Reconnect after 2s
+    _adminReconnectTimer = setTimeout(() => getAdminWs(), 2000)
+  })
+
+  ws.on('error', (err) => {
+    console.error('[octis] admin WS error:', err.message)
+    ws.close()
+  })
+
+  return ws
+}
+
+// Eagerly connect on startup
+setTimeout(() => getAdminWs(), 1000)
+
 // ─── Admin WebSocket helper ───────────────────────────────────────────────────
 
+function adminGwCall(calls) {
+  return new Promise(async (resolve, reject) => {
+    // Wait up to 5s for persistent WS to be ready
+    let waited = 0
+    while ((!_adminWs || !_adminWsReady) && waited < 5000) {
+      getAdminWs() // ensure connection attempt is in progress
+      await new Promise(r => setTimeout(r, 100))
+      waited += 100
+    }
+    if (!_adminWs || !_adminWsReady) {
+      return reject(new Error('Admin WS not ready'))
+    }
+
+    const results = []
+    const pendingIds = []
+    try {
+      for (const call of calls) {
+        const id = String(_adminReqId++)
+        const p = new Promise((res, rej) => {
+          _adminPending.set(id, { resolve: res, reject: rej })
+          setTimeout(() => {
+            if (_adminPending.has(id)) { _adminPending.delete(id); rej(new Error(`Timeout: ${call.method}`)) }
+          }, 8000)
+        })
+        // Attach a noop catch to prevent unhandled rejection if send() throws before we reach await p
+        p.catch(() => {})
+        pendingIds.push(id)
+        _adminWs.send(JSON.stringify({ type: 'req', id, method: call.method, params: call.params }))
+        results.push(await p)
+        // Successfully awaited — remove from cleanup list
+        pendingIds.splice(pendingIds.indexOf(id), 1)
+      }
+      resolve(results)
+    } catch (err) {
+      // Clean up any pending entries that were never awaited (e.g. send() threw)
+      // Without this, the 8s timeout fires later → rej() on an unhandled Promise → crash
+      for (const id of pendingIds) _adminPending.delete(id)
+      reject(err)
+    }
+  })
+}
+
+/* ─── OLD adminGwCall (kept as fallback reference) ──────────────────────────
+ * If the persistent WS approach breaks, revert by uncommenting below and
+ * deleting the persistent-singleton block above up to this comment.
 function adminGwCall(calls) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket('ws://localhost:18789/gateway', {
@@ -221,6 +373,7 @@ function adminGwCall(calls) {
     setTimeout(() => { ws.close(); reject(new Error('Connection timeout')) }, 15000)
   })
 }
+ * END OLD adminGwCall ────────────────────────────────────────────────────────*/
 
 // ─── Utilities ───────────────────────────────────────────────────────────────
 
@@ -1085,7 +1238,8 @@ app.get('/api/costs', requireAuth, async (req, res) => {
     // Get daily aggregates
     const { rows: daily } = await pgPool.query(`
       SELECT cost_date AS date, SUM(total_cost_usd) AS total_cost_usd,
-        SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, SUM(session_count) AS session_count
+        SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, SUM(session_count) AS session_count,
+        SUM(cache_write_tokens) AS cache_write_tokens, SUM(cache_read_tokens) AS cache_read_tokens
       FROM raw_nexus.claw_user_daily_costs
       WHERE cost_date >= CURRENT_DATE - ($1 || ' days')::INTERVAL
       GROUP BY cost_date ORDER BY cost_date ASC
@@ -1095,7 +1249,8 @@ app.get('/api/costs', requireAuth, async (req, res) => {
     const { rows: sessions } = await pgPool.query(`
       SELECT cs.session_id AS session_key, COALESCE(ol.label, cs.first_message) AS session_label,
         cs.sender_name, SUM(cs.total_cost_usd) AS cost, MAX(cs.last_ts) AS last_activity,
-        SUM(cs.input_tokens) AS input_tokens, SUM(cs.output_tokens) AS output_tokens
+        SUM(cs.input_tokens) AS input_tokens, SUM(cs.output_tokens) AS output_tokens,
+        SUM(cs.cache_write_tokens) AS cache_write_tokens, SUM(cs.cache_read_tokens) AS cache_read_tokens
       FROM raw_nexus.claw_session_costs cs
       LEFT JOIN raw_nexus.octis_session_labels ol ON ol.session_key = cs.session_id
       WHERE cs.session_date >= CURRENT_DATE - ($1 || ' days')::INTERVAL
@@ -1108,7 +1263,9 @@ app.get('/api/costs', requireAuth, async (req, res) => {
       SELECT COALESCE(SUM(total_cost_usd), 0) AS today_cost,
         COALESCE(SUM(input_tokens), 0) AS input_tokens,
         COALESCE(SUM(output_tokens), 0) AS output_tokens,
-        COALESCE(SUM(session_count), 0) AS session_count
+        COALESCE(SUM(session_count), 0) AS session_count,
+        COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+        COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens
       FROM raw_nexus.claw_user_daily_costs 
       WHERE cost_date = CURRENT_DATE
     `)
@@ -1117,7 +1274,8 @@ app.get('/api/costs', requireAuth, async (req, res) => {
     const { rows: todaySessionRows } = await pgPool.query(`
       SELECT cs.session_id AS session_key, COALESCE(ol.label, cs.first_message) AS session_label,
         cs.sender_name, SUM(cs.total_cost_usd) AS cost, MAX(cs.last_ts) AS last_activity,
-        SUM(cs.input_tokens) AS input_tokens, SUM(cs.output_tokens) AS output_tokens
+        SUM(cs.input_tokens) AS input_tokens, SUM(cs.output_tokens) AS output_tokens,
+        SUM(cs.cache_write_tokens) AS cache_write_tokens, SUM(cs.cache_read_tokens) AS cache_read_tokens
       FROM raw_nexus.claw_session_costs cs
       LEFT JOIN raw_nexus.octis_session_labels ol ON ol.session_key = cs.session_id
       WHERE cs.session_date = CURRENT_DATE
@@ -1141,6 +1299,8 @@ app.get('/api/costs', requireAuth, async (req, res) => {
       today: parseFloat(todayRow[0]?.today_cost || 0),
       todayInputTokens: parseInt(todayRow[0]?.input_tokens || 0),
       todayOutputTokens: parseInt(todayRow[0]?.output_tokens || 0),
+      todayCacheWriteTokens: parseInt(todayRow[0]?.cache_write_tokens || 0),
+      todayCacheReadTokens: parseInt(todayRow[0]?.cache_read_tokens || 0),
       todaySessionCount: parseInt(todayRow[0]?.session_count || 0),
       yesterday: parseFloat(yesterdayRow[0]?.yesterday_cost || 0),
       lastSync: syncRow[0]?.last_sync || null,
@@ -1150,6 +1310,8 @@ app.get('/api/costs', requireAuth, async (req, res) => {
         date: String(r.date).slice(0, 10),
         input_tokens: parseInt(r.input_tokens || 0),
         output_tokens: parseInt(r.output_tokens || 0),
+        cache_write_tokens: parseInt(r.cache_write_tokens || 0),
+        cache_read_tokens: parseInt(r.cache_read_tokens || 0),
         session_count: parseInt(r.session_count || 0)
       })),
       sessions: sessions.map(r => ({ 
@@ -1157,6 +1319,8 @@ app.get('/api/costs', requireAuth, async (req, res) => {
         cost: parseFloat(r.cost), 
         input_tokens: parseInt(r.input_tokens || 0),
         output_tokens: parseInt(r.output_tokens || 0),
+        cache_write_tokens: parseInt(r.cache_write_tokens || 0),
+        cache_read_tokens: parseInt(r.cache_read_tokens || 0),
         session_label: cleanSessionLabel(r.session_label, r.session_key) 
       })),
       todaySessions: todaySessionRows.map(r => ({ 
@@ -1164,12 +1328,34 @@ app.get('/api/costs', requireAuth, async (req, res) => {
         cost: parseFloat(r.cost),
         input_tokens: parseInt(r.input_tokens || 0),
         output_tokens: parseInt(r.output_tokens || 0),
+        cache_write_tokens: parseInt(r.cache_write_tokens || 0),
+        cache_read_tokens: parseInt(r.cache_read_tokens || 0),
         session_label: cleanSessionLabel(r.session_label, r.session_key) 
       })),
     })
   } catch (err) {
     console.error('[octis] /api/costs error:', err)
     res.status(500).json({ error: err.message })
+  }
+})
+
+// ─── Session costs map (all sessions → cost, for pill enrichment) ──────────────
+app.get('/api/sessions/costs-map', requireAuth, async (req, res) => {
+  if (!pgPool) return res.json({})
+  try {
+    const days = Math.min(parseInt(req.query.days || '90'), 365)
+    const { rows } = await pgPool.query(`
+      SELECT session_id AS session_key, SUM(total_cost_usd) AS cost
+      FROM raw_nexus.claw_session_costs
+      WHERE session_date >= CURRENT_DATE - ($1 || ' days')::INTERVAL
+      GROUP BY session_id
+    `, [days])
+    const map = {}
+    for (const r of rows) map[r.session_key] = parseFloat(r.cost)
+    res.json(map)
+  } catch (err) {
+    console.error('[octis] /api/sessions/costs-map error:', err.message)
+    res.status(500).json({})
   }
 })
 

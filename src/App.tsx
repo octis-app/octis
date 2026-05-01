@@ -741,13 +741,21 @@ const visiblePanes = activePanes.filter((key, idx) => !!key && activePanes.index
 
 function SidebarWrapper({ onSettingsClick }: { onSettingsClick: () => void }) {
   const [collapsed, setCollapsed] = useState(false)
+  const clampSidebarWidth = (w: number) => Math.max(220, Math.min(700, w, window.innerWidth - 320))
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = localStorage.getItem('octis-sidebar-width')
-    return saved ? Math.max(220, Math.min(700, Number(saved))) : 320
+    return clampSidebarWidth(saved ? Number(saved) : 320)
   })
   const isResizing = useRef(false)
   const startX = useRef(0)
   const startWidth = useRef(0)
+
+  // Clamp sidebar width when window is resized (e.g. window snap on Windows)
+  useEffect(() => {
+    const handler = () => setSidebarWidth(w => clampSidebarWidth(w))
+    window.addEventListener('resize', handler)
+    return () => window.removeEventListener('resize', handler)
+  }, [])
 
   const onResizeMouseDown = (e: React.MouseEvent) => {
     e.preventDefault()
