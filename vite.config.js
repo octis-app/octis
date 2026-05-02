@@ -41,7 +41,7 @@ const baseConfig = defineConfig({
       workbox: {
         navigateFallbackDenylist: [/^\/dev\//],
         importScripts: ['sw-push.js'],
-        skipWaiting: true,  // Activate new SW immediately on install — users get new code on next refresh
+        skipWaiting: false, // New SW waits until all tabs close before activating — prevents reload loops on deploy
         clientsClaim: true,  // New SW takes control of all open tabs immediately after activation
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
         runtimeCaching: [

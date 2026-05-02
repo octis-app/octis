@@ -2,22 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <script>
-      // Kill any stale/broken service workers not scoped to /octis/
-      if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.getRegistrations().then(function(regs) {
-          var needsReload = false;
-          regs.forEach(function(r) {
-            var scope = r.scope || '';
-            if (!scope.includes('/octis/')) { r.unregister(); needsReload = true; }
-          });
-          if (needsReload && !sessionStorage.getItem('octis-sw-nuked')) {
-            sessionStorage.setItem('octis-sw-nuked', '1');
-            window.location.reload();
-          }
-        });
-      }
-    </script>
+
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
