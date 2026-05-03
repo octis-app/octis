@@ -1462,11 +1462,11 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
       } else {
         void fetchHistoryHttp(30)
       }
-    }, 15000)
+    }, 60000)
     return () => clearInterval(interval)
   }, [session?.key, ws, connected, send, fetchHistoryHttp])
 
-  // Fast poll (3s) — only while waiting for a reply. WS or HTTP fallback.
+  // Fast poll (5s) — only while waiting for a reply. WS or HTTP fallback.
   useEffect(() => {
     if (!session?.key || !sending) return
     const interval = setInterval(() => {
@@ -1476,7 +1476,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
       } else {
         void fetchHistoryHttp(50)
       }
-    }, 3000)
+    }, 5000)
     return () => clearInterval(interval)
   }, [session?.key, ws, connected, sending, send, fetchHistoryHttp])
 
@@ -1666,9 +1666,10 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     setMessages((prev) => {
       // Race guard: poll may have already committed this message to state before
       // the optimistic append runs (React batches functional updates — prev reflects
-      // the poll-updated state). Skip if real or optimistic already present.
-      // Must handle both string content and block-array content (server returns either).
-      if (optimisticText && prev.some(m => {
+      // the poll-updated state). Only check the last 5 messages — checking all history
+      // incorrectly swallows repeated messages (e.g. "ok", "yes") that appeared earlier.
+      const tail = prev.slice(-5)
+      if (optimisticText && tail.some(m => {
         if (m.role !== 'user') return false
         if (typeof m.content === 'string') return m.content.slice(0, 80) === optimisticText.slice(0, 80)
         if (Array.isArray(m.content)) {

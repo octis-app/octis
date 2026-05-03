@@ -684,6 +684,22 @@ async function pushHideToServer(sessionKey: string, hide: boolean): Promise<void
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionKey }),
     })
+    // On archive (hide=true), also delete from gateway active session index.
+    // Best-effort: don't block the archive action on this.
+    if (hide) {
+      try {
+        const gatewayStore = useGatewayStore.getState()
+        if (gatewayStore.ws && gatewayStore.ws.readyState === WebSocket.OPEN) {
+          gatewayStore.ws.send(JSON.stringify({
+            type: 'req',
+            id: `delete-${sessionKey}`,
+            method: 'sessions.delete',
+            params: { sessionKey },
+          }))
+          console.log(`[octis] gateway delete sent for archived session: ${sessionKey}`)
+        }
+      } catch { /* best-effort — swallow silently */ }
+    }
   } catch { /* best-effort */ }
 }
 
