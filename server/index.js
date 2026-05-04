@@ -18,6 +18,7 @@ import https from 'https'
 import http from 'http'
 import util from 'util'
 import crypto from 'crypto'
+import cookieParser from 'cookie-parser'
 
 const _require = createRequire(import.meta.url)
 const pdfParse = _require('pdf-parse')
@@ -108,6 +109,7 @@ const app = express()
 
 // Enhanced security middleware
 app.use(cors({ origin: process.env.NODE_ENV === 'production' ? undefined : '*' }))
+app.use(cookieParser())
 app.use(express.json({ limit: '50mb' }))
 app.use(express.urlencoded({ extended: true, limit: '50mb' }))
 
@@ -188,6 +190,10 @@ const loginLimiter = rateLimit({ windowMs: 60_000, max: 10, message: { error: 'T
 
 app.get('/api/auth/me', requireAuth, (req, res) => {
   res.json({ id: req.user.id, email: req.user.email, role: req.user.role })
+})
+
+app.get('/api/gateway-config', requireAuth, (req, res) => {
+  res.json({ url: GATEWAY_URL, token: GATEWAY_TOKEN, agentId: 'main', role: req.user.role })
 })
 
 app.post('/api/auth/login', loginLimiter, async (req, res) => {
