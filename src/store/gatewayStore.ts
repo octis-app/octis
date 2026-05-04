@@ -367,6 +367,8 @@ export const useGatewayStore = create<GatewayState>()(
                 })
               )
             }
+            // Enrich session cost pills from DB (gateway only has live in-memory costs)
+            void useSessionStore.getState().fetchDbCosts()
           } else {
             console.error('[octis] Auth failed:', msg.error)
             set({ connected: false })
@@ -682,6 +684,22 @@ async function pushHideToServer(sessionKey: string, hide: boolean): Promise<void
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionKey }),
     })
+    // On archive (hide=true), also delete from gateway active session index.
+    // Best-effort: don't block the archive action on this.
+    if (hide) {
+      try {
+        const gatewayStore = useGatewayStore.getState()
+        if (gatewayStore.ws && gatewayStore.ws.readyState === WebSocket.OPEN) {
+          gatewayStore.ws.send(JSON.stringify({
+            type: 'req',
+            id: `delete-${sessionKey}`,
+            method: 'sessions.delete',
+            params: { sessionKey },
+          }))
+          console.log(`[octis] gateway delete sent for archived session: ${sessionKey}`)
+        }
+      } catch { /* best-effort — swallow silently */ }
+    }
   } catch { /* best-effort */ }
 }
 
@@ -707,6 +725,12 @@ export const useHiddenStore = create<HiddenState>()(
         // (in-flight archives not yet persisted — race condition on fast WS reconnect).
         const serverSet = new Set(keys)
         set(s => {
+          // Always union local + server: never wipe local hides on reconnect.
+          // Local hides are explicitly removed by unhide(); hydration must not
+          // silently discard hides that are still in-flight to the server
+          // (race between pushHideToServer and the next reconnect hydration call).
+          // Unhide() removes from both local state and server, so this is safe.
+          return { hydrated: true, hidden: new Set([...s.hidden, ...serverSet]) }
           const preserved = new Set<string>()
           const cutoff = Date.now() - 90_000
           s.hidden.forEach(k => {
@@ -1006,6 +1030,8 @@ interface SessionState {
   clearUnread: (sessionKey: string) => void
   getUnreadCount: (sessionKey: string) => number
   setLastExchangeCost: (sessionKey: string, cost: number) => void
+  fetchDbCosts: () => Promise<void>
+  dbCosts: Record<string, number>
   getStatus: (session: Session) => SessionStatus
   getLastActivityMs: (session: Session) => number | null
   getSortedSessions: () => Session[]
@@ -1027,6 +1053,7 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
   sessionActivity: {},
   sessionMeta: {},
   costHistory: {},
+  dbCosts: {} as Record<string, number>,
   streamingTimers: {}, // always empty — timers live in external streamingTimerMap
   activePanes: [null, null, null, null, null, null, null, null],
   paneCount: 2,
@@ -1187,7 +1214,8 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
     const prev = history[history.length - 2]
     const deltaMs = last.ts - prev.ts
     if (deltaMs < 5000) return null // too close together
-    return last.cost - prev.cost
+    const delta = last.cost - prev.cost
+    return delta > 0 ? delta : null // 0 = no turn happened, null = show neutral badge
   },
 
   touchSession: (sessionKey) => {
@@ -1251,6 +1279,15 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
     }))
   },
 
+  fetchDbCosts: async () => {
+    try {
+      const r = await fetch('/api/sessions/costs-map', { credentials: 'include' })
+      if (r.ok) {
+        const map = await r.json()
+        set({ dbCosts: map })
+      }
+    } catch {}
+  },
   markStreaming: (sessionKey) => {
     // Reset the 5-min fallback timer — stored in external Map so this never triggers a re-render.
     const existing = streamingTimerMap.get(sessionKey)

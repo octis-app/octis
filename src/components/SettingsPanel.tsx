@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useAuth } from '../lib/auth'
 import { useLabelStore, useSessionStore } from '../store/gatewayStore'
+import { useUIStore } from '../store/uiStore'
 import { usePushNotifications } from '../hooks/usePushNotifications'
 import { useAuthStore } from '../store/authStore'
 import { authFetch } from '../lib/authFetch'
@@ -140,9 +141,8 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [renameModel, setRenameModel] = useState(() =>
     localStorage.getItem('octis-rename-model') || ''
   )
-  const [noiseHidden, setNoiseHidden] = useState(() =>
-    localStorage.getItem('octis-noise-hidden') !== 'false'
-  )
+  const noiseHidden = useUIStore(s => s.noiseHidden)
+  const setNoiseHiddenStore = useUIStore(s => s.setNoiseHidden)
   const [showHeartbeatSessions, setShowHeartbeatSessions] = useState(() =>
     localStorage.getItem('octis-show-heartbeat-sessions') === 'true'
   )
@@ -191,6 +191,7 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
           const serverVals = d.settings.quick_commands as Record<string, string>
           // localStorage is primary — user's saved text always wins.
           // Server fills in keys that don't exist locally yet.
+          // This prevents server resets/deploys from ever wiping custom text.
           // NO DEFAULTS - only use what's explicitly saved (localStorage > server).
           let localVals: Record<string, string> = {}
           try { localVals = JSON.parse(localStorage.getItem('octis-quick-commands') || '{}') } catch {}
@@ -254,6 +255,9 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
 
   const resetQc = useCallback((key: string) => {
     isDirtyRef.current = true
+    const def = QUICK_COMMAND_DEFAULTS[key] ?? ''
+    saveQuickCommand(key, def)
+    setQcValues(prev => { const next = { ...prev, [key]: def }; persistQcToServer(next); return next })
     // Delete the command entirely (no defaults)
     const current = getQuickCommands()
     delete current[key]
@@ -393,7 +397,7 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
           <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-3 mt-1">Display</div>
           <Toggle
             value={noiseHidden}
-            onChange={v => { setNoiseHidden(v); save('octis-noise-hidden', v) }}
+            onChange={v => setNoiseHiddenStore(v)}
             label="Hide tool calls & system messages"
             description="Show only chat messages in panes (chat only mode)"
           />

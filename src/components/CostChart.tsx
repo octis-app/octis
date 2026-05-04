@@ -202,13 +202,13 @@ export default function CostChart({ data, maDays = 3 }: Props) {
           </div>
           <div className="flex items-center gap-2">
             <div className="w-2 h-2 rounded-sm bg-[#6366f1]" />
-            <span className="text-white font-semibold">{fmtCost(tooltip.day.total_cost_usd)}</span>
+                {fmtCost(tick)}
             <span className="text-[#6b7280]">· {tooltip.day.session_count} sessions</span>
           </div>
           {tooltip.ma !== null && (
             <div className="flex items-center gap-2 mt-1">
               <div className="w-2 h-0.5 bg-[#f59e0b] rounded-full" />
-              <span className="text-[#f59e0b]">{fmtCost(tooltip.ma)}</span>
+                {fmtCost(tick)}
               <span className="text-[#6b7280]">{maDays}-day avg</span>
             </div>
           )}
