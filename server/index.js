@@ -170,34 +170,52 @@ app.use(passport.initialize())
 app.use(passport.session())
 
 // ─── Authentication middleware ───────────────────────────────────────────────
-const requireAuth = (req, res, next) => {
-  // JWT tokens preferred for API calls, cookies for web endpoints
-  const jwtToken = ExtractJwt.fromAuthHeaderAsBearerToken()(req)
-  const isLoggedIn = req.isAuthenticated() || (jwtToken && req.user)
-  
-  if (isLoggedIn) {
-    return next()
-  } 
-  res.status(401).json({ error: 'Authentication required' })
+function requireAuth(req, res, next) {
+  const token = req.cookies?.octis_token
+    || (req.headers.authorization || '').replace(/^Bearer\s+/i, '')
+  if (!token) return res.status(401).json({ error: 'Unauthorized' })
+  try {
+    req.user = jwt.verify(token, JWT_SECRET)
+    next()
+  } catch {
+    res.status(401).json({ error: 'Unauthorized' })
+  }
 }
 
 // ─── Authentication routes ───────────────────────────────────────────────────
-app.post('/login', passport.authenticate(['local'], { session: true }), async (req, res) => {
-  const user = req.user
-  // Set long-lived JWT token alongside session cookie for API access from same client
-  const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' })
-  res.cookie('octis_token', token, {
-    httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict',
-    maxAge: 7 * 24 * 60 * 60 * 1000
-  })
-  res.json({ ok: true, user: { id: user.id, email: user.email, role: user.role } })
+import rateLimit from 'express-rate-limit'
+const loginLimiter = rateLimit({ windowMs: 60_000, max: 10, message: { error: 'Too many attempts' }, validate: { xForwardedForHeader: false } })
+
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  res.json({ id: req.user.id, email: req.user.email, role: req.user.role })
 })
 
+app.post('/api/auth/login', loginLimiter, async (req, res) => {
+  const { email, password } = req.body
+  if (!email || !password) return res.status(400).json({ error: 'Email and password required' })
+  try {
+    const user = await db.get('SELECT * FROM users WHERE email = ?', [email])
+    if (!user || !user.password_hash) return res.status(401).json({ error: 'Invalid credentials' })
+    const ok = await bcrypt.compare(password, user.password_hash)
+    if (!ok) return res.status(401).json({ error: 'Invalid credentials' })
+    const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' })
+    res.cookie('octis_token', token, {
+      httpOnly: true, secure: true, sameSite: 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000
+    })
+    res.json({ ok: true, user: { id: user.id, email: user.email, role: user.role } })
+  } catch (e) {
+    console.error('[server] Login error:', e.message)
+    res.status(500).json({ error: 'Login failed' })
+  }
+})
+
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie('octis_token')
+  res.json({ ok: true })
+})
 
 app.post('/logout', (req, res) => {
-  req.logout(() => {})
-  req.session.destroy()
-  res.clearCookie('connect.sid')
   res.clearCookie('octis_token')
   res.json({ ok: true })
 })
