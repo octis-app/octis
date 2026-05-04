@@ -318,6 +318,7 @@ export default function MobileApp() {
   }
   const handleDeleteRequest = (session: Session) => {
     setShowMoveSheet(false)
+    setLongPressSessionKey(null)  // Also clear long press state
     setDeleteConfirmSession(session)
   }
   const handleDeleteConfirm = async () => {
@@ -451,6 +452,11 @@ export default function MobileApp() {
   }, [sessions, availableProjects])
 
   // When the gateway returns the real key (agent:main:session-<ts>), update fullChatSession
+  // and transfer pending project init/tag to the new key.
+  //
+  // CRITICAL FIX (2026-05-01): Must transfer pendingProjectInit from short key to full key,
+  // otherwise project context injection fails (consumePendingProjectInit returns null).
+  // The same fix exists in gatewayStore.ts setSessions() for desktop parity.
   useEffect(() => {
     if (!pendingNewSessionRef.current) return
     const pendingKey = pendingNewSessionRef.current
@@ -460,6 +466,32 @@ export default function MobileApp() {
     const matched = sessions.find((s: Session) => s.key.endsWith(`:session-${ts}`))
     if (!matched) return
     pendingNewSessionRef.current = null
+    // Transfer pendingProjectInit from short key to full gateway key
+    const store = useSessionStore.getState()
+    const pendingInit = store.pendingProjectInits[pendingKey]
+    if (pendingInit && pendingKey !== matched.key) {
+      // Set for the new key and remove from old key
+      store.setPendingProjectInit(matched.key, pendingInit)
+      // Remove the old short-key entry manually
+      useSessionStore.setState((state) => {
+        const next = { ...state.pendingProjectInits }
+        delete next[pendingKey]
+        return { pendingProjectInits: next }
+      })
+    }
+    // Also transfer project tag if it was set on the short key
+    const projectStore = useProjectStore.getState()
+    const pendingTag = projectStore.tags[pendingKey]
+    if (pendingTag?.project && pendingKey !== matched.key) {
+      // setTag expects a string (project slug), not the entire tag object
+      projectStore.setTag(matched.key, pendingTag.project)
+      // Remove the old short-key entry
+      useProjectStore.setState((state) => {
+        const next = { ...state.tags }
+        delete next[pendingKey]
+        return { tags: next }
+      })
+    }
     setFullChatSession(matched)
   }, [sessions])
 
@@ -1081,3 +1113,6 @@ export default function MobileApp() {
     </>
   )
 }
+
+// Debug: Build timestamp for cache verification
+console.log('[octis] Build: 2026-05-01T22:15:00Z - getTag fallback fix + delete confirm fix')
