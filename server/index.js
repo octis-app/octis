@@ -148,14 +148,6 @@ app.get('/api/auth/me', requireAuth, (req, res) => {
   res.json({ id: req.user.id, email: req.user.email, role: req.user.role, autoAuth: AUTO_AUTH })
 })
 
-app.get('/api/gateway-config', requireAuth, (req, res) => {
-  res.json({
-    gatewayUrl: process.env.GATEWAY_URL || 'wss://octis.duckdns.org/ws',
-    token: process.env.GATEWAY_TOKEN,
-    user: { ...req.user, agent_id: 'main' }
-  })
-})
-
 app.post('/api/auth/login', loginLimiter, async (req, res) => {
   const { email, password } = req.body
   if (!email || !password) return res.status(400).json({ error: 'Email and password required' })
