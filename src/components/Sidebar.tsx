@@ -689,7 +689,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
   const handleBulkArchive = () => {
     if (!confirm(`Archive ${selected.size} session(s)?`)) return
     selected.forEach(key => {
-      send({ type: 'req', id: `sessions-delete-${Date.now()}-${key}`, method: 'sessions.delete', params: { sessionKey: key } })
+      // Archive = UI-only hide. Never send sessions.delete to gateway.
       hideSession(key)  // persist by gateway key
       const s = sessions.find(s => s.key === key)
       if (s?.id) hideSession(s.id)  // also persist by UUID
@@ -739,7 +739,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
 
   const handleArchive = (sessionKey: string) => {
     if (confirm(`Archive this session?`)) {
-      send({ type: 'req', id: `sessions-delete-${Date.now()}`, method: 'sessions.delete', params: { sessionKey } })
+      // Archive = UI-only hide in DB. Never send sessions.delete to gateway (causes gateway crash).
       hideSession(sessionKey)  // persist by gateway key
       const s = sessions.find(s => s.key === sessionKey)
       if (s?.id) hideSession(s.id)  // also persist by UUID
