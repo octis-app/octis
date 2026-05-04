@@ -1045,13 +1045,6 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     })()
   }, [sessionKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Trigger a sessions.list refresh on mount so the cost badge populates immediately
-  // (Sidebar polls every 30s - without this, a newly-opened pane can wait up to 30s)
-  useEffect(() => {
-    if (!sessionKey || !connected) return
-    send({ type: 'req', id: `sessions-list-pane-${Date.now()}`, method: 'sessions.list', params: {} })
-  }, [sessionKey, connected, send])
-
   // Handle sent queue delivery confirmation outside of setMessages callbacks
   useEffect(() => {
     const confirmed = confirmedOptimisticRef.current

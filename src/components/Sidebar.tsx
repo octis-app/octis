@@ -632,7 +632,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
     const poll = () => {
       send({ type: 'req', id: `sessions-list-${Date.now()}`, method: 'sessions.list', params: {} })
     }
-    const t = setInterval(poll, 30_000)
+    const t = setInterval(poll, 120_000)
     return () => clearInterval(t)
   }, [connected, send])
 
