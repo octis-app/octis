@@ -30,6 +30,13 @@ function patch(relPath, marker, transform) {
   console.log(`  [ok]   ${relPath}`)
 }
 
+// ─── Patch 0: vite.config.js — base path for /octis/ deployment ───
+patch(
+  'vite.config.js',
+  "base: '/octis/',",
+  (c) => c.replace("base: '/'", "base: '/octis/'")
+)
+
 // ─── Patch 1: SettingsPanel — fix quick-commands textarea (useState + auto-resize) ───
 patch(
   'src/components/SettingsPanel.tsx',
