@@ -535,8 +535,6 @@ export default function ProjectsGrid({ onOpenProject }: ProjectsGridProps) {
 
           {/* Empty state — only show when no projects AND no sessions (virtual cards cover the rest) */}
           {projects.length === 0 && sessions.length === 0 && hiddenSessions.length === 0 && (
-          {/* Empty state */}
-          {projects.length === 0 && (
             <div className="col-span-3 text-center py-16 text-[#4b5563]">
               <div className="text-5xl mb-4">🐙</div>
               <div className="text-base font-medium text-[#6b7280]">No projects yet</div>

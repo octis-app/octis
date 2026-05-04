@@ -45,8 +45,6 @@ const QUICK_COMMAND_DEFAULTS: Record<string, string> = Object.fromEntries(
 
 function getQuickCommands(): Record<string, string> {
   try {
-    return { ...QUICK_COMMAND_DEFAULTS, ...JSON.parse(localStorage.getItem('octis-quick-commands') || '{}') }
-  } catch { return { ...QUICK_COMMAND_DEFAULTS } }
     return JSON.parse(localStorage.getItem('octis-quick-commands') || '{}')
   } catch { return {} }
 }
@@ -143,9 +141,6 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [renameModel, setRenameModel] = useState(() =>
     localStorage.getItem('octis-rename-model') || ''
   )
-  const [noiseHidden, setNoiseHidden] = useState(() =>
-    localStorage.getItem('octis-noise-hidden') !== 'false'
-  )
   const noiseHidden = useUIStore(s => s.noiseHidden)
   const setNoiseHiddenStore = useUIStore(s => s.setNoiseHidden)
   const [showHeartbeatSessions, setShowHeartbeatSessions] = useState(() =>
@@ -197,9 +192,6 @@ export default function SettingsPanel({ onClose }: { onClose: () => void }) {
           // localStorage is primary — user's saved text always wins.
           // Server fills in keys that don't exist locally yet.
           // This prevents server resets/deploys from ever wiping custom text.
-          let localVals: Record<string, string> = {}
-          try { localVals = JSON.parse(localStorage.getItem('octis-quick-commands') || '{}') } catch {}
-          const merged = { ...QUICK_COMMAND_DEFAULTS, ...serverVals, ...localVals }
           // NO DEFAULTS - only use what's explicitly saved (localStorage > server).
           let localVals: Record<string, string> = {}
           try { localVals = JSON.parse(localStorage.getItem('octis-quick-commands') || '{}') } catch {}

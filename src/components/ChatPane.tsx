@@ -5,6 +5,8 @@ import { authFetch } from '../lib/authFetch'
 import { useAuthStore } from '../store/authStore'
 import DecisionButtons from './DecisionButtons'
 import { DeleteConfirmModal } from './DeleteConfirmModal'
+import { loadMsgCache, saveMsgCache } from '../lib/msgCache'
+import { useTextareaUndo } from '../hooks/useTextareaUndo'
 
 // Quick Commands helpers
 const QUICK_COMMAND_DEFAULTS = {
@@ -24,8 +26,6 @@ function getQuickCommands() {
 function SessionCostBadge({ sessionKey }: { sessionKey: string }) {
   const { sessions, sessionMeta, getCostDelta, dbCosts } = useSessionStore()
   const { labels } = useLabelStore()
-  const { sessions, sessionMeta } = useSessionStore()
-  const { send, sendChat } = useGatewayStore()
   const [expanded, setExpanded] = useState(false)
 
   const session = sessions.find((s: Session) => s.key === sessionKey)
@@ -57,13 +57,6 @@ function SessionCostBadge({ sessionKey }: { sessionKey: string }) {
     } else if (exchangeCost > 0.05) {
       icon = '🟡'; level = 'Growing'; pillClass = 'bg-amber-900/40 text-amber-400 border-amber-700/40'
     }
-  let icon = '🟢'
-  let level = 'Light'
-  let pillClass = 'bg-emerald-900/40 text-emerald-400 border-emerald-700/40'
-  if (exchangeCost > 0.15) {
-    icon = '🔴'; level = 'Heavy'; pillClass = 'bg-red-900/40 text-red-400 border-red-700/40'
-  } else if (exchangeCost > 0.05) {
-    icon = '🟡'; level = 'Growing'; pillClass = 'bg-amber-900/40 text-amber-400 border-amber-700/40'
   }
 
   const sendCompact = (e: React.MouseEvent) => {
@@ -751,10 +744,6 @@ function ReplyQuoteBubble({ role, preview, isUserMsg, onJump }: { role: string; 
   )
 }
 
-// ─── Message cache (localStorage - survives pane unmount) ──────────────────────
-import { loadMsgCache, saveMsgCache } from '../lib/msgCache'
-import { useTextareaUndo } from '../hooks/useTextareaUndo'
-
 // ─── Project Dropdown ────────────────────────────────────────────────────────
 function ProjectDropdown({ sessionKey }: { sessionKey: string }) {
   const { getTag, setTag, projectMeta } = useProjectStore()
@@ -976,13 +965,6 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const noiseHidden = useUIStore(s => s.noiseHidden)
   const toggleNoise = useUIStore(s => s.toggleNoise)
-  const [noiseHidden, setNoiseHidden] = useState(() => {
-    try {
-      return localStorage.getItem('octis-noise-hidden') !== 'false'
-    } catch {
-      return true
-    }
-  })
   // Reply state
   const [hoveredMsgKey, setHoveredMsgKey] = useState<string | null>(null)
   const [replyingTo, setReplyingTo] = useState<{ id: string | number | undefined; role: 'user' | 'assistant'; preview: string } | null>(null)
@@ -1289,7 +1271,6 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               base = msgs.map(serverMsg => {
                 if (serverMsg.role !== 'user' || !Array.isArray(serverMsg.content)) return serverMsg
                 const blocks = serverMsg.content as ContentBlock[]
-                const hasEmptyImage = blocks.some(b => b.type === 'image' && !(b as Record<string,unknown>).data)
                 const hasEmptyImage = blocks.some(b => b.type === 'image' && !imageBlockHasData(b))
                 if (!hasEmptyImage) return serverMsg
                 const localMsg = prevServer.find(m =>
@@ -1298,7 +1279,6 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                 )
                 if (!localMsg || !Array.isArray(localMsg.content)) return serverMsg
                 const localBlocks = localMsg.content as ContentBlock[]
-                const localHasImageData = localBlocks.some(b => b.type === 'image' && !!(b as Record<string,unknown>).data)
                 const localHasImageData = localBlocks.some(b => imageBlockHasData(b))
                 return localHasImageData ? { ...serverMsg, content: localMsg.content } : serverMsg
               })
@@ -1333,9 +1313,6 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                     if (hasMissingTs || hasMissingMedia) {
                       // Don't overwrite content when local has image data and server stripped it
                       const localHasImgData = Array.isArray(m.content) &&
-                        (m.content as ContentBlock[]).some(b => b.type === 'image' && !!(b as Record<string,unknown>).data)
-                      const serverHasEmptyImg = Array.isArray(pm.content) &&
-                        (pm.content as ContentBlock[]).some(b => b.type === 'image' && !(b as Record<string,unknown>).data)
                         (m.content as ContentBlock[]).some(b => imageBlockHasData(b))
                       const serverHasEmptyImg = Array.isArray(pm.content) &&
                         (pm.content as ContentBlock[]).some(b => b.type === 'image' && !imageBlockHasData(b))
@@ -2976,13 +2953,6 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                     />
                   )}
                 </div>
-                {/* Reply button — appears right of assistant messages on hover */}
-                {msg.role === 'assistant' && (
-                  <button
-                    onClick={() => setReplyingTo({ id: msg.id, role: 'assistant', preview: stripReplyCtxText(extractText(msg.content)).slice(0, 120) })}
-                    className={`bg-transparent border-0 outline-none text-[#a0aec0] hover:text-white transition-all duration-100 shrink-0 mb-2 leading-none select-none p-0 text-base ${hoveredMsgKey === msgKey ? 'opacity-70 hover:opacity-100' : 'opacity-0 pointer-events-none'}`}
-                    title="Reply"
-                  >{'\u21A9'}</button>
                 {/* Action buttons — appears right of assistant messages on hover */}
                 {msg.role === 'assistant' && (
                   <div className={`flex items-center gap-1 shrink-0 mb-2 transition-opacity duration-100 ${hoveredMsgKey === msgKey ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
