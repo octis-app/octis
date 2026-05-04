@@ -17,6 +17,7 @@ import { spawn } from 'child_process'
 import https from 'https'
 import http from 'http'
 import util from 'util'
+import crypto from 'crypto'
 
 const _require = createRequire(import.meta.url)
 const pdfParse = _require('pdf-parse')
@@ -38,7 +39,7 @@ const SQLITE_PATH = path.join(DATA_DIR, 'octis.db')
 const DEFAULT_PASSWORD_HASH = '$2a$10$o2x9gzp3989yBx242jN3uOh.ytK9E5R0k83oXpY4sYv2tL9.X.q2m' // default octis2026!
 
 // Ensure data direcory exists
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true })
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // ─── Database setup ──────────────────────────────────────────────────────────
 sqlite3.verbose() // Enable detailed logging
@@ -88,8 +89,7 @@ await db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
-  CREATE INDEX IF NOT EXISTS idx_agents_meta_visibility ON agents_meta(visible_in_picker);
-`)
+  CREATE INDEX IF NOT EXISTS idx_agents_meta_visibility ON agents_meta(visible_in_picker);`)
 
 // Seed default admin user
 try {
@@ -243,43 +243,111 @@ app.get('/logout', (req, res) => {
 function adminGwCall(calls) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket('ws://localhost:18789/gateway', {
-      headers: { Authorization: `Bearer ${GATEWAY_TOKEN}`, Origin: 'http://localhost:18789' }
+      headers: { Authorization: `Bearer ${GATEWAY_TOKEN}`, Origin: 'https://octis.duckdns.org' }
     })
     
     let resolved = false
-    
-    ws.on('open', () => {
-      ws.send(JSON.stringify({ action: 'exec', commands: calls }))
+
+    ws.on('open', async function open() {
+      console.log('[server] Admin WS: Connection opened. Sending connect challenge request.')
+      const connectReqId = String(Math.random()).slice(2) // Unique ID for this request
+      ws.send(JSON.stringify({
+        type: 'req', id: connectReqId, method: 'connect',
+        params: {
+          minProtocol: 3, maxProtocol: 3,
+          client: { id: 'octis-backend', version: '1.0.0', platform: 'Node.js', mode: 'admin' },
+          caps: [], auth: { token: GATEWAY_TOKEN }, role: 'operator', scopes: ['operator.admin']
+        }
+      }))
+
+      // Wait for connect.challenge response
+      const challengeResponse = await new Promise((res, rej) => {
+        const timeout = setTimeout(() => rej(new Error('Connect challenge timeout')), 10000) // 10s timeout
+        ws.on('message', (data) => {
+          try {
+            const msg = JSON.parse(data.toString())
+            if (msg.type === 'event' && msg.event === 'connect.challenge') {
+              clearTimeout(timeout)
+              res(msg)
+            }
+          } catch (e) { /* malformed json */ }
+        })
+      }).catch(rej)
+
+      if (!challengeResponse) return reject(new new Error('Failed to receive connect challenge'))
+
+      const { nonce } = challengeResponse.payload
+      const hash = crypto.createHash('sha256').update(`${nonce}:${GATEWAY_TOKEN}`).digest('hex')
+
+      console.log('[server] Admin WS: Responding to connect challenge.')
+      const replyReqId = String(Math.random()).slice(2)
+      ws.send(JSON.stringify({
+        type: 'req', id: replyReqId, method: 'connect.reply',
+        params: { nonce, hash }
+      }))
+
+      // Wait for connect.response to confirm full connection
+      const connectRes = await new Promise((res, rej) => {
+        const timeout = setTimeout(() => rej(new Error('Connect response timeout')), 10000) // 10s timeout
+        const handler = (data) => {
+          try {
+            const msg = JSON.parse(data.toString())
+            if (msg.type === 'res' && msg.id === replyReqId) {
+              clearTimeout(timeout)
+              if (msg.ok) res(msg)
+              else rej(new Error(msg.error?.message || 'Connect reply failed'))
+              ws.off('message', handler) // Remove handler after response
+            }
+          } catch (e) { /* malformed json */ }
+        }
+        ws.on('message', handler)
+      }).catch(rej)
+
+      if (!connectRes) return reject(new Error('Failed to get connect response'))
+
+      console.log('[server] Admin WS: Fully connected. Sending actual commands.')
+      const commandsReqId = String(Math.random()).slice(2)
+      ws.send(JSON.stringify({ type: 'req', id: commandsReqId, action: 'exec', commands: commands }))
+
+      // Handle response for actual commands
+      const finalResult = await new Promise((res, rej) => {
+        const timeout = setTimeout(() => rej(new Error('Commands execution timeout')), 30000) // 30s timeout
+        const handler = (data) => {
+          try {
+            const msg = JSON.parse(data.toString())
+            if (msg.type === 'res' && msg.id === commandsReqId) {
+              clearTimeout(timeout)
+              if (msg.ok) res(msg.payload)
+              else rej(new Error(msg.error?.message || 'Command execution failed'))
+              ws.off('message', handler) // Remove handler after response
+            }
+          } catch (e) { /* malformed json */ }
+        }
+        ws.on('message', handler)
+      }).catch(rej)
+
+      if (!finalResult) return reject(new Error('Failed to get command results'))
+
+      resolve(finalResult)
     })
     
     ws.on('message', (data) => {
-      try {
-        const resp = JSON.parse(data.toString())
-        if (resp.result) {
-          if (!resolved) {
-            resolved = true
-            ws.close()
-            resolve(resp.result)
-          }
-        } else if (resp.error && !resolved) {
-          resolved = true
-          ws.close()
-          reject(new Error(resp.error))
-        }
-      } catch (e) {
-        console.error('[server] Malformed ws data', e)
-      }
+      // Fallback for unexpected messages not handled by specific listeners
+      try { const msg = JSON.parse(data.toString()) }
+      catch { console.warn('[server] Admin WS: Unexpected non-JSON message:', data.toString()); return }
+      console.warn('[server] Admin WS: Unhandled message:', msg)
     })
     
     ws.on('error', (err) => {
-      console.error('[server] WS connection error', err.message)
+      console.error('[server] WS connection error:', err.message)
       if (!resolved) {
         resolved = true
         reject(err)
       }
     })
     
-    ws.on('close', () => {
+    ws.on('close', (code, reason) => {
+      console.error('[server] Admin WS closed. Code:', code, 'Reason:', reason.toString())
       if (!resolved) {
         resolved = true
         reject(new Error('WS connection closed unexpectedly'))
@@ -293,7 +361,7 @@ function adminGwCall(calls) {
         ws.terminate()
         reject(new Error('Admin GW request timed out'))
       }
-    }, 30000) // 30 second timeout for admin commands
+    }, 60000)
   })
 }
 
@@ -521,7 +589,7 @@ app.get('/api/sessions/labels', requireAuth, async (req, res) => {
     const rows = await db.all('SELECT * FROM session_labels WHERE user_id = ?', [req.user.id])
     res.json(rows.reduce((obj, row) => ({ ...obj, [row.session_key]: row.label }), {}))
   } catch (e) {
-    console.error('[server] Labels fetch failed:', e.message)
+    console.error('[server] Labels fetch failed:', e.message, JSON.stringify(e))
     res.status(500).json({ error: 'Labels fetch failed', details: e.message })
   }
 })
@@ -549,7 +617,6 @@ app.put('/api/sessions/:key/label', requireAuth, async (req, res) => {
   }
 })
 
-// ─── PDF extraction ──────────────────────────────────────────────────────────
 app.post('/api/extract-pdf', requireAuth, async (req, res) => {
   if (!req.files || !req.files.pdf) {
     return res.status(400).json({ error: 'Missing pdf file' })
@@ -610,11 +677,9 @@ app.post('/api/session-autoname', requireAuth, async (req, res) => {
     // Look up project context if sessionKey provided
     let projectContext = ''
     if (sessionKey) {
-      // Get cached agent context associated with the session
       try {
         const agentId = sessionKey.split(':')[1] || ''
         if (agentId) {
-          // For this demo, just look for any project-related patterns in session key
           if (agentId.includes('sage') || agentId.includes('accounting')) projectContext = 'Sage Intacct accounting system'
           else if (agentId.includes('centurion') || agentId.includes('real')) projectContext = 'Real estate investment analysis'
           else if (agentId.includes('casken')) projectContext = 'Casken collaboration platform'
@@ -656,9 +721,7 @@ Title:`
       throw new Error(`Anthropic API error: ${apiResponse.status} - ${errorData}`)
     }
 
-    // Anthropic format: content[0].text
     const data = await apiResponse.json()
-    // Anthropic format: content[0].text
     const raw = (data?.content?.[0]?.text || '').trim()
     const label = raw.split('\n')[0].replace(/^['"`*\-•]+|['"`*\-•]+$/g, '').trim().slice(0, 60)
     if (!label) return res.status(500).json({ error: 'Empty label from model' })
@@ -669,29 +732,24 @@ Title:`
   }
 })
 
+
 // ─── Gateway passthrough (with auth) ─────────────────────────────────────────
-// POST /api/gateway -> adminGwCall
 app.post('/api/gateway', requireAuth, async (req, res) => {
   try {
     const { commands } = req.body
     if (!Array.isArray(commands) || commands.length === 0) {
       return res.status(400).json({ error: 'Command array required' })
     }
-    
     if (commands.length > 10) {
       return res.status(400).json({ error: 'Max 10 commands at a time' })
     }
-
-    // Validate that commands are safe
     for (const cmd of commands) {
       if (typeof cmd !== 'string') continue
-      // Basic blacklist (extendable) 
       if (/^(config\s+patch|gateway\s+restart|gateway\s+stop|pm2\s+\w+\s+openclaw|docker\s+\w+\s+openclaw)/.test(cmd.trim())) {
         console.log(`[server] BLOCKED command from user ${req.user.id}: ${cmd}`)
         return res.status(403).json({ error: 'Command not authorized' })
       }
     }
-
     const result = await adminGwCall(commands)
     res.json(result)
   } catch (e) {
@@ -702,21 +760,13 @@ app.post('/api/gateway', requireAuth, async (req, res) => {
 
 // ─── Chat routes ─────────────────────────────────────────────────────────────
 app.get('/api/chat/history', requireAuth, async (req, res) => {
-  // Same as before (no conflict here)
   try {
     const sessionKey = req.query.session
-    if (!sessionKey) {
-      return res.status(400).json({ error: 'session param required' })
-    }
-
-    // Get from OpenClaw gateway 
+    if (!sessionKey) return res.status(400).json({ error: 'session param required' })
     const result = await adminGwCall([
       `sessions history --session-key "${sessionKey}" --format compact --include-tools false`
     ])
-
-    // If result contains history in expected format, send it as-is
     if (result && typeof result === 'object') {
-      // Result should be an array of turns [user, assistant, user, assistant, ...]
       res.json(Array.isArray(result) ? result : { error: 'Unexpected history format' })
     } else {
       res.status(500).json({ error: 'History not in expected format', result })
@@ -728,38 +778,20 @@ app.get('/api/chat/history', requireAuth, async (req, res) => {
 })
 
 app.post('/api/chat/send', requireAuth, async (req, res) => {
-  // Same as before (no conflict here)
   try {
     const { session, messages, tool } = req.body
-    
-    if (!session || !messages) {
-      return res.status(400).json({ error: 'session and messages required' })
-    }
-
-    // Validate message format
-    if (!Array.isArray(messages) || messages.length === 0) {
-      return res.status(400).json({ error: 'messages must be a non-empty array' })
-    }
-
-    // Determine action based on tool
+    if (!session || !messages) return res.status(400).json({ error: 'session and messages required' })
+    if (!Array.isArray(messages) || messages.length === 0) return res.status(400).json({ error: 'messages must be a non-empty array' })
     const isRegenerate = tool === 'regenerate'
-    const isContinue = tool === 'continue' 
-
+    const isContinue = tool === 'continue'
     let result
     if (isRegenerate) {
-      // Just regenerate last response
       result = await adminGwCall([`sessions chat --session-key "${session}" --regenerate`])
     } else if (isContinue) {
-      // Continue without input message
       result = await adminGwCall([`sessions chat --session-key "${session}" --continue`])
     } else {
-      // Standard send: convert our format to OpenClaw format and send
       const lastMsg = messages[messages.length - 1]
-      if (lastMsg.role !== 'user') {
-        return res.status(400).json({ error: 'Final message must be user role' })
-      }
-      
-      // Extract content properly from our format
+      if (lastMsg.role !== 'user') return res.status(400).json({ error: 'Final message must be user role' })
       const content = lastMsg.content
       const textContent = typeof content === 'string' 
         ? content
@@ -768,10 +800,8 @@ app.post('/api/chat/send', requireAuth, async (req, res) => {
                      c.type === 'image' ? `[image:${c.data?.substring(0, 20)||''}]` : 
                      JSON.stringify(c)).join(' ')
           : JSON.stringify(content)
-
       result = await adminGwCall([`sessions chat --session-key "${session}" --message "${textContent.replace(/"/g, "'")}"`])
     }
-
     res.json(result || { error: 'no result from gateway' })
   } catch (e) {
     console.error('[server] Chat send failed', e.message)
@@ -985,6 +1015,7 @@ app.get('/api/costs/tracking', requireAuth, async (req, res) => {
   }
 })
 
+
 // Clean session label for display - extract meaningful part from raw message
 function cleanSessionLabel(label, sessionKey) {
   if (!label) return sessionKey.split(':').pop() || sessionKey
@@ -1020,11 +1051,10 @@ app.get('/api/sessions/history', async (req, res) => {
       FROM kennan.claw_session_costs
       WHERE session_date >= CURRENT_DATE - INTERVAL '${days} days'
       GROUP BY session_id, first_message, sender_name
-      ORDER BY MAX(last_ts) DESC LIMIT ?
-    `, [limit])
+      ORDER BY MAX(last_ts) DESC LIMIT ${limit}
+    `)
 
     res.json(rows.map(row => ({
-      // ... conversion to expected format
       session_key: row.session_key,
       session_label: row.session_label,
       sender: row.sender_name,
@@ -1044,7 +1074,6 @@ const PORT = process.env.PORT || 3000
 const isHttps = process.env.HTTPS === '1'
 
 if (isHttps) {
-  // Use local development certificate (self-signed or from certbot)
   const options = {
     key: fs.readFileSync(process.env.SSL_KEY || path.join(DATA_DIR, 'cert/privkey.pem')),
     cert: fs.readFileSync(process.env.SSL_CERT || path.join(DATA_DIR, 'cert/fullchain.pem'))
@@ -1083,4 +1112,3 @@ app.get('/debug/costs', async (req, res) => {
 
 console.log(`[octis] Started with data dir: ${DATA_DIR}`)
 console.log(`[octis] Gateway: ${GATEWAY_URL || 'not set'} | Token: ${GATEWAY_TOKEN ? 'set' : 'not set'}`)
-console.log(`[octis] Data: ${SQLITE_PATH}`)
