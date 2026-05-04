@@ -731,6 +731,16 @@ export const useHiddenStore = create<HiddenState>()(
           // (race between pushHideToServer and the next reconnect hydration call).
           // Unhide() removes from both local state and server, so this is safe.
           return { hydrated: true, hidden: new Set([...s.hidden, ...serverSet]) }
+          const preserved = new Set<string>()
+          const cutoff = Date.now() - 90_000
+          s.hidden.forEach(k => {
+            // Keep locally-added keys not on the server only if they are very recent.
+            // We don't have a timestamp per key, so keep ALL local keys that are
+            // absent from the server only if the store was just hydrated < 90s ago.
+            // If already hydrated (second call), trust the server fully.
+            if (!s.hydrated && !serverSet.has(k)) preserved.add(k)
+          })
+          return { hydrated: true, hidden: new Set([...serverSet, ...preserved]) }
         })
         // Re-filter sessions so any unarchived sessions immediately reappear.
         const sessionStore = useSessionStore.getState()
@@ -1228,7 +1238,6 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
       }
     } catch {}
   },
-
   markStreaming: (sessionKey) => {
     // Reset the 5-min fallback timer — stored in external Map so this never triggers a re-render.
     const existing = streamingTimerMap.get(sessionKey)

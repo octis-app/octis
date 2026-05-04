@@ -9,6 +9,8 @@ import ErrorBoundary from './components/ErrorBoundary'
 // (each pending SW update triggered a page reload, which found the next pending update).
 // autoUpdate + skipWaiting + clientsClaim handles SW activation without a reload loop.
 // Users get fresh code on next natural app open/tab load.
+// Note: periodic SW update checks (5 min via onRegistered) also removed — they
+// contributed to the reload loop. Browser handles update checks natively.
 function SWRegistrar() {
   useRegisterSW({
     onOfflineReady() { /* silent */ },

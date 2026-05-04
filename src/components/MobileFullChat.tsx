@@ -71,7 +71,46 @@ function fmtMsgTs(ms: number): string {
   return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`
 }
 
+// Get date label for date separator
+function getDateLabel(ms: number): string {
+  const d = new Date(ms)
+  const now = new Date()
+  const sameDay = d.toDateString() === now.toDateString()
+  if (sameDay) return 'Today'
+  const yesterday = new Date(now)
+  yesterday.setDate(yesterday.getDate() - 1)
+  if (d.toDateString() === yesterday.toDateString()) return 'Yesterday'
+  const thisYear = d.getFullYear() === now.getFullYear()
+  return thisYear
+    ? d.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' })
+    : d.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+}
+
+// Check if two timestamps are on different days
+function isDifferentDay(ts1: number, ts2: number): boolean {
+  if (!ts1 || !ts2) return false
+  const d1 = new Date(ts1)
+  const d2 = new Date(ts2)
+  return d1.toDateString() !== d2.toDateString()
+}
+
 // ─── Content Rendering ────────────────────────────────────────────────────────
+
+// ─── Image data helpers ───────────────────────────────────────────────────────
+// Check if an image block has actual base64 data (handles both formats)
+// OpenClaw native: {type:'image', data:'...', mimeType:'...'}
+// Anthropic format: {type:'image', source:{type:'base64', data:'...', media_type:'...'}}
+function imageBlockHasData(block: unknown): boolean {
+  if (!block || typeof block !== 'object') return false
+  const b = block as Record<string, unknown>
+  if (b.type !== 'image') return false
+  // OpenClaw native format
+  if (b.data) return true
+  // Anthropic format
+  const src = b.source as Record<string, unknown> | undefined
+  if (src?.data) return true
+  return false
+}
 
 // Try to parse content that looks like a JSON content-block array (or single object).
 // Returns the parsed blocks, or null if it doesn't look like one / fails to parse.
@@ -165,11 +204,14 @@ function renderTextWithMedia(text: string, key: number): React.ReactNode {
       </span>
     )
   }
+  // Match: [media attached: /path (mime)] or webchat format: [media attached: media://inbound/xxx]
   const mediaMatch = text.match(/\[media attached:\s*([^\s)]+)\s+\(([^)]+)\)/)
-  if (mediaMatch) {
-    const filePath = mediaMatch[1]
-    const mimeType = mediaMatch[2] || ''
-    const filename = filePath.split('/').pop() || ''
+  const webchatMediaMatch = !mediaMatch && text.match(/\[media attached:\s*media:\/\/inbound\/([^\]\s]+)/)
+  if (mediaMatch || webchatMediaMatch) {
+    const filePath = mediaMatch ? mediaMatch[1] : `media://inbound/${webchatMediaMatch![1]}`
+    const mimeType = mediaMatch ? (mediaMatch[2] || '') : ''
+    // For webchat format, extract filename from media://inbound/xxx path
+    const filename = webchatMediaMatch ? webchatMediaMatch[1] : (filePath.split('/').pop() || '')
     const mediaSrc = `${API}/api/media/${encodeURIComponent(filename)}`
     const afterMeta = text
       .replace(/\[media attached:[^\]]+\]/g, '')
@@ -207,158 +249,47 @@ function renderTextWithMedia(text: string, key: number): React.ReactNode {
       onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
   }
 
-  // Render text with clickable URLs, inline images, and markdown tables
+  // Render text with clickable URLs and inline images
   const lines = text.split('\n')
-  const rendered: React.ReactNode[] = []
-  let li = 0
-
-  const renderLine = (line: string, lineKey: string | number, addNewline: boolean): React.ReactNode => {
+  const rendered = lines.flatMap((line, li) => {
     // Markdown image: ![alt](url)
     const mdImg = line.match(/^!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)$/)
     if (mdImg) {
-      return <img key={lineKey} src={mdImg[2]} alt={mdImg[1]}
+      return [<img key={`img-${li}`} src={mdImg[2]} alt={mdImg[1]}
         className="max-w-full rounded-lg my-1 max-h-64 object-contain"
-        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
+        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />]
     }
     // MEDIA:<url> directive
     const mediaLine = line.match(/^MEDIA:(https?:\/\/\S+)$/)
     if (mediaLine) {
       const mUrl = mediaLine[1]
       const isImg = /\.(png|jpg|jpeg|gif|webp)(\?|$)/i.test(mUrl)
-      return isImg
-        ? <img key={lineKey} src={mUrl} alt="image"
+      return [isImg
+        ? <img key={`m-${li}`} src={mUrl} alt="image"
             className="max-w-full rounded-lg my-1 max-h-64 object-contain"
             onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
-        : <a key={lineKey} href={mUrl} target="_blank" rel="noopener noreferrer"
-            className="text-[#818cf8] underline break-all">{mUrl}</a>
+        : <a key={`m-${li}`} href={mUrl} target="_blank" rel="noopener noreferrer"
+            className="text-[#818cf8] underline break-all">{mUrl}</a>]
     }
     // Data URI image on its own line
     if (/^data:image\/(png|jpeg|gif|webp);base64,/.test(line.trim())) {
-      return <img key={lineKey} src={line.trim()} alt="image"
+      return [<img key={`di-${li}`} src={line.trim()} alt="image"
         className="max-w-full rounded-lg my-1 max-h-64 object-contain"
         style={{ maxWidth: '100%', borderRadius: '8px' }}
-        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
-    }
-    // Default: parse inline markdown (bold, italic, code) + clickable URLs
-    const inlineParts = line.split(/(https?:\/\/[^\s<>"{}|\\^`\[\]*]+|`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g)
-    const lineNodes = inlineParts.map((p, pi) => {
-      if (/^https?:\/\//.test(p))
-        return <a key={pi} href={p} target="_blank" rel="noopener noreferrer" style={{ color: '#818cf8', textDecoration: 'underline', wordBreak: 'break-all' }}>{p}</a>
-      if (p.startsWith('**') && p.endsWith('**') && p.length > 4)
-        return <strong key={pi} style={{ fontWeight: 600, color: 'white' }}>{p.slice(2, -2)}</strong>
-      if (p.startsWith('`') && p.endsWith('`') && p.length > 2)
-        return <code key={pi} style={{ background: '#0f1117', color: '#a5b4fc', padding: '1px 5px', borderRadius: 3, fontSize: 11, fontFamily: 'monospace' }}>{p.slice(1, -1)}</code>
-      if (p.startsWith('*') && p.endsWith('*') && p.length > 2)
-        return <em key={pi} style={{ opacity: 0.85 }}>{p.slice(1, -1)}</em>
-      return <span key={pi}>{p}</span>
-    })
-    return <span key={lineKey}>{lineNodes}{addNewline ? '\n' : ''}</span>
-  }
-
-  // Inline renderer used by structured blocks (headings, bullets) that need markdown within them
-  const renderInline = (text: string, baseKey: string | number): React.ReactNode[] => {
-    const parts = text.split(/(https?:\/\/[^\s<>"{}|\\^`\[\]*]+|`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g)
-    return parts.map((p, pi) => {
-      if (/^https?:\/\//.test(p))
-        return <a key={`${baseKey}-${pi}`} href={p} target="_blank" rel="noopener noreferrer" style={{ color: '#818cf8', textDecoration: 'underline', wordBreak: 'break-all' }}>{p}</a>
-      if (p.startsWith('**') && p.endsWith('**') && p.length > 4)
-        return <strong key={`${baseKey}-${pi}`} style={{ fontWeight: 600, color: 'white' }}>{p.slice(2, -2)}</strong>
-      if (p.startsWith('`') && p.endsWith('`') && p.length > 2)
-        return <code key={`${baseKey}-${pi}`} style={{ background: '#0f1117', color: '#a5b4fc', padding: '1px 5px', borderRadius: 3, fontSize: 11, fontFamily: 'monospace' }}>{p.slice(1, -1)}</code>
-      if (p.startsWith('*') && p.endsWith('*') && p.length > 2)
-        return <em key={`${baseKey}-${pi}`} style={{ opacity: 0.85 }}>{p.slice(1, -1)}</em>
-      return <span key={`${baseKey}-${pi}`}>{p}</span>
-    })
-  }
-
-  while (li < lines.length) {
-    const line = lines[li]
-
-    // Markdown table block — table-layout:fixed so columns wrap instead of overflowing
-    if (line.trimStart().startsWith('|')) {
-      const tableLines: string[] = []
-      while (li < lines.length && lines[li].trimStart().startsWith('|')) {
-        tableLines.push(lines[li])
-        li++
-      }
-      const parseRow = (row: string) => row.split('|').slice(1, -1).map(c => c.trim())
-      const isSep = (row: string) => /^[\|\s\-:]+$/.test(row)
-      if (tableLines.length >= 2 && isSep(tableLines[1])) {
-        const headers = parseRow(tableLines[0])
-        const rows = tableLines.slice(2).map(parseRow)
-        rendered.push(
-          <div key={`tbl-${li}`} style={{ margin: '8px 0', borderRadius: 8, border: '1px solid #2a3142', width: '100%' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, tableLayout: 'fixed' }}>
-              <thead>
-                <tr style={{ background: '#1a1d2e' }}>
-                  {headers.map((h, hi) => (
-                    <th key={hi} style={{ padding: '6px 8px', textAlign: 'left', color: '#a5b4fc', fontWeight: 600, borderBottom: '1px solid #2a3142', wordBreak: 'break-word', overflowWrap: 'anywhere' }}>
-                      {renderInline(h, `th-${li}-${hi}`)}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row, ri) => (
-                  <tr key={ri} style={{ background: ri % 2 === 0 ? '#0f1117' : '#131720' }}>
-                    {row.map((cell, ci) => (
-                      <td key={ci} style={{ padding: '6px 8px', color: '#cbd5e1', borderBottom: '1px solid #1e2130', verticalAlign: 'top', wordBreak: 'break-word', overflowWrap: 'anywhere' }}>
-                        {renderInline(cell, `td-${li}-${ri}-${ci}`)}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )
-      } else {
-        // Not a valid table — render as plain lines
-        tableLines.forEach((tl, tli) => {
-          rendered.push(renderLine(tl, `tl-${li}-${tli}`, tli < tableLines.length - 1))
-        })
-      }
-      continue
+        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />]
     }
 
-    // Markdown headings
-    const headingMatch = line.match(/^(#{1,3}) (.*)/)
-    if (headingMatch) {
-      const level = headingMatch[1].length
-      const headText = headingMatch[2]
-      const sz = level === 1 ? 15 : level === 2 ? 13 : 12
-      const col = level === 1 ? 'white' : level === 2 ? '#a5b4fc' : '#818cf8'
-      rendered.push(<div key={`h-${li}`} style={{ fontWeight: 700, fontSize: sz, color: col, marginTop: level === 1 ? 10 : 6, marginBottom: 2 }}>{renderInline(headText, `h-${li}`)}</div>)
-      li++
-      continue
-    }
-
-    // Horizontal rule
-    if (line.trim() === '---' || line.trim() === '***' || line.trim() === '___') {
-      rendered.push(<hr key={`hr-${li}`} style={{ border: 'none', borderBottom: '1px solid #2a3142', margin: '8px 0' }} />)
-      li++
-      continue
-    }
-
-    // Bullet list item
-    const bulletMatch = line.match(/^(\s*)[-*] (.*)/)
-    if (bulletMatch) {
-      const indent = bulletMatch[1].length
-      rendered.push(
-        <div key={`b-${li}`} style={{ display: 'flex', gap: 6, paddingTop: 2, paddingBottom: 2, marginLeft: indent > 0 ? 14 : 0 }}>
-          <span style={{ color: '#6366f1', fontSize: 10, marginTop: 5, flexShrink: 0 }}>•</span>
-          <span style={{ fontSize: 14, lineHeight: 1.5 }}>{renderInline(bulletMatch[2], `b-${li}`)}</span>
-        </div>
-      )
-      li++
-      continue
-    }
-
-    rendered.push(renderLine(line, `line-${li}`, li < lines.length - 1))
-    li++
-  }
-
-  return <div key={key} style={{ whiteSpace: 'pre-wrap' }}>{rendered}</div>
+    // Split by URLs to make them clickable
+    const urlParts = line.split(/(https?:\/\/[^\s<>"{}|\\^`\[\]*]+)/g)
+    const lineNodes = urlParts.map((p, pi) =>
+      /^https?:\/\//.test(p)
+        ? <a key={pi} href={p} target="_blank" rel="noopener noreferrer"
+            className="text-[#818cf8] underline break-all">{p}</a>
+        : <span key={pi}>{p}</span>
+    )
+    return [<span key={`line-${li}`}>{lineNodes}{li < lines.length - 1 ? '\n' : ''}</span>]
+  })
+  return <span key={key} style={{ whiteSpace: 'pre-wrap' }}>{rendered}</span>
 }
 
 function renderMessageContent(content: MessageContent): React.ReactNode {
@@ -767,7 +698,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
   type SentEntry = { id: number; text: string; status: 'sending' | 'queued' }
   const [sentQueue, setSentQueue] = useState<SentEntry[]>([])
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null)
-  const confirmedSentRef = useRef<number | null>(null)
+  confirmedSentRef = useRef<number | null>(null)
   // Track message count before send — used to unblock polls once server confirms receipt
   const preSendCountRef = useRef<number>(0)
   const noiseHidden = useUIStore(s => s.noiseHidden)
@@ -825,6 +756,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
   // Reply state
   const [replyingTo, setReplyingTo] = useState<{ id: string | number | undefined; role: 'user' | 'assistant'; preview: string } | null>(null)
   const [highlightedMsgKey, setHighlightedMsgKey] = useState<string | null>(null)
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const [swipeHint, setSwipeHint] = useState<string | null>(null)
   const touchStartX = useRef(0)
   const touchStartY = useRef(0)
@@ -864,7 +796,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
   sessionKeyRef.current = session?.key
 
   // Horizontal swipe-to-switch.
-  // Listener on outerRef (fixed non-scrollable wrapper) — iOS doesn’t compete here.
+  // Listener on outerRef (fixed non-scrollable wrapper) — iOS doesn't compete here.
   // Runs ONCE on mount. Uses refs for fresh values without re-registering.
   useEffect(() => {
     const el = outerRef.current
@@ -886,7 +818,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     }
 
     // Visual target is the scroll container (messages only) — header + input stay fixed.
-    // Gesture capture stays on outerRef so iOS doesn’t compete for the touch.
+    // Gesture capture stays on outerRef so iOS doesn't compete for the touch.
     const msgEl = () => scrollRef.current
 
     const onMove = (e: TouchEvent) => {
@@ -956,7 +888,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
         return
       }
       const target = deltaX < 0 ? '-100vw' : '100vw'
-      setSwipeHint(deltaX < 0 ? 'Next →' : '← Previous')
+      setSwipeHint(dx < 0 ? 'Next →' : '← Previous')
       setTimeout(() => setSwipeHint(null), 600)
       m.style.transition = 'transform 180ms cubic-bezier(0.4,0,0.2,1)'
       m.style.transform = `translateX(${target})`
@@ -1089,6 +1021,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
       }
     }
     document.addEventListener('visibilitychange', handleVisibility)
+
     return () => document.removeEventListener('visibilitychange', handleVisibility)
   }, [connect, connected, ws, session?.key, send, fetchHistoryHttp])
 
@@ -1268,7 +1201,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
           // results are truncated (30 msgs) and would overwrite the full 200-msg cache.
 
           // Clear sending only when server confirmed our user message AND assistant replied.
-          // This prevents clearing against the previous exchange’s assistant reply.
+          // This prevents clearing against the previous exchange's assistant reply.
           if (serverHasUserMsg) {
             const lastMsg = msgs[msgs.length - 1]
             if (lastMsg?.role === 'assistant') {
@@ -1285,7 +1218,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
           // WS strips base64 from image blocks. Restore from cache, fallback to HTTP.
           const hasEmptyImages = msgs.some(m =>
             m.role === 'user' && Array.isArray(m.content) &&
-            (m.content as ContentBlock[]).some(b => (b as {type:string}).type === 'image' && !(b as Record<string,unknown>).data)
+            (m.content as ContentBlock[]).some(b => (b as {type:string}).type === 'image' && !imageBlockHasData(b))
           )
           if (hasEmptyImages) {
             fetch(`${API}/api/chat-history?sessionKey=${encodeURIComponent(session.key)}&limit=${historyLimitRef.current}`, { credentials: 'include' })
@@ -1462,11 +1395,11 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
       } else {
         void fetchHistoryHttp(30)
       }
-    }, 60000)
+    }, 15000)
     return () => clearInterval(interval)
   }, [session?.key, ws, connected, send, fetchHistoryHttp])
 
-  // Fast poll (5s) — only while waiting for a reply. WS or HTTP fallback.
+  // Fast poll (3s) — only while waiting for a reply. WS or HTTP fallback.
   useEffect(() => {
     if (!session?.key || !sending) return
     const interval = setInterval(() => {
@@ -1476,7 +1409,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
       } else {
         void fetchHistoryHttp(50)
       }
-    }, 5000)
+    }, 3000)
     return () => clearInterval(interval)
   }, [session?.key, ws, connected, sending, send, fetchHistoryHttp])
 
@@ -1617,7 +1550,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
         console.error('[octis-mobile] upload failed:', e)
       }
     }
-
+    
     // Fire project-context injection on first send (lazy)
     const pendingInit = consumePendingProjectInit(session.key)
     if (pendingInit) {
@@ -1666,10 +1599,9 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
     setMessages((prev) => {
       // Race guard: poll may have already committed this message to state before
       // the optimistic append runs (React batches functional updates — prev reflects
-      // the poll-updated state). Only check the last 5 messages — checking all history
-      // incorrectly swallows repeated messages (e.g. "ok", "yes") that appeared earlier.
-      const tail = prev.slice(-5)
-      if (optimisticText && tail.some(m => {
+      // the poll-updated state). Skip if real or optimistic already present.
+      // Must handle both string content and block-array content (server returns either).
+      if (optimisticText && prev.some(m => {
         if (m.role !== 'user') return false
         if (typeof m.content === 'string') return m.content.slice(0, 80) === optimisticText.slice(0, 80)
         if (Array.isArray(m.content)) {
@@ -1807,10 +1739,10 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
       .filter(m => m.content.trim().length > 0)
       .slice(0, 6)
     try {
-      const res = await fetch(`${API}/api/session-autoname`, {
+      const res = await authFetch(`${API}/api/session-autoname`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: slim, model: localStorage.getItem('octis-rename-model') || undefined }),
+        body: JSON.stringify({ messages: slim, sessionKey: session.key, model: localStorage.getItem('octis-rename-model') || undefined }),
       })
       const data = await res.json() as { label?: string }
       if (data.label) {
@@ -1941,21 +1873,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
         >
           {recentSessions.map((s) => {
             const pillEmoji = getProjectEmoji(getTag(s.key).project || '')
-            const rawLbl = getLabel(s.key) || s.label || ''
-            const lbl = (rawLbl || (() => {
-              // agent:main:session-<timestamp> → show time
-              const tsMatch = s.key.match(/:session-(\d{13})/)
-              if (tsMatch) return new Date(parseInt(tsMatch[1])).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-              // agent:main:dashboard:UUID → Control UI / webchat session
-              if (s.key.includes(':dashboard:')) return 'Webchat'
-              // Slack thread → DM · time
-              const slackTs = s.key.match(/:thread:([\d.]+)$/)
-              if (slackTs) {
-                const d = new Date(parseFloat(slackTs[1]) * 1000)
-                return 'DM \u00b7 ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-              }
-              return s.key
-            })()).slice(0, 16)
+            const lbl = (getLabel(s.key) || s.label || s.key).slice(0, 14)
             const isCurrent = s.key === session.key
             const st = getStatus(s)
             const dotColor =
@@ -2004,6 +1922,8 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
           if (!el) return
           // With flex-col-reverse, scrollTop=0 is the bottom. User scrolled up = scrollTop > 80
           userScrolledUpRef.current = el.scrollTop > 80
+          // Show scroll-to-bottom button when scrolled up more than 200px
+          setShowScrollToBottom(el.scrollTop > 200)
           // Auto-trigger load-more when user scrolls near the top (visual top = high scrollTop in col-reverse)
           if (hasMore && loadedKey === session?.key && !isLoadingMoreRef.current) {
             const nearTop = el.scrollTop >= el.scrollHeight - el.clientHeight - 150
@@ -2015,7 +1935,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
               setHasMore(false)
               const reqId = `chat-history-loadmore-${session?.key}-${Date.now()}`
               currentHistoryReqIdRef.current = reqId
-              send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey: session?.key, limit: newLimit } })
+              send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey: session.key, limit: newLimit } })
             }
           }
         }}
@@ -2066,19 +1986,30 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
             })
           const reversed = [...filtered].reverse()
           return (<>
-            {reversed.map((msg, i) => {
+            {reversed.map((msg, i, arr) => {
+              const msgTs = getMsgTs(msg)
+              // Check if we need a date separator (different day from previous message in reversed order)
+              const prevMsgTs = i > 0 ? getMsgTs(arr[i - 1]) : 0
+              const needsDateSeparator = msgTs > 0 && (i === 0 || isDifferentDay(prevMsgTs, msgTs))
               // Model switch detection — render as divider annotation
               const msgText = extractText(msg.content)
               const isModelSwitch = (
                 /^Model switched to /i.test(msgText) ||
                 /model (set|switched|now using|changed) to/i.test(msgText) ||
-                /^(switching|fallback|now using|using) (model|claude|gemini|gpt)/i.test(msgText) ||
+                /^(switching|fallback|now using) (model|claude|gemini|gpt)/i.test(msgText) ||
                 /\/(model|switch) /i.test(msgText) ||
                 /fallback.*model/i.test(msgText) ||
                 /switch.*model/i.test(msgText)
               ) && msgText.length < 200
               return (
                 <React.Fragment key={msg.id !== undefined ? String(msg.id) : i}>
+                  {/* Date separator */}
+                  {needsDateSeparator && (
+                    <div className="date-separator my-4 px-4">
+                      {getDateLabel(msgTs)}
+                    </div>
+                  )}
+
                   {isModelSwitch && (
                     <div className="flex items-center gap-2 px-4 py-1 my-1">
                       <div className="flex-1 h-px bg-[#2a3142]" />
@@ -2249,7 +2180,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
               )}
             </div>
           </React.Fragment>
-        )})
+        )})}
           }
             {/* Load-more: LAST in DOM = visual TOP in flex-col-reverse */}
             {hasMore && loadedKey === session?.key && (
@@ -2267,7 +2198,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
                       setHasMore(false)
                       const reqId = `chat-history-loadmore-${session?.key}-${Date.now()}`
                       currentHistoryReqIdRef.current = reqId
-                      send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey: session?.key, limit: newLimit } })
+                      send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey: session.key, limit: newLimit } })
                     }}
                     className="text-xs text-[#6366f1] bg-[#1e2330] px-4 py-2 rounded-full border border-[#6366f1]/30 active:opacity-70"
                   >
@@ -2281,6 +2212,23 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
 
       </div>
       </div>
+      {/* Scroll to bottom button */}
+      {showScrollToBottom && (
+        <button
+          onClick={() => {
+            const el = scrollRef.current
+            if (el) {
+              el.scrollTop = 0 // In flex-col-reverse, scrollTop=0 is bottom
+              setShowScrollToBottom(false)
+              userScrolledUpRef.current = false
+            }
+          }}
+          className="absolute bottom-24 left-1/2 -translate-x-1/2 bg-[#6366f1] active:bg-[#818cf8] text-white px-4 py-2.5 rounded-full text-xs font-medium shadow-lg shadow-[#6366f1]/30 transition-all active:scale-95 flex items-center gap-1.5 z-20"
+        >
+          <span>↓</span>
+          <span>New messages</span>
+        </button>
+      )}
       <div
         className="px-3 pt-2 pb-2 bg-[#181c24] border-t border-[#2a3142] shrink-0"
       >
@@ -2327,14 +2275,14 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
                   : (
                     <div className="flex flex-col gap-0.5 bg-[#1e2330] rounded-xl px-2 py-1.5 max-w-[160px]">
                       <div className="flex items-center gap-1.5">
-                        <span className="text-base">📄</span>
-                        <span className="text-xs text-white truncate flex-1">{file.name}</span>
+                        <span class="text-base">📄</span>
+                        <span class="text-xs text-white truncate flex-1">{file.name}</span>
                       </div>
                       {file.extracting && (
-                        <span className="text-[10px] text-[#6b7280] animate-pulse">Extracting…</span>
+                        <span class="text-[10px] text-[#6b7280] animate-pulse">Extracting…</span>
                       )}
                       {!file.extracting && file.extractedText !== undefined && (
-                        <span className="text-[10px] text-[#22c55e]">✓ {file.pages ? `${file.pages}p · ` : ''}{Math.round((file.extractedText?.length || 0) / 4)} tokens</span>
+                        <span class="text-[10px] text-[#22c55e]">✓ {file.pages ? `${file.pages}p · ` : ''}{Math.round((file.extractedText?.length || 0) / 4)} tokens</span>
                       )}
                     </div>
                   )
@@ -2347,26 +2295,26 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
             ))}
           </div>
         )}
-        <div className="flex gap-2 items-end">
+        <div class="flex gap-2 items-end">
           {/* Hidden file input */}
           <input
             ref={fileInputRef}
             type="file"
             accept="image/*,application/pdf,video/mp4,video/quicktime,video/webm,video/*"
-            className="hidden"
+            class="hidden"
             onChange={(e) => { Array.from(e.target.files || []).forEach(f => handleAttachFile(f)); e.target.value = '' }}
             multiple
           />
           <button
             onClick={() => fileInputRef.current?.click()}
-            className="text-[#4b5563] hover:text-[#6366f1] transition-colors w-9 h-9 flex items-center justify-center shrink-0 rounded-xl hover:bg-[#1e2330]"
+            class="text-[#4b5563] hover:text-[#6366f1] transition-colors w-9 h-9 flex items-center justify-center shrink-0 rounded-xl hover:bg-[#1e2330]"
             title="Attach image or PDF"
           >
             📎
           </button>
           <textarea
             ref={inputRef}
-            className="flex-1 bg-[#0f1117] border border-[#2a3142] rounded-2xl px-4 py-2 text-white outline-none focus:border-[#6366f1] placeholder-[#4b5563] resize-none leading-snug"
+            class="flex-1 bg-[#0f1117] border border-[#2a3142] rounded-2xl px-4 py-2 text-white outline-none focus:border-[#6366f1] placeholder-[#4b5563] resize-none leading-snug"
             placeholder="Message…"
             value={input}
             rows={1}
@@ -2402,7 +2350,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
           <button
             onClick={() => handleSend()}
             disabled={(!input.trim() && pendingFiles.length === 0) || pendingFiles.some(f => f.extracting === true)}
-            className="bg-[#6366f1] disabled:opacity-40 text-white rounded-2xl w-11 h-11 flex items-center justify-center shrink-0 transition-colors active:scale-95"
+            class="bg-[#6366f1] disabled:opacity-40 text-white rounded-2xl w-11 h-11 flex items-center justify-center shrink-0 transition-colors active:scale-95"
           >
             ↑
           </button>
@@ -2414,33 +2362,33 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
       {/* Archive action sheet */}
       {showArchiveSheet && (
         <div
-          className="fixed inset-0 z-50 flex flex-col justify-end bg-black/60"
+          class="fixed inset-0 z-50 flex flex-col justify-end bg-black/60"
           onClick={() => setShowArchiveSheet(false)}
         >
           <div
-            className="bg-[#181c24] rounded-t-3xl border-t border-[#2a3142] px-4 pt-4 pb-8 space-y-2"
+            class="bg-[#181c24] rounded-t-3xl border-t border-[#2a3142] px-4 pt-4 pb-8 space-y-2"
             onClick={e => e.stopPropagation()}
           >
-            <div className="w-10 h-1 bg-[#2a3142] rounded-full mx-auto mb-4" />
+            <div class="w-10 h-1 bg-[#2a3142] rounded-full mx-auto mb-4" />
             {/* Noise toggle */}
             <button
-              onClick={toggleNoiseMobile}
-              className="w-full flex items-center justify-between px-4 py-3.5 rounded-xl hover:bg-[#2a3142] transition-colors"
+              onClick={() => setNoiseHidden((v) => { const next = !v; try { localStorage.setItem('octis-noise-hidden', String(next)) } catch {} return next })}
+              class="w-full flex items-center justify-between px-4 py-3.5 rounded-xl hover:bg-[#2a3142] transition-colors"
             >
-              <span className="text-sm text-white">{noiseHidden ? 'Show tool calls' : 'Hide tool calls'}</span>
-              <span className={`text-xs px-2 py-0.5 rounded-full border ${noiseHidden ? 'bg-[#1e2330] border-[#2a3142] text-[#6b7280]' : 'bg-[#6366f1]/20 border-[#6366f1] text-[#a5b4fc]'}`}>
+              <span class="text-sm text-white">{noiseHidden ? 'Show tool calls' : 'Hide tool calls'}</span>
+              <span class={`text-xs px-2 py-0.5 rounded-full border ${noiseHidden ? 'bg-[#1e2330] border-[#2a3142] text-[#6b7280]' : 'bg-[#6366f1]/20 border-[#6366f1] text-[#a5b4fc]'}`}>
                 {noiseHidden ? 'chat only' : '+ tools'}
               </span>
             </button>
-            <div className="border-t border-[#2a3142] my-1" />
+            <div class="border-t border-[#2a3142] my-1" />
             <button
               onClick={() => { setShowArchiveSheet(false); setShowAssignSheet(true) }}
-              className="w-full text-left px-4 py-3.5 rounded-xl text-white text-sm hover:bg-[#2a3142] transition-colors flex items-center gap-3"
+              class="w-full text-left px-4 py-3.5 rounded-xl text-white text-sm hover:bg-[#2a3142] transition-colors flex items-center gap-3"
             >
               <span>{getProjectEmoji(getTag(session.key).project || '') || '📁'}</span>
               <span>Assign to project…</span>
             </button>
-            <div className="border-t border-[#2a3142] my-1" />
+            <div class="border-t border-[#2a3142] my-1" />
             <button
               onClick={() => {
                 setShowArchiveSheet(false)
@@ -2455,13 +2403,13 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
                 // Hide only (no gateway delete — sessions needed for productivity audits)
                 onArchive?.()
               }}
-              className="w-full text-left px-4 py-3.5 rounded-xl text-red-400 font-medium text-sm hover:bg-[#2a3142] transition-colors"
+              class="w-full text-left px-4 py-3.5 rounded-xl text-red-400 font-medium text-sm hover:bg-[#2a3142] transition-colors"
             >
               Save &amp; Archive
             </button>
             <button
               onClick={() => setShowArchiveSheet(false)}
-              className="w-full text-left px-4 py-3.5 rounded-xl text-[#6b7280] text-sm hover:bg-[#2a3142] transition-colors"
+              class="w-full text-left px-4 py-3.5 rounded-xl text-[#6b7280] text-sm hover:bg-[#2a3142] transition-colors"
             >
               Cancel
             </button>
@@ -2472,37 +2420,37 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
       {/* Assign to project sheet */}
       {showAssignSheet && (
         <div
-          className="fixed inset-0 z-[60] flex flex-col justify-end bg-black/60"
+          class="fixed inset-0 z-[60] flex flex-col justify-end bg-black/60"
           onClick={() => setShowAssignSheet(false)}
         >
           <div
-            className="bg-[#181c24] rounded-t-3xl border-t border-[#2a3142] px-4 pt-4 pb-8"
+            class="bg-[#181c24] rounded-t-3xl border-t border-[#2a3142] px-4 pt-4 pb-8"
             onClick={e => e.stopPropagation()}
           >
-            <div className="w-10 h-1 bg-[#2a3142] rounded-full mx-auto mb-4" />
-            <div className="text-[#6b7280] text-xs font-medium mb-3 px-1">Assign to project</div>
-            <div className="space-y-1 max-h-72 overflow-y-auto">
+            <div class="w-10 h-1 bg-[#2a3142] rounded-full mx-auto mb-4" />
+            <div class="text-[#6b7280] text-xs font-medium mb-3 px-1">Assign to project</div>
+            <div class="space-y-1 max-h-72 overflow-y-auto">
               {Object.entries(projectMeta)
                 .filter(([slug]) => slug !== getTag(session.key).project)
                 .map(([slug, meta]) => (
                   <button
                     key={slug}
                     onClick={() => handleReassign(slug)}
-                    className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left active:bg-[#2a3142] transition-colors"
+                    class="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left active:bg-[#2a3142] transition-colors"
                   >
-                    <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg shrink-0" style={{ background: meta.color + '22', border: `1px solid ${meta.color}44` }}>
+                    <div class="w-9 h-9 rounded-xl flex items-center justify-center text-lg shrink-0" style={{ background: meta.color + '22', border: `1px solid ${meta.color}44` }}>
                       {meta.emoji}
                     </div>
-                    <span className="text-sm font-medium text-white">{meta.name}</span>
+                    <span class="text-sm font-medium text-white">{meta.name}</span>
                   </button>
                 ))}
               {getTag(session.key).project && (
                 <button
                   onClick={() => handleReassign('')}
-                  className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left active:bg-[#2a3142] transition-colors"
+                  class="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left active:bg-[#2a3142] transition-colors"
                 >
-                  <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg shrink-0 bg-[#1e2330] border border-[#2a3142]">📂</div>
-                  <span className="text-sm text-[#6b7280]">Unassign from project</span>
+                  <div class="w-9 h-9 rounded-xl flex items-center justify-center text-lg shrink-0 bg-[#1e2330] border border-[#2a3142]">📂</div>
+                  <span class="text-sm text-[#6b7280]">Unassign from project</span>
                 </button>
               )}
             </div>
@@ -2512,28 +2460,28 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
       {/* ─ Image lightbox ──────────────────────────────────────────────── */}
       {lightboxSrc && (
         <div
-          className="fixed inset-0 z-[300] bg-black/90 flex items-center justify-center"
+          class="fixed inset-0 z-[300] bg-black/90 flex items-center justify-center"
           onClick={() => setLightboxSrc(null)}
         >
           <button
-            className="absolute top-4 right-4 z-10 w-9 h-9 flex items-center justify-center rounded-full bg-white/10 active:bg-white/20 text-white text-xl"
+            class="absolute top-4 right-4 z-10 w-9 h-9 flex items-center justify-center rounded-full bg-white/10 active:bg-white/20 text-white text-xl"
             onClick={() => setLightboxSrc(null)}
           >×</button>
           <img
             src={lightboxSrc}
             alt="Full size"
-            className="max-h-[90vh] max-w-[90vw] object-contain rounded-lg shadow-2xl"
+            class="max-h-[90vh] max-w-[90vw] object-contain rounded-lg shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           />
           <a
             href={lightboxSrc}
             target="_blank"
             rel="noopener noreferrer"
-            className="absolute bottom-4 right-4 text-xs text-white/50"
+            class="absolute bottom-4 right-4 text-xs text-white/50"
             onClick={(e) => e.stopPropagation()}
           >↗ open in new tab</a>
         </div>
       )}
     </div>
-  )
+  )}
 }

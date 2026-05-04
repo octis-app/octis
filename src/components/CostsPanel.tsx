@@ -11,8 +11,8 @@ interface SessionCost {
   cost: number
   input_tokens: number
   output_tokens: number
-  cache_write_tokens: number
-  cache_read_tokens: number
+  cache_write_tokens?: number
+  cache_read_tokens?: number
   last_activity?: string
 }
 
@@ -22,8 +22,8 @@ interface DayCost {
   session_count: number
   input_tokens: number
   output_tokens: number
-  cache_write_tokens: number
-  cache_read_tokens: number
+  cache_write_tokens?: number
+  cache_read_tokens?: number
 }
 
 interface CostsData {
@@ -31,8 +31,8 @@ interface CostsData {
   yesterday: number
   todayInputTokens: number
   todayOutputTokens: number
-  todayCacheWriteTokens: number
-  todayCacheReadTokens: number
+  todayCacheWriteTokens?: number
+  todayCacheReadTokens?: number
   todaySessionCount: number
   lastSync: string | null
   sessions: SessionCost[]
@@ -102,6 +102,13 @@ function timeAgo(ts: string | null): string {
   return `${days}d ago`
 }
 
+// Format currency with appropriate precision and commas for large values
+function fmtCost(val: number, precision: 'short' | 'full' = 'full'): string {
+  if (val >= 1000) return '$' + val.toLocaleString('en-US', { maximumFractionDigits: precision === 'short' ? 0 : 2 })
+  if (val >= 10) return '$' + val.toFixed(2)
+  return '$' + val.toFixed(precision === 'short' ? 2 : 3)
+}
+
 export default function CostsPanel() {
   const { labels } = useLabelStore()
   const [data, setData] = useState<CostsData | null>(null)
@@ -138,6 +145,17 @@ export default function CostsPanel() {
     return () => clearInterval(interval)
   }, [])
 
+  // Refresh on visibility change (when tab becomes visible)
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void load(true)
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => document.removeEventListener('visibilitychange', handleVisibility)
+  }, [])
+
   if (loading && !data) return <div className="p-6 text-[#6b7280] text-sm">Loading costs…</div>
   if (error && !data)
     return (
@@ -161,7 +179,9 @@ export default function CostsPanel() {
   const maxSessionCost = Math.max(...(data.sessions?.map((s) => s.cost) || [0]), 0.001)
   const maxTodaySessionCost = Math.max(...(data.todaySessions?.map((s) => s.cost) || [0]), 0.001)
 
-  const todayOverhead = computeOverhead(data.todayCacheWriteTokens ?? 0, data.todayCacheReadTokens ?? 0)
+  const todayOverhead = data.todayCacheWriteTokens !== undefined && data.todayCacheReadTokens !== undefined
+    ? computeOverhead(data.todayCacheWriteTokens, data.todayCacheReadTokens)
+    : 0
   const todayCompute = Math.max(0, data.today - todayOverhead)
   const todayOverheadPct = data.today > 0 ? Math.round((todayOverhead / data.today) * 100) : 0
 
@@ -187,7 +207,7 @@ export default function CostsPanel() {
       <div className="flex items-center justify-between text-xs">
         <div className="text-[#6b7280]">
           Last updated: {lastFetch ? timeAgo(lastFetch.toISOString()) : 'Never'}
-          {loading && <span className="ml-2">⟳ Refreshing…</span>}
+          {loading && <span className="ml-2">Refresh…</span>}
         </div>
         {isStale && (
           <div className="text-amber-400 flex items-center gap-1">
@@ -209,7 +229,7 @@ export default function CostsPanel() {
         {/* Today + delta vs yesterday */}
         <div className="bg-[#181c24] border border-[#2a3142] rounded-xl p-4">
           <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-1">Today</div>
-          <div className="text-2xl font-bold text-white">${data.today.toFixed(2)}</div>
+          <div className="text-2xl font-bold text-white">{fmtCost(data.today, 'short')}</div>
           {todayDelta !== null && (
             <div className={`text-xs mt-1 font-medium flex items-center gap-1 ${todayDelta > 0 ? 'text-amber-400' : 'text-emerald-400'}`}>
               <span>{todayDelta > 0 ? '↑' : '↓'}</span>
@@ -232,7 +252,7 @@ export default function CostsPanel() {
           )}
         </div>
 
-        {/* Tokens today */}
+        {/* Tokens today */}  
         <div className="bg-[#181c24] border border-[#2a3142] rounded-xl p-4">
           <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-1">Tokens</div>
           <div className="text-2xl font-bold text-white">{formatTokens(totalTokens)}</div>
@@ -248,9 +268,9 @@ export default function CostsPanel() {
             <div className="flex items-center justify-between text-xs mb-2">
               <span className="text-[#6b7280] uppercase tracking-wider">Cost breakdown</span>
               <span className="text-[#6b7280]">
-                Compute <span className="text-white font-mono">${todayCompute.toFixed(3)}</span>
+                Compute <span className="text-white font-mono">{fmtCost(todayCompute, 'short')}</span>
                 <span className="mx-2 text-[#3a4152]">|</span>
-                Cache overhead <span className="text-amber-400 font-mono">${todayOverhead.toFixed(3)}</span>
+                Cache overhead <span className="text-amber-400 font-mono">{fmtCost(todayOverhead, 'short')}</span>
                 <span className="ml-1 text-[#6b7280]">({todayOverheadPct}%)</span>
               </span>
             </div>
@@ -265,10 +285,10 @@ export default function CostsPanel() {
         <div className="bg-[#181c24] border border-[#2a3142] rounded-xl p-4">
           <div className="text-xs text-[#6b7280] uppercase tracking-wider mb-1">7-Day Avg</div>
           <div className="text-2xl font-bold text-white">
-            {avgPerDay > 0 ? `$${avgPerDay.toFixed(2)}` : '—'}
+            {avgPerDay > 0 ? fmtCost(avgPerDay, 'short') : '—'}
           </div>
           <div className="text-xs text-[#6b7280] mt-1">
-            ${weekTotal.toFixed(2)} total
+            {fmtCost(weekTotal, 'short')} total
           </div>
         </div>
       </div>
@@ -291,9 +311,14 @@ export default function CostsPanel() {
             {data.todaySessions.map((s) => {
               const label = labels[s.session_key] || s.session_label || formatSessionKey(s.session_key)
               const tokensStr = `${formatTokens(s.input_tokens + s.output_tokens)} tok`
-              const sessionOverhead = computeOverhead(s.cache_write_tokens ?? 0, s.cache_read_tokens ?? 0)
+              
+              const sessionOverhead = s.cache_write_tokens !== undefined && s.cache_read_tokens !== undefined
+                ? computeOverhead(s.cache_write_tokens, s.cache_read_tokens)
+                : 0
               const sessionCompute = Math.max(0, s.cost - sessionOverhead)
-              const hasCache = (s.cache_write_tokens ?? 0) + (s.cache_read_tokens ?? 0) > 0
+              const hasCache = s.cache_write_tokens !== undefined && s.cache_read_tokens !== undefined && 
+                              (s.cache_write_tokens + s.cache_read_tokens) > 0
+                              
               return (
               <div key={s.session_key}>
                 <div className="flex items-center gap-2 mb-1">
@@ -329,9 +354,14 @@ export default function CostsPanel() {
           {data.sessions?.slice(0, 20).map((s) => {
             const label = labels[s.session_key] || s.session_label || formatSessionKey(s.session_key)
             const tokensStr = `${formatTokens(s.input_tokens + s.output_tokens)} tok`
-            const sessionOverhead = computeOverhead(s.cache_write_tokens ?? 0, s.cache_read_tokens ?? 0)
+            
+            const sessionOverhead = s.cache_write_tokens !== undefined && s.cache_read_tokens !== undefined
+              ? computeOverhead(s.cache_write_tokens, s.cache_read_tokens)
+              : 0
             const sessionCompute = Math.max(0, s.cost - sessionOverhead)
-            const hasCache = (s.cache_write_tokens ?? 0) + (s.cache_read_tokens ?? 0) > 0
+            const hasCache = s.cache_write_tokens !== undefined && s.cache_read_tokens !== undefined && 
+                            (s.cache_write_tokens + s.cache_read_tokens) > 0
+                            
             return (
             <div key={s.session_key}>
               <div className="flex items-center gap-2 mb-1">
