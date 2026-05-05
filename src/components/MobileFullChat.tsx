@@ -1890,7 +1890,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
       </div>
 
       {/* Quick action buttons */}
-      <div className="flex gap-1.5 px-4 py-1.5 bg-[#0f1117] border-b border-[#1e2330] shrink-0">
+      <div className="flex gap-1 px-3 py-1 bg-[#0f1117] border-b border-[#1e2330] shrink-0">
         {(() => {
           const qc = getQuickCommands()
           const quickActions = [
@@ -1917,17 +1917,19 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
               userScrolledUpRef.current = false
               setTimeout(() => scrollToBottom(false), 50)
             }}
-            className="flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap bg-[#1e2330] text-[#9ca3af] active:bg-[#6366f1] active:text-white transition-colors shrink-0 border border-[#2a3142]"
+            className="flex items-center justify-center w-7 h-7 rounded-full bg-[#1e2330] text-[13px] active:bg-[#6366f1] transition-colors shrink-0 border border-[#2a3142]"
+            title={label}
           >
-            <span>{icon}</span><span>{label}</span>
+            <span>{icon}</span>
           </button>
           ))
         })()}
         <button
           onClick={() => onArchive?.()}
-          className="flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-full whitespace-nowrap bg-[#1e2330] text-[#9ca3af] active:bg-[#6366f1] active:text-white transition-colors shrink-0 border border-[#2a3142]"
+          className="flex items-center justify-center w-7 h-7 rounded-full bg-[#1e2330] text-[13px] active:bg-[#6366f1] transition-colors shrink-0 border border-[#2a3142]"
+          title="Archive"
         >
-          <span>📦</span><span>Archive</span>
+          <span>📦</span>
         </button>
       </div>
 

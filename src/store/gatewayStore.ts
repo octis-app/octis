@@ -948,7 +948,18 @@ export const useProjectStore = create<ProjectState>()(
           },
         })),
 
-      getTag: (sessionKey) => get().tags[sessionKey] || {},
+      getTag: (sessionKey) => {
+        const tags = get().tags
+        // First try the exact key
+        if (tags[sessionKey]) return tags[sessionKey]
+        // If full key (agent:main:session-123), also check short key (session-123)
+        const shortMatch = sessionKey.match(/:?(session-\d+)$/)
+        if (shortMatch) {
+          const shortKey = shortMatch[1]
+          if (tags[shortKey]) return tags[shortKey]
+        }
+        return {}
+      },
 
       getProjects: () => {
         const all = get().tags
@@ -1122,21 +1133,60 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
       // the local optimistic key, but after WS sync the session.key is the full gateway key.
       // activePanes.includes(session.key) returns false → isPinned = false → highlight gone →
       // re-click opens a second pane with the real key → duplicate window.
+      //
+      // CRITICAL FIX (2026-05-01): This migration MUST also transfer:
+      //   1. pendingProjectInits - so project context injection works on first send
+      //   2. project tags - so the session stays tagged to its project
+      // Without this, sessions created in a project won't get context injected because
+      // consumePendingProjectInit(fullKey) returns null when the map has shortKey.
+      // See: handleNewSession in MobileApp.tsx, Sidebar.tsx, ProjectView.tsx
       let panesUpdated = false
+      const keyMigrations: Record<string, string> = {} // short key -> full key
       const updatedActivePanes = state.activePanes.map((pane: string | null) => {
         if (!pane || !/^session-\d+$/.test(pane)) return pane
         const realSession = deduped.find((s) => {
           const m = s.key.match(/^agent:[^:]+:(session-\d+)$/)
           return m && m[1] === pane
         })
-        if (realSession) { panesUpdated = true; return realSession.key }
+        if (realSession) {
+          panesUpdated = true
+          keyMigrations[pane] = realSession.key
+          return realSession.key
+        }
         return pane
       })
+      // Migrate pendingProjectInits from short keys to full gateway keys
+      let pendingProjectInitsUpdated = false
+      const updatedPendingProjectInits = { ...state.pendingProjectInits }
+      for (const [shortKey, fullKey] of Object.entries(keyMigrations)) {
+        if (updatedPendingProjectInits[shortKey]) {
+          updatedPendingProjectInits[fullKey] = updatedPendingProjectInits[shortKey]
+          delete updatedPendingProjectInits[shortKey]
+          pendingProjectInitsUpdated = true
+        }
+      }
+      // Also migrate project tags in useProjectStore
+      if (Object.keys(keyMigrations).length > 0) {
+        const projectStore = useProjectStore.getState()
+        for (const [shortKey, fullKey] of Object.entries(keyMigrations)) {
+          const tag = projectStore.tags[shortKey]
+          if (tag?.project) {
+            // setTag expects a string (project slug), not the entire tag object
+            projectStore.setTag(fullKey, tag.project)
+            useProjectStore.setState((s) => {
+              const next = { ...s.tags }
+              delete next[shortKey]
+              return { tags: next }
+            })
+          }
+        }
+      }
       return {
         sessions: [...pendingLocal, ...deduped],
         costHistory: newHistory,
         hiddenSessions: [...hiddenCollected, ...dbOnlyHidden],
         ...(panesUpdated ? { activePanes: updatedActivePanes } : {}),
+        ...(pendingProjectInitsUpdated ? { pendingProjectInits: updatedPendingProjectInits } : {}),
       }
     })
   },

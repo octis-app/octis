@@ -943,6 +943,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   const preSendCountRef = useRef<number>(0) // server message count at time of send
   const preSendCostRef = useRef<number>(0) // session cost at time of last send
   const pendingOptimisticIdRef = useRef<number | null>(null) // id of current optimistic message
+  const isSendingRef = useRef(false) // guard against double-fire on rapid Enter/click
   const loadedSessionRef = useRef<string | null>(null) // session key for which history is currently loaded
   const workingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null) // fallback: clear working after 5 min max
   const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -2070,6 +2071,8 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
   const handleSend = async () => {
     if ((!input.trim() && pendingFiles.length === 0) || !sessionKey) return
     if (pendingFiles.some(f => f.extracting)) return // wait for PDF extraction to finish
+    if (isSendingRef.current) return // guard against double-fire (rapid Enter/click race)
+    isSendingRef.current = true
     // Fire project-context injection on first send (lazy - skips sessions that get archived without messaging)
     const pendingInit = consumePendingProjectInit(sessionKey)
     if (pendingInit) {
@@ -2166,6 +2169,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     // and re-saves the just-sent text as a new draft (stale draft bug).
     if (draftTimerRef.current) { clearTimeout(draftTimerRef.current); draftTimerRef.current = null }
     setInput('')
+    isSendingRef.current = false // release guard now that input is cleared
     if (sessionKey) clearDraft(sessionKey)
     setPendingFiles([])
     userScrolledUpRef.current = false // snap back to bottom on send

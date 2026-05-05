@@ -30,6 +30,13 @@ function patch(relPath, marker, transform) {
   console.log(`  [ok]   ${relPath}`)
 }
 
+// ─── Patch 0: vite.config.js — base path for /octis/ deployment ───
+patch(
+  'vite.config.js',
+  "base: '/octis/',",
+  (c) => c.replace("base: '/'", "base: '/octis/'")
+)
+
 // ─── Patch 1: SettingsPanel — fix quick-commands textarea (useState + auto-resize) ───
 patch(
   'src/components/SettingsPanel.tsx',
@@ -816,42 +823,7 @@ patch(
   (c) => c
 )
 
-// ─── DB migration: reset stale quick_commands to current defaults ─────────────
-// Quick command values stored in the DB override code defaults. When QUICK_COMMANDS_CONFIG
-// is updated in SettingsPanel.tsx, stale DB values persist across git pulls and shadow
-// the new defaults. This migration resets known stale values to their current correct defaults.
-try {
-  const Database = require('better-sqlite3')
-  const os = require('os')
-  const dbPath = path.join(os.homedir(), '.octis', 'octis.db')
-  if (fs.existsSync(dbPath)) {
-    const db = new Database(dbPath)
-    const CORRECT_SAVE = '\u{1F4BE} checkpoint - save any key decisions, context, or tasks from this session to MEMORY.md and TODOS.md now. One-line ack only.'
-    const CORRECT_ARCHIVE = '\u{1F4BE} Final save - write any remaining decisions, tasks, or context to MEMORY.md and TODOS.md. Reply with NO_REPLY only.'
-    const row = db.prepare("SELECT value FROM user_settings WHERE key='quick_commands' LIMIT 1").get()
-    if (row) {
-      let data
-      try { data = JSON.parse(row.value) } catch { data = {} }
-      let changed = false
-      // Reset save if it looks like the old verbose default (doesn't start with checkpoint emoji)
-      if (data.save && !data.save.startsWith('\u{1F4BE} checkpoint')) {
-        data.save = CORRECT_SAVE
-        changed = true
-      }
-      // Reset archive_msg if it contains the old verbose text
-      if (data.archive_msg && data.archive_msg.includes('MEMORY.md = reusable future context only')) {
-        data.archive_msg = CORRECT_ARCHIVE
-        changed = true
-      }
-      if (changed) {
-        db.prepare("UPDATE user_settings SET value=?, updated_at=unixepoch() WHERE key='quick_commands'").run(JSON.stringify(data))
-        console.log('  [ok]   DB quick_commands — reset stale values to current defaults')
-      } else {
-        console.log('  [skip] DB quick_commands — already correct')
-      }
-    }
-    db.close()
-  }
-} catch (e) {
-  console.warn('  [WARN] DB quick_commands migration failed:', e.message)
-}
+// ─── DB migration: REMOVED (2026-05-04) ─────────────
+// HARD RULE: NEVER reset Kennan's custom quick commands.
+// The DB patch that auto-reset "save" command has been permanently removed.
+// Kennan's custom save text MUST be preserved across all merges/pulls.
