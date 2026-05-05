@@ -145,13 +145,9 @@ function modelShortName(modelId: string): string {
   return parts[parts.length - 1] || modelId
 }
 
-function ModelBadge({ sessionKey, onModelSwitch }: { sessionKey: string; onModelSwitch?: (modelName: string) => void }) {
+// Read-only model badge — shows current model, no switching
+function ModelBadge({ sessionKey }: { sessionKey: string }) {
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null)
-  const [providerHealth, setProviderHealth] = useState<Record<string, ProviderHealth>>({})
-  const [open, setOpen] = useState(false)
-  const [switching, setSwitching] = useState(false)
-  const dropdownRef = useRef<HTMLDivElement>(null)
-  const { sendChat } = useGatewayStore()
 
   const fetchModel = useCallback(async () => {
     try {
@@ -160,118 +156,26 @@ function ModelBadge({ sessionKey, onModelSwitch }: { sessionKey: string; onModel
     } catch {}
   }, [sessionKey])
 
-  const fetchHealth = useCallback(async () => {
-    try {
-      const res = await authFetch(`${API}/api/provider-health`)
-      if (res.ok) {
-        const data = await res.json()
-        setProviderHealth(data.providers || {})
-      }
-    } catch {}
-  }, [])
-
   useEffect(() => {
     fetchModel()
-    fetchHealth()
-    const t = setInterval(() => { fetchModel(); fetchHealth() }, 30000)
+    const t = setInterval(() => fetchModel(), 30000)
     return () => clearInterval(t)
-  }, [fetchModel, fetchHealth])
-
-  // Close dropdown on outside click
-  useEffect(() => {
-    if (!open) return
-    const handler = (e: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
-        setOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [open])
-
-  const switchModel = async (modelId: string) => {
-    const shortName = modelId.split('/').pop() || modelId
-    setOpen(false)
-    setSwitching(true)
-    try {
-      const { ws, connected, sendChat } = useGatewayStore.getState()
-      
-      // Patch the session model
-      if (connected && ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
-          type: 'req',
-          id: `model-switch-${Date.now()}`,
-          method: 'sessions.patch',
-          params: { key: sessionKey, model: modelId },
-        }))
-      }
-      
-      // Notify parent component about the switch
-      if (onModelSwitch) {
-        onModelSwitch(shortName)
-      }
-      
-      // Fetch the updated model info
-      await new Promise(r => setTimeout(r, 800))
-      await fetchModel()
-    } catch (err) {
-      console.error('Model switch error:', err)
-    } finally {
-      setSwitching(false)
-    }
-  }
+  }, [fetchModel])
 
   if (!modelInfo) return null
 
   const isFallback = modelInfo.isFallback
   const pillClass = isFallback
-    ? 'bg-amber-900/40 text-amber-300 border-amber-600/50 hover:border-amber-500'
-    : 'bg-[#1e2330] text-[#a5b4fc] border-[#2a3142] hover:border-[#6366f1]'
-
-  // All available models to pick from
-  const allModels = [modelInfo.defaultModel, ...modelInfo.fallbacks].filter(
-    (m, i, arr) => arr.indexOf(m) === i
-  )
+    ? 'bg-amber-900/40 text-amber-300 border-amber-600/50'
+    : 'bg-[#1e2330] text-[#a5b4fc] border-[#2a3142]'
 
   return (
-    <div className="relative shrink-0" ref={dropdownRef}>
-      <button
-        onClick={() => setOpen(o => !o)}
-        title={`Model: ${modelInfo.model}${isFallback ? ' (fallback)' : ''}`}
-        className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-mono transition-colors select-none ${
-          switching ? 'opacity-50 cursor-wait' : 'cursor-pointer'
-        } ${pillClass}`}
-      >
-        {isFallback && <span className="leading-none">⚡</span>}
-        <span className="leading-none">{switching ? '...' : modelInfo.displayName}</span>
-        <span className="text-[8px] opacity-60">▾</span>
-      </button>
-      {open && (
-        <div className="absolute right-0 top-7 z-50 bg-[#1a1f2e] border border-[#2a3142] rounded-xl shadow-2xl p-2 min-w-[190px] text-xs">
-          <div className="text-[#6b7280] text-[10px] font-medium px-2 pb-1.5">Switch model</div>
-          {allModels.map(m => {
-            const provName = m.split('/')[0]
-            const health = providerHealth[provName]
-            const hasError = health && health.errorCount > 0 && !health.healthy
-            const isCurrent = modelInfo.model === m
-            return (
-              <button
-                key={m}
-                onClick={() => switchModel(m)}
-                className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg transition-colors text-left ${
-                  isCurrent
-                    ? 'bg-[#6366f1]/20 text-[#a5b4fc]'
-                    : 'text-[#e8eaf0] hover:bg-[#2a3142]'
-                }`}
-              >
-                <span className="flex-1">{modelShortName(m)}</span>
-                {hasError && <span title="Provider has recent errors" className="text-amber-400 text-[10px]">⚠</span>}
-                {isCurrent && <span className="text-[#6366f1] text-[10px]">✓</span>}
-              </button>
-            )
-          })}
-        </div>
-      )}
+    <div
+      title={`Model: ${modelInfo.model}${isFallback ? ' (fallback active)' : ''}`}
+      className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-mono select-none cursor-default shrink-0 ${pillClass}`}
+    >
+      {isFallback && <span className="leading-none">⚡</span>}
+      <span className="leading-none">{modelInfo.displayName}</span>
     </div>
   )
 }
@@ -2595,19 +2499,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               </span>
             )}
             <SessionCostBadge sessionKey={sessionKey} />
-            <ModelBadge 
-              sessionKey={sessionKey} 
-              onModelSwitch={(modelName) => {
-                const notificationMsg = {
-                  id: `model-switch-${Date.now()}`,
-                  role: 'assistant' as const,
-                  content: `Model switched to ${modelName}`,
-                  ts: new Date().toISOString(),
-                  __localOnly: true
-                }
-                setMessages(prev => [...prev, notificationMsg])
-              }}
-            />
+            <ModelBadge sessionKey={sessionKey} />
             <ProjectDropdown sessionKey={sessionKey} />
             <button
               onClick={onClose}
