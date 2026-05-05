@@ -43,6 +43,7 @@ export default function MobileApp() {
   const { hidden, isHidden, hide: hideSession, hydrateFromServer: hydrateHidden } = useHiddenStore()
   const { hydrateFromServer: hydrateProjects, projectMeta, getTag } = useProjectStore()
   const { labels, setLabel, getLabel } = useLabelStore()
+  const { mainAgentId } = useAuthStore()
 
   const hydrateAll = useCallback(async () => {
     const token = await getToken() || undefined
@@ -181,6 +182,8 @@ export default function MobileApp() {
   const [showSettings, setShowSettings] = useState(false)
   const [filter, setFilter] = useState<FilterType>('all')
   const [showNewSessionSheet, setShowNewSessionSheet] = useState(false)
+  const [newSessionAgentId, setNewSessionAgentId] = useState<string>('')
+  const [availableAgents, setAvailableAgents] = useState<Array<{id: string; name: string; emoji: string; isPrimary?: boolean}>>([])
   const [availableProjects, setAvailableProjects] = useState<Array<{id: string; name: string; slug: string; emoji?: string; color?: string}>>([])
   const [archiveToast, setArchiveToast] = useState<string | null>(null)
   const [showArchivedSection, setShowArchivedSection] = useState(false)
@@ -393,7 +396,32 @@ export default function MobileApp() {
     setTimeout(() => setArchiveToast(null), 3000)
   }, [labels])
 
-  const handleNewSession = (projectSlug?: string) => {
+  const handleNewSession = async (projectSlug?: string, agentId?: string) => {
+    const effectiveAgent = agentId || newSessionAgentId || mainAgentId
+    if (effectiveAgent && effectiveAgent !== mainAgentId) {
+      // Non-primary agent: create real session via API
+      const res = await authFetch(`${API}/api/sessions/create`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentId: effectiveAgent }),
+      })
+      const data = await res.json()
+      const realKey = data.sessionKey || data.key
+      if (realKey) {
+        useAuthStore.getState().claimSession(realKey)
+        if (projectSlug) {
+          useProjectStore.getState().setTag(realKey, projectSlug)
+          useSessionStore.getState().setPendingProjectInit(realKey, projectSlug)
+        }
+        const newSession: Session = { key: realKey, label: 'New session', sessionKey: realKey } as Session
+        setSessions([newSession, ...useSessionStore.getState().sessions])
+        pendingNewSessionRef.current = realKey
+        setShowNewSessionSheet(false)
+        openChat(newSession)
+        setTab('sessions')
+      }
+      return
+    }
     const key = `session-${Date.now()}`
     useAuthStore.getState().claimSession(key)  // claim before setSessions so ownership check passes
     const newSession: Session = { key, label: 'New session', sessionKey: key } as Session
@@ -633,7 +661,21 @@ export default function MobileApp() {
                 </button>
               ))}
               <button
-                onClick={() => setShowNewSessionSheet(true)}
+                onClick={async () => {
+                  // Fetch agents for the picker
+                  try {
+                    const r = await authFetch(`${API}/api/agents`)
+                    const d = await r.json()
+                    const agents: Array<{id: string; name: string; emoji: string; isPrimary?: boolean}> = d.agents || []
+                    setAvailableAgents(agents)
+                    const primary = agents.find(a => a.isPrimary) || agents[0]
+                    setNewSessionAgentId(primary?.id || 'main')
+                  } catch {
+                    setAvailableAgents([])
+                    setNewSessionAgentId('main')
+                  }
+                  setShowNewSessionSheet(true)
+                }}
                 className="ml-auto px-4 py-1.5 rounded-full text-xs font-semibold bg-[#6366f1] text-white active:bg-[#818cf8] shrink-0 flex items-center gap-1"
               >
                 <span className="text-sm leading-none">＋</span> New Session
@@ -971,9 +1013,33 @@ export default function MobileApp() {
               >✕</button>
             </div>
             <div className="pb-8">
+              {/* Agent selector row */}
+              {availableAgents.length > 0 && (
+                <div className="px-5 pb-3">
+                  <div className="text-[10px] font-medium text-[#6b7280] mb-2 uppercase tracking-wide">Agent</div>
+                  <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
+                    {availableAgents
+                      .filter(a => a.id !== 'main' || availableAgents.length === 1) // hide 'main' id-only entry when there are real agents
+                      .map(agent => (
+                        <button
+                          key={agent.id}
+                          onClick={() => setNewSessionAgentId(agent.id)}
+                          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs border shrink-0 transition-colors ${
+                            newSessionAgentId === agent.id || (!newSessionAgentId && agent.isPrimary)
+                              ? 'bg-[#6366f1]/20 text-[#a5b4fc] border-[#6366f1]/50'
+                              : 'bg-[#1e2330] text-[#9ca3af] border-[#2a3142]'
+                          }`}
+                        >
+                          <span className="text-sm leading-none">{agent.emoji || '🤖'}</span>
+                          <span className="leading-none">{agent.name}</span>
+                        </button>
+                      ))}
+                  </div>
+                </div>
+              )}
               {/* No project option */}
               <button
-                onClick={() => handleNewSession()}
+                onClick={() => handleNewSession(undefined, newSessionAgentId)}
                 className="w-full flex items-center gap-3 px-5 py-4 border-b border-[#2a3142] active:bg-[#2a3142] text-left"
               >
                 <span className="text-lg">💬</span>
@@ -983,7 +1049,7 @@ export default function MobileApp() {
               {availableProjects.map(p => (
                 <button
                   key={p.slug}
-                  onClick={() => handleNewSession(p.slug)}
+                  onClick={() => handleNewSession(p.slug, newSessionAgentId)}
                   className="w-full flex items-center gap-3 px-5 py-4 border-b border-[#2a3142] active:bg-[#2a3142] text-left"
                 >
                   <span className="text-lg">{p.emoji || '📁'}</span>

@@ -145,9 +145,11 @@ function modelShortName(modelId: string): string {
   return parts[parts.length - 1] || modelId
 }
 
-// Read-only model badge — shows current model, no switching
 function ModelBadge({ sessionKey }: { sessionKey: string }) {
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null)
+  const [providerHealth, setProviderHealth] = useState<Record<string, ProviderHealth>>({})
+  const [open, setOpen] = useState(false)
+  const [switching, setSwitching] = useState(false)
 
   const fetchModel = useCallback(async () => {
     try {
@@ -156,11 +158,44 @@ function ModelBadge({ sessionKey }: { sessionKey: string }) {
     } catch {}
   }, [sessionKey])
 
+  const fetchHealth = useCallback(async () => {
+    try {
+      const res = await authFetch(`${API}/api/provider-health`)
+      if (res.ok) {
+        const data = await res.json()
+        setProviderHealth(data.providers || {})
+      }
+    } catch {}
+  }, [])
+
   useEffect(() => {
     fetchModel()
-    const t = setInterval(() => fetchModel(), 30000)
+    fetchHealth()
+    const t = setInterval(() => { fetchModel(); fetchHealth() }, 30000)
     return () => clearInterval(t)
-  }, [fetchModel])
+  }, [fetchModel, fetchHealth])
+
+  const switchModel = async (modelId: string) => {
+    setOpen(false)
+    setSwitching(true)
+    try {
+      const { ws, connected } = useGatewayStore.getState()
+      if (connected && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'req',
+          id: `model-switch-${Date.now()}`,
+          method: 'sessions.patch',
+          params: { key: sessionKey, model: modelId },
+        }))
+      }
+      await new Promise(r => setTimeout(r, 800))
+      await fetchModel()
+    } catch (err) {
+      console.error('Model switch error:', err)
+    } finally {
+      setSwitching(false)
+    }
+  }
 
   if (!modelInfo) return null
 
@@ -169,13 +204,49 @@ function ModelBadge({ sessionKey }: { sessionKey: string }) {
     ? 'bg-amber-900/40 text-amber-300 border-amber-600/50'
     : 'bg-[#1e2330] text-[#a5b4fc] border-[#2a3142]'
 
+  const allModels = [modelInfo.defaultModel, ...modelInfo.fallbacks].filter(
+    (m, i, arr) => arr.indexOf(m) === i
+  )
+
   return (
-    <div
-      title={`Model: ${modelInfo.model}${isFallback ? ' (fallback active)' : ''}`}
-      className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-mono select-none cursor-default shrink-0 ${pillClass}`}
-    >
-      {isFallback && <span className="leading-none">⚡</span>}
-      <span className="leading-none">{modelInfo.displayName}</span>
+    <div className="relative shrink-0">
+      <button
+        onClick={() => setOpen(o => !o)}
+        title={`Model: ${modelInfo.model}${isFallback ? ' (fallback)' : ''}`}
+        className={`flex items-center gap-1 px-1 py-0 rounded-full border text-[10px] font-mono select-none cursor-pointer ${switching ? 'opacity-50' : ''} ${pillClass}`}
+      >
+        {isFallback && <span className="leading-none">⚡</span>}
+        <span className="leading-none">{switching ? '...' : modelInfo.displayName}</span>
+        <span className="text-[8px] opacity-60">▾</span>
+      </button>
+      {open && (
+        <div className="absolute right-0 top-8 z-50 bg-[#1a1f2e] border border-[#2a3142] rounded-xl shadow-2xl p-2 min-w-[190px] text-xs">
+          <div className="text-[#6b7280] text-[10px] font-medium px-2 pb-1.5">Switch model</div>
+          {allModels.map(m => {
+            const provName = m.split('/')[0]
+            const health = providerHealth[provName]
+            const hasError = health && health.errorCount > 0 && !health.healthy
+            const isCurrent = modelInfo.model === m
+            return (
+              <button
+                key={m}
+                onClick={() => switchModel(m)}
+                className={`w-full flex items-center gap-2 px-2 py-2 rounded-lg text-left ${
+                  isCurrent ? 'bg-[#6366f1]/20 text-[#a5b4fc]' : 'text-[#e8eaf0]'
+                }`}
+              >
+                <span className="flex-1">{modelShortName(m)}</span>
+                {hasError && <span className="text-amber-400">⚠</span>}
+                {isCurrent && <span className="text-[#6366f1]">✓</span>}
+              </button>
+            )
+          })}
+          <button
+            onClick={() => setOpen(false)}
+            className="w-full text-center text-[#6b7280] text-[10px] pt-1.5 pb-0.5"
+          >Close</button>
+        </div>
+      )}
     </div>
   )
 }
@@ -2546,7 +2617,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                 <>
                   {(() => { const slug = getTag(sessionKey).project; const emoji = slug ? getProjectEmoji(slug) : ''; return emoji ? <span className="text-[13px] shrink-0 leading-none" title={slug}>{emoji}</span> : null })()}
                   <span
-                    className="text-sm font-medium text-white truncate leading-none"
+                    className="text-xs font-medium text-white truncate leading-none"
                     title={sessionKey}
                   >
                     {displayName}
