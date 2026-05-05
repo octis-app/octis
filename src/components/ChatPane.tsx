@@ -2659,7 +2659,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             </button>
           </div>
           {/* Action row */}
-          <div className="flex items-center gap-1 px-3 pb-1.5">
+          <div className="flex items-center gap-0.5 px-3 pb-1">
             <button
               onClick={toggleNoise}
               title={
@@ -2667,7 +2667,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                   ? 'Show tool calls & system msgs'
                   : 'Hide tool calls & system msgs'
               }
-              className={`text-[10px] font-medium h-6 px-2 rounded-full border transition-colors shrink-0 flex items-center ${
+              className={`text-[9px] font-medium h-5 px-1.5 rounded-full border transition-colors shrink-0 flex items-center ${
                 noiseHidden
                   ? 'bg-[#1e2330] border-[#2a3142] text-[#4b5563]'
                   : 'bg-[#6366f1]/20 border-[#6366f1] text-[#a5b4fc]'
@@ -2678,43 +2678,43 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             <button
               onClick={handleBriefMe}
               title="Dev Log — update OCTIS_CHANGES.md"
-              className="h-6 w-6 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-sm text-[#6b7280] hover:text-indigo-400"
+              className="h-5 w-5 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-xs text-[#6b7280] hover:text-indigo-400"
             >
               📝
             </button>
             <button
               onClick={handleSteppingAway}
               title="Stepping away - ask agent for plan + blockers"
-              className="h-6 w-6 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-sm text-[#6b7280] hover:text-blue-400"
+              className="h-5 w-5 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-xs text-[#6b7280] hover:text-blue-400"
             >
               🚪
             </button>
             <button
               onClick={handleSave}
               title="Save checkpoint to memory"
-              className="h-6 w-6 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-sm text-[#6b7280] hover:text-green-400"
+              className="h-5 w-5 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-xs text-[#6b7280] hover:text-green-400"
             >
               💾
             </button>
             <button
               onClick={() => setCardOpen((s) => !s)}
               title="Session brief"
-              className={`h-6 w-6 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-sm ${sessionCard ? 'text-[#a5b4fc] hover:text-white' : 'text-[#3a4152]'}`}
+              className={`h-5 w-5 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-xs ${sessionCard ? 'text-[#a5b4fc] hover:text-white' : 'text-[#3a4152]'}`}
             >
               📋
             </button>
-            <div className="w-px h-4 bg-[#2a3142] mx-0.5 shrink-0" />
+            <div className="w-px h-3 bg-[#2a3142] mx-0.5 shrink-0" />
             <button
               onClick={handleArchive}
               title="Save & archive session"
-              className="h-6 w-6 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-sm text-[#6b7280] hover:text-yellow-400"
+              className="h-5 w-5 flex items-center justify-center rounded hover:bg-[#2a3142] transition-colors text-xs text-[#6b7280] hover:text-yellow-400"
             >
               📦
             </button>
             <button
               onClick={() => setShowDeleteConfirm(true)}
               title="Delete session permanently"
-              className="h-6 px-1.5 flex items-center justify-center rounded bg-red-900/10 border border-red-900/20 hover:bg-red-900/30 hover:border-red-700/40 transition-colors text-[10px] text-red-400/50 hover:text-red-400 gap-0.5 shrink-0"
+              className="h-5 px-1.5 flex items-center justify-center rounded bg-red-900/10 border border-red-900/20 hover:bg-red-900/30 hover:border-red-700/40 transition-colors text-[9px] text-red-400/50 hover:text-red-400 gap-0.5 shrink-0"
             >
               <span>🗑️</span><span className="font-medium">Del</span>
             </button>
