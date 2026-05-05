@@ -13,6 +13,8 @@ interface AuthState {
   mainAgentId: string | null
   /** null = not yet loaded; 'all' = legacy owner sees everything; Set = owned session keys */
   ownedSessions: Set<string> | 'all' | null
+  /** When ownedSessions === 'all', track individually-claimed sessions for sidebar persistence */
+  extraClaimedSessions: Set<string>
   setAuth: (role: string | null, userId: string | null) => void
   setMainAgentId: (id: string) => void
   fetchOwnedSessions: () => Promise<void>
@@ -25,6 +27,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   userId: null,
   mainAgentId: null,
   ownedSessions: null,
+  extraClaimedSessions: new Set<string>(),
 
   setAuth: (role, userId) => set({ role, userId }),
 
@@ -48,11 +51,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   claimSession: (sessionKey: string) => {
-    const { ownedSessions } = get()
-    // Optimistically add to local set
-    const current = ownedSessions instanceof Set ? new Set(ownedSessions) : new Set<string>()
-    current.add(sessionKey)
-    set({ ownedSessions: current })
+    const { ownedSessions, extraClaimedSessions } = get()
+    if (ownedSessions === 'all') {
+      // Don't overwrite 'all' — but track the key for sidebar persistence
+      const next = new Set(extraClaimedSessions)
+      next.add(sessionKey)
+      set({ extraClaimedSessions: next })
+    } else {
+      // Optimistically add to local set
+      const current = ownedSessions instanceof Set ? new Set(ownedSessions) : new Set<string>()
+      current.add(sessionKey)
+      set({ ownedSessions: current })
+    }
     // Persist to server (fire and forget)
     authFetch(`${API}/api/session-ownership/claim`, {
       method: 'POST',

@@ -1067,13 +1067,16 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
       // Isolation: show session if it belongs to this user's primary agent namespace OR is explicitly owned.
       // This replaces the old single-agentId guard — supports multi-agent sessions while preventing
       // cross-user leakage (each user's sessions live under their agent:<mainAgentId>:* namespace).
-      const { mainAgentId, ownedSessions } = useAuthStore.getState()
+      const { mainAgentId, ownedSessions, extraClaimedSessions } = useAuthStore.getState()
       if (mainAgentId || (ownedSessions instanceof Set)) {
         const agentPrefixMatch = (s.key || '').match(/^agent:([^:]+):/)
         const sessionAgentId = agentPrefixMatch?.[1] || (s as any).agentId || ''
         const isPrimaryAgent = !!(mainAgentId && sessionAgentId === mainAgentId)
         const shortKey = (s.key || '').match(/^agent:[^:]+:(session-\d+)$/)?.[1]
-        const isOwned = ownedSessions instanceof Set && (ownedSessions.has(s.key) || !!(shortKey && ownedSessions.has(shortKey)))
+        const isOwned =
+          ownedSessions === 'all' ||
+          extraClaimedSessions?.has(s.key) ||
+          (ownedSessions instanceof Set && (ownedSessions.has(s.key) || !!(shortKey && ownedSessions.has(shortKey))))
         if (!isPrimaryAgent && !isOwned) return false
       }
       seen.add(s.key)
@@ -1106,11 +1109,25 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
       // TTL: drop pending sessions older than 2 minutes — they never get a matching gateway key
       // so they accumulate as ghost sessions (same label as real sessions, vanish on reload).
       const pendingLocal = state.sessions.filter((s) => {
-        if (!/^session-\d+$/.test(s.key) || seen.has(s.key)) return false
+        if (seen.has(s.key)) return false
         // Don't revive sessions that have been permanently deleted or archived
         if (hiddenStore.isHidden(s.key)) return false
-        const ts = parseInt(s.key.split('-')[1], 10)
-        return !isNaN(ts) && (now - ts) < 2 * 60 * 1000 // keep for max 2 min
+
+        // Keep default-agent optimistic sessions (session-<ts>) for up to 2 min
+        if (/^session-\d+$/.test(s.key)) {
+          const ts = parseInt(s.key.split('-')[1], 10)
+          return !isNaN(ts) && (now - ts) < 2 * 60 * 1000
+        }
+
+        // Keep non-default agent sessions explicitly created by the user for up to 5 min
+        const { extraClaimedSessions } = useAuthStore.getState()
+        if (extraClaimedSessions?.has(s.key)) {
+          const tsMatch = s.key.match(/-(\d+)$/)
+          const ts = tsMatch ? parseInt(tsMatch[1], 10) : 0
+          return !isNaN(ts) && ts > 0 && (now - ts) < 5 * 60 * 1000
+        }
+
+        return false
       })
       const newHistory = { ...state.costHistory }
       for (const s of deduped) {

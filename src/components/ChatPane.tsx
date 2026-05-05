@@ -1163,81 +1163,100 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             // a pending message. That's the root cause of messages disappearing on send.
             const prevServer = prev.filter(m => typeof m.id !== 'number' && !(m as any).__localOnly)
             let base: ChatMessage[]
-            if (msgs.length >= prevServer.length) {
-              // Poll covers everything we have — use directly
-              // Preserve local image content if server stripped the base64
-              base = msgs.map(serverMsg => {
-                if (serverMsg.role !== 'user' || !Array.isArray(serverMsg.content)) return serverMsg
-                const blocks = serverMsg.content as ContentBlock[]
-                const hasEmptyImage = blocks.some(b => b.type === 'image' && !imageBlockHasData(b))
-                if (!hasEmptyImage) return serverMsg
-                const localMsg = prevServer.find(m =>
-                  (m.id !== undefined && m.id === serverMsg.id) ||
-                  (getMsgTs(m) > 0 && getMsgTs(m) === getMsgTs(serverMsg))
-                )
-                if (!localMsg || !Array.isArray(localMsg.content)) return serverMsg
-                const localBlocks = localMsg.content as ContentBlock[]
-                const localHasImageData = localBlocks.some(b => imageBlockHasData(b))
-                return localHasImageData ? { ...serverMsg, content: localMsg.content } : serverMsg
-              })
-            } else {
-              // Poll is truncated: keep prev, append only genuinely new messages
+            // Apply downgrade guard regardless of length - never show fewer messages than currently loaded
+            // This addresses the auto-compaction issue where sessions get shorter due to message cleanup
+            if (loadedKey === sessionKey && msgs.length < prevServer.length) {
+              // Keep existing messages; append only genuinely NEW messages
               const prevTs = new Set(prevServer.map(m => getMsgTs(m)).filter(ts => ts > 0))
               const prevIds = new Set(
                 prevServer.filter(m => m.id !== undefined && m.id !== null).map(m => m.id)
               )
-              // For ts=0 messages: use content fingerprint to avoid appending duplicates each poll
-              const prevFp = new Set(prevServer.filter(m => getMsgTs(m) === 0).map(m =>
-                `${m.role}:${extractText(m.content).substring(0, 100)}`
-              ))
+              // Filter for genuinely new messages by ID/Timestamp
               const newOnes = msgs.filter(m => {
-                // Already present by id — this is a ts-update for a WS-echo that had ts=0, not a new msg
                 if (m.id !== undefined && m.id !== null && prevIds.has(m.id)) return false
                 const ts = getMsgTs(m)
-                if (ts > 0) return !prevTs.has(ts)
-                return !prevFp.has(`${m.role}:${extractText(m.content).substring(0, 100)}`)
+                return ts > 0 ? !prevTs.has(ts) : false
               })
-              // Patch real timestamps onto ts=0 entries that the poll now has ts for.
-              // WS echoes often lack timestamps; without patching, the message stays ts=0
-              // and every subsequent poll re-adds it as "new", eventually landing after
-              // assistant replies that already have timestamps.
-              const patched = prevServer.map(m => {
-                if (m.id !== undefined && m.id !== null) {
-                  const pm = msgs.find(p => p.id === m.id)
-                  if (pm) {
-                    // Merge fresh server data: fills in ts and MediaPaths that WS echo may have lacked
-                    const hasMissingTs = getMsgTs(m) === 0 && getMsgTs(pm) > 0
-                    const hasMissingMedia = !m.MediaPath && !m.MediaPaths && (pm.MediaPath || pm.MediaPaths)
-                    if (hasMissingTs || hasMissingMedia) {
-                      // Don't overwrite content when local has image data and server stripped it
-                      const localHasImgData = Array.isArray(m.content) &&
-                        (m.content as ContentBlock[]).some(b => imageBlockHasData(b))
-                      const serverHasEmptyImg = Array.isArray(pm.content) &&
-                        (pm.content as ContentBlock[]).some(b => b.type === 'image' && !imageBlockHasData(b))
-                      return localHasImgData && serverHasEmptyImg
-                        ? { ...m, ...pm, content: m.content }
-                        : { ...m, ...pm }
-                    }
-                  }
-                }
-                return m
-              })
-              // Fast-exit: last message unchanged and nothing new — skip re-render
-              if (newOnes.length === 0) {
-                const lastPollTs = getMsgTs(msgs[msgs.length - 1])
-                const lastPrevTs = getMsgTs(patched[patched.length - 1])
-                if (lastPollTs > 0 && lastPollTs === lastPrevTs) return prev
-              }
-              if (newOnes.length > 0) {
-                // Sort by timestamp so out-of-order arrivals land in the right spot.
-                // Both ta and tb must be > 0 to sort; ts=0 preserves relative order.
-                base = [...patched, ...newOnes].sort((a, b) => {
-                  const ta = getMsgTs(a), tb = getMsgTs(b)
-                  if (!ta || !tb) return 0
-                  return ta - tb
+              // Return previous messages with only new additions, avoiding compaction losses
+              return [...prevServer, ...newOnes, ...localOnly]
+            } else {
+              // Original logic for handling equal or greater number of messages
+              if (msgs.length >= prevServer.length) {
+                // Poll covers everything we have — use directly
+                // Preserve local image content if server stripped the base64
+                base = msgs.map(serverMsg => {
+                  if (serverMsg.role !== 'user' || !Array.isArray(serverMsg.content)) return serverMsg
+                  const blocks = serverMsg.content as ContentBlock[]
+                  const hasEmptyImage = blocks.some(b => b.type === 'image' && !imageBlockHasData(b))
+                  if (!hasEmptyImage) return serverMsg
+                  const localMsg = prevServer.find(m =>
+                    (m.id !== undefined && m.id === serverMsg.id) ||
+                    (getMsgTs(m) > 0 && getMsgTs(m) === getMsgTs(serverMsg))
+                  )
+                  if (!localMsg || !Array.isArray(localMsg.content)) return serverMsg
+                  const localBlocks = localMsg.content as ContentBlock[]
+                  const localHasImageData = localBlocks.some(b => imageBlockHasData(b))
+                  return localHasImageData ? { ...serverMsg, content: localMsg.content } : serverMsg
                 })
               } else {
-                base = patched
+                // Poll is truncated: keep prev, append only genuinely new messages
+                const prevTs = new Set(prevServer.map(m => getMsgTs(m)).filter(ts => ts > 0))
+                const prevIds = new Set(
+                  prevServer.filter(m => m.id !== undefined && m.id !== null).map(m => m.id)
+                )
+                // For ts=0 messages: use content fingerprint to avoid appending duplicates each poll
+                const prevFp = new Set(prevServer.filter(m => getMsgTs(m) === 0).map(m =>
+                  `${m.role}:${extractText(m.content).substring(0, 100)}`
+                ))
+                const newOnes = msgs.filter(m => {
+                  // Already present by id — this is a ts-update for a WS-echo that had ts=0, not a new msg
+                  if (m.id !== undefined && m.id !== null && prevIds.has(m.id)) return false
+                  const ts = getMsgTs(m)
+                  if (ts > 0) return !prevTs.has(ts)
+                  return !prevFp.has(`${m.role}:${extractText(m.content).substring(0, 100)}`)
+                })
+                // Patch real timestamps onto ts=0 entries that the poll now has ts for.
+                // WS echoes often lack timestamps; without patching, the message stays ts=0
+                // and every subsequent poll re-adds it as "new", eventually landing after
+                // assistant replies that already have timestamps.
+                const patched = prevServer.map(m => {
+                  if (m.id !== undefined && m.id !== null) {
+                    const pm = msgs.find(p => p.id === m.id)
+                    if (pm) {
+                      // Merge fresh server data: fills in ts and MediaPaths that WS echo may have lacked
+                      const hasMissingTs = getMsgTs(m) === 0 && getMsgTs(pm) > 0
+                      const hasMissingMedia = !m.MediaPath && !m.MediaPaths && (pm.MediaPath || pm.MediaPaths)
+                      if (hasMissingTs || hasMissingMedia) {
+                        // Don't overwrite content when local has image data and server stripped it
+                        const localHasImgData = Array.isArray(m.content) &&
+                          (m.content as ContentBlock[]).some(b => imageBlockHasData(b))
+                        const serverHasEmptyImg = Array.isArray(pm.content) &&
+                          (pm.content as ContentBlock[]).some(b => b.type === 'image' && !imageBlockHasData(b))
+                        return localHasImgData && serverHasEmptyImg
+                          ? { ...m, ...pm, content: m.content }
+                          : { ...m, ...pm }
+                      }
+                    }
+                  }
+                  return m
+                })
+                // Fast-exit: last message unchanged and nothing new — skip re-render
+                if (newOnes.length === 0) {
+                  const lastPollTs = getMsgTs(msgs[msgs.length - 1])
+                  const lastPrevTs = getMsgTs(patched[patched.length - 1])
+                  if (lastPollTs > 0 && lastPollTs === lastPrevTs) return prev
+                }
+                if (newOnes.length > 0) {
+                  // Sort by timestamp so out-of-order arrivals land in the right spot.
+                  // Both ta and tb must be > 0 to sort; ts=0 preserves relative order.
+                  base = [...patched, ...newOnes].sort((a, b) => {
+                    const ta = getMsgTs(a), tb = getMsgTs(b)
+                    if (!ta || !tb) return 0
+                    return ta - tb
+                  })
+                } else {
+                  base = patched
+                }
               }
             }
 
@@ -1376,14 +1395,58 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
               // Keep existing messages; append only genuinely new arrivals.
               const prevIds = new Set(prevServer.filter(m => m.id != null).map(m => m.id))
               const prevTs  = new Set(prevServer.map(m => getMsgTs(m)).filter(t => t > 0))
+              const prevFp  = new Set(prevServer.filter(m => getMsgTs(m) === 0).map(m => `${m.role}:${extractText(m.content).substring(0, 100)}`))
               const newOnes = msgs.filter(m => {
                 if (m.id != null && prevIds.has(m.id)) return false
                 const ts = getMsgTs(m)
-                return ts > 0 ? !prevTs.has(ts) : false
+                if (ts > 0) return !prevTs.has(ts)
+                return !prevFp.has(`${m.role}:${extractText(m.content).substring(0, 100)}`)
               })
-              return newOnes.length > 0
-                ? [...prevServer, ...newOnes, ...localOnly]
-                : prev
+              const patched = prevServer.map(m => {
+                if (m.id != null) {
+                  const pm = msgs.find(p => p.id === m.id)
+                  if (pm) {
+                    const hasMissingTs = getMsgTs(m) === 0 && getMsgTs(pm) > 0
+                    const hasMissingMedia = !m.MediaPath && !m.MediaPaths && (pm.MediaPath || pm.MediaPaths)
+                    if (hasMissingTs || hasMissingMedia) {
+                      const localHasImgData = Array.isArray(m.content) && (m.content as ContentBlock[]).some(b => imageBlockHasData(b))
+                      const serverHasEmptyImg = Array.isArray(pm.content) && (pm.content as ContentBlock[]).some(b => b.type === 'image' && !imageBlockHasData(b))
+                      return localHasImgData && serverHasEmptyImg ? { ...m, ...pm, content: m.content } : { ...m, ...pm }
+                    }
+                  }
+                }
+                return m
+              })
+
+              if (newOnes.length === 0) {
+                const lastPollTs = getMsgTs(msgs[msgs.length - 1])
+                const lastPrevTs = getMsgTs(patched[patched.length - 1])
+                if (lastPollTs > 0 && lastPollTs === lastPrevTs) return prev
+              }
+
+              let merged = patched
+              if (newOnes.length > 0) {
+                merged = [...patched, ...newOnes].sort((a, b) => {
+                  const ta = getMsgTs(a), tb = getMsgTs(b)
+                  if (!ta || !tb) return 0
+                  return ta - tb
+                })
+              }
+              const pendingOid = pendingOptimisticIdRef.current
+              if (pendingOid !== null) {
+                const optimisticMsg = prev.find(m => m.id === pendingOid)
+                if (optimisticMsg) {
+                  const optimisticText = extractText(optimisticMsg.content).substring(0, 80).trim()
+                  const serverHasIt = !!optimisticText && merged.some(
+                    m => m.role === 'user' && typeof m.id !== 'number' &&
+                         extractText(m.content).substring(0, 80).trim() === optimisticText
+                  )
+                  if (!serverHasIt) return [...merged, optimisticMsg, ...localOnly]
+                  confirmedOptimisticRef.current = pendingOid
+                  pendingOptimisticIdRef.current = null
+                }
+              }
+              return [...merged, ...localOnly]
             }
 
             // Server has same or more messages — normal path with optimistic handling.
