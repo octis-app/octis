@@ -1661,7 +1661,6 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
     void authFetch(`${API}/api/session-autoname`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: slim, model: localStorage.getItem('octis-rename-model') || undefined }),
       body: JSON.stringify({ messages: slim, sessionKey, model: localStorage.getItem('octis-rename-model') || undefined }),
     }).then((r) => r.json()).then((data: { label?: string }) => {
       const label = data.label
@@ -2252,7 +2251,6 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
       const res = await authFetch(`${API}/api/session-autoname`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: slim, model: localStorage.getItem('octis-rename-model') || undefined }),
         body: JSON.stringify({ messages: slim, sessionKey, model: localStorage.getItem('octis-rename-model') || undefined }),
       })
       const data = await res.json() as { label?: string; error?: string }

@@ -594,7 +594,10 @@ app.post('/api/session-autoname', async (req, res) => {
       const renameAgentId = agentsCfg.renameAgentId || 'bulk'
       const clawConfig = JSON.parse(readFileSync(path.join(HOME, '.openclaw', 'openclaw.json'), 'utf8'))
       const agentEntry = (clawConfig.agents?.list || []).find(a => a.id === renameAgentId)
-      if (agentEntry?.model) renameModel = agentEntry.model
+      if (agentEntry?.model) {
+        const m = agentEntry.model
+        renameModel = typeof m === 'string' ? m : (m.primary || renameModel)
+      }
     } catch {}
     // OpenRouter format: strip 'openrouter/' prefix if present
     const orModel = renameModel.startsWith('openrouter/') ? renameModel.slice('openrouter/'.length) : renameModel
