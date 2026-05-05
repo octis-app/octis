@@ -37,15 +37,15 @@ export function AgentPicker({ mainAgentId, onSelect, onClose }: AgentPickerProps
       onClick={onClose}
     >
       <div
-        className="bg-[#1e2333] border border-[#2a3142] rounded-xl shadow-2xl w-72 overflow-hidden"
+        className="bg-[#1e2333] border border-[#2a3142] rounded-xl shadow-2xl w-72 overflow-hidden flex flex-col max-h-[80vh]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="px-4 py-3 border-b border-[#2a3142]">
           <div className="text-sm font-medium text-[#e8eaf0]">Choose agent</div>
           <div className="text-xs text-[#6b7280] mt-0.5">Which agent handles this session?</div>
         </div>
-        <div className="p-2">
-          {agents.map((agent) => (
+        <div className="p-2 overflow-y-auto">
+          {agents.filter(a => a.visibleInPicker !== false).map((agent) => (
             <button
               key={agent.id}
               onClick={() => onSelect(agent.id)}

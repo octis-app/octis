@@ -1,3 +1,29 @@
-[
-  { "id": "main", "name": "Ghosty", "emoji": "👻", "description": "Sonnet — default", "default": true }
-]
+{
+  "agents": [
+    { "id": "main",            "name": "Byte",          "emoji": "🦞", "description": "Claude Sonnet — default",          "visibleInPicker": true,  "default": true },
+    { "id": "beta",            "name": "Beta",          "emoji": "🧪", "description": "DeepSeek V4 Flash — experimental",  "visibleInPicker": true },
+    { "id": "planner",         "name": "Planner",       "emoji": "🧠", "description": "Claude Opus — strategy & planning", "visibleInPicker": true },
+    { "id": "coder",           "name": "Coder",         "emoji": "💻", "description": "DeepSeek V4 Pro — code tasks",      "visibleInPicker": true },
+    { "id": "coder-senior",    "name": "Coder Senior",  "emoji": "🔧", "description": "Qwen3 Coder Plus — escalation",     "visibleInPicker": true },
+    { "id": "coder-genius",    "name": "Coder Genius",  "emoji": "✨", "description": "Gemini 3.1 Pro — hard problems",    "visibleInPicker": true },
+    { "id": "orchestrator",    "name": "Orchestrator",  "emoji": "🎯", "description": "Gemini 3.1 Pro — autonomous runs",  "visibleInPicker": true },
+    { "id": "visual-qa",       "name": "Visual QA",     "emoji": "👁️", "description": "GPT-4.1 — UI review & screenshots", "visibleInPicker": true },
+    { "id": "reasoner",        "name": "Reasoner",      "emoji": "🤔", "description": "o4-mini — deep logical reasoning",  "visibleInPicker": true },
+    { "id": "fast",            "name": "Flash",         "emoji": "⚡", "description": "GPT-4o mini — quick answers",       "visibleInPicker": true },
+    { "id": "bulk",            "name": "Bulk",          "emoji": "📦", "description": "Gemini 2.5 Flash — batch tasks",    "visibleInPicker": true },
+    { "id": "nexus",           "name": "Nexus",         "emoji": "🔗", "description": "Nexus Slack persona",               "visibleInPicker": false },
+    { "id": "roxanne",         "name": "Roxanne",       "emoji": "🌹", "description": "Roxanne persona",                   "visibleInPicker": false },
+    { "id": "jp",              "name": "JP",            "emoji": "🇯🇵", "description": "JP persona",                        "visibleInPicker": false },
+    { "id": "mathieu",         "name": "Mathieu",       "emoji": "🎸", "description": "Mathieu persona",                   "visibleInPicker": false },
+    { "id": "portal",          "name": "Portal",        "emoji": "🌀", "description": "Portal agent",                      "visibleInPicker": false },
+    { "id": "council-strategy",      "name": "Strategy Council",      "emoji": "⚔️", "description": "Strategy council",      "visibleInPicker": false },
+    { "id": "council-code",          "name": "Code Council",          "emoji": "🏛️", "description": "Code council",          "visibleInPicker": false },
+    { "id": "council-strategy-lead", "name": "Strategy Lead",         "emoji": "🦁", "description": "Strategy council lead", "visibleInPicker": false },
+    { "id": "council-strategy-alt",  "name": "Strategy Alt",          "emoji": "🦅", "description": "Strategy council alt",  "visibleInPicker": false },
+    { "id": "council-strategy-judge","name": "Strategy Judge",        "emoji": "⚖️", "description": "Strategy council judge","visibleInPicker": false },
+    { "id": "council-code-lead",     "name": "Code Lead",             "emoji": "🐉", "description": "Code council lead",     "visibleInPicker": false },
+    { "id": "council-code-alt",      "name": "Code Alt",              "emoji": "🦊", "description": "Code council alt",      "visibleInPicker": false },
+    { "id": "council-code-judge",    "name": "Code Judge",            "emoji": "🔬", "description": "Code council judge",    "visibleInPicker": false }
+  ],
+  "renameAgentId": "bulk"
+}
