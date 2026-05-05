@@ -30,12 +30,15 @@ function patch(relPath, marker, transform) {
   console.log(`  [ok]   ${relPath}`)
 }
 
-// ─── Patch 0: vite.config.js — base path for /octis/ deployment ───
-patch(
-  'vite.config.js',
-  "base: '/octis/',",
-  (c) => c.replace("base: '/'", "base: '/octis/'")
-)
+// ─── Patch 0: DISABLED — base path must stay '/' on production server ───
+// Kennan's machine uses nginx root=/var/www with /octis/ subdir, so he needed base='/octis/'.
+// Production server uses nginx root=/var/www/octis, so base must be '/'.
+// Do NOT re-enable this patch — it breaks production asset loading.
+// patch(
+//   'vite.config.js',
+//   "base: '/octis/',",
+//   (c) => c.replace("base: '/'", "base: '/octis/'")
+// )
 
 // ─── Patch 1: SettingsPanel — fix quick-commands textarea (useState + auto-resize) ───
 patch(

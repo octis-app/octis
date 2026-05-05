@@ -15,7 +15,10 @@ try {
 } catch {}
 
 const baseConfig = defineConfig({
-  base: '/octis/',
+  // IMPORTANT: base MUST stay '/' for this server (nginx root = /var/www/octis/).
+  // '/octis/' breaks asset loading — nginx would look for /var/www/octis/octis/assets/ (doesn't exist).
+  // Kennan's machine uses a different nginx layout; do NOT merge his base path change.
+  base: '/',
   plugins: [
     react(),
     VitePWA({
