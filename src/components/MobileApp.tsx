@@ -183,7 +183,7 @@ export default function MobileApp() {
   const [filter, setFilter] = useState<FilterType>('all')
   const [showNewSessionSheet, setShowNewSessionSheet] = useState(false)
   const [newSessionAgentId, setNewSessionAgentId] = useState<string>('')
-  const [availableAgents, setAvailableAgents] = useState<Array<{id: string; name: string; emoji: string; isPrimary?: boolean}>>([])
+  const [availableAgents, setAvailableAgents] = useState<Array<{id: string; name: string; emoji: string; isPrimary?: boolean; visibleInPicker?: boolean}>>([])
   const [availableProjects, setAvailableProjects] = useState<Array<{id: string; name: string; slug: string; emoji?: string; color?: string}>>([])
   const [archiveToast, setArchiveToast] = useState<string | null>(null)
   const [showArchivedSection, setShowArchivedSection] = useState(false)
@@ -666,8 +666,8 @@ export default function MobileApp() {
                   try {
                     const r = await authFetch(`${API}/api/agents`)
                     const d = await r.json()
-                    const agents: Array<{id: string; name: string; emoji: string; isPrimary?: boolean}> = d.agents || []
-                    setAvailableAgents(agents)
+                    const agents: Array<{id: string; name: string; emoji: string; isPrimary?: boolean; visibleInPicker?: boolean}> = d.agents || []
+                    setAvailableAgents(agents.filter(a => a.visibleInPicker !== false))
                     const primary = agents.find(a => a.isPrimary) || agents[0]
                     setNewSessionAgentId(primary?.id || 'main')
                   } catch {
@@ -1019,7 +1019,6 @@ export default function MobileApp() {
                   <div className="text-[10px] font-medium text-[#6b7280] mb-2 uppercase tracking-wide">Agent</div>
                   <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
                     {availableAgents
-                      .filter(a => a.id !== 'main' || availableAgents.length === 1) // hide 'main' id-only entry when there are real agents
                       .map(agent => (
                         <button
                           key={agent.id}
