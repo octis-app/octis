@@ -357,13 +357,12 @@ export const useGatewayStore = create<GatewayState>()(
             // Clearing caused project page to flash empty on every iOS WS reconnect.
             const { ws } = useGatewayStore.getState()
             if (ws) {
-              const { agentId: aid } = useGatewayStore.getState()
               ws.send(
                 JSON.stringify({
                   type: 'req',
                   id: 'sessions-list-init',
                   method: 'sessions.list',
-                  params: aid ? { agentId: aid, limit: 100 } : { limit: 100 },
+                  params: { limit: 100 },
                 })
               )
             }
