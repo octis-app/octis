@@ -1163,9 +1163,11 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             // a pending message. That's the root cause of messages disappearing on send.
             const prevServer = prev.filter(m => typeof m.id !== 'number' && !(m as any).__localOnly)
             let base: ChatMessage[]
-            // Apply downgrade guard regardless of length - never show fewer messages than currently loaded
-            // This addresses the auto-compaction issue where sessions get shorter due to message cleanup
-            if (loadedKey === sessionKey && msgs.length < prevServer.length) {
+            // Apply downgrade guard regardless of length - never show fewer OR equal messages than currently loaded.
+            // Equal-count guard protects against same-count responses where a prior assistant message is
+            // transiently absent (e.g. JSONL flush lag, compaction). Without <=, [A,AA] → [A,B] (same count)
+            // would not trigger the guard and AA would silently disappear.
+            if (loadedKey === sessionKey && msgs.length <= prevServer.length) {
               // Keep existing messages; append only genuinely NEW messages
               const prevTs = new Set(prevServer.map(m => getMsgTs(m)).filter(ts => ts > 0))
               const prevIds = new Set(
@@ -1328,7 +1330,6 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
           // Restore from: 1) current state 2) localStorage cache 3) async HTTP (server enriches from JSONL)
           const hasEmptyImages = msgs.some(m =>
             m.role === 'user' && Array.isArray(m.content) &&
-            (m.content as ContentBlock[]).some(b => b.type === 'image' && !(b as Record<string,unknown>).data)
             (m.content as ContentBlock[]).some(b => b.type === 'image' && !imageBlockHasData(b))
           )
           if (hasEmptyImages) {
@@ -1388,10 +1389,11 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
             const localOnly  = prev.filter((m: any) => m.__localOnly)
 
             // Guard: never downgrade message count after the session is loaded.
-            // Applies regardless of run state — the server can return fewer messages due
+            // Applies regardless of run state — the server can return fewer OR equal messages due
             // to compaction, limit truncation, or JSONL flush lag, making visible messages
             // disappear (the root cause of the "table vanishes on next send" bug).
-            if (loadedKey === sessionKey && msgs.length < prevServer.length) {
+            // Equal-count: same count with different content (AA replaced by B) won't slip through.
+            if (loadedKey === sessionKey && msgs.length <= prevServer.length) {
               // Keep existing messages; append only genuinely new arrivals.
               const prevIds = new Set(prevServer.filter(m => m.id != null).map(m => m.id))
               const prevTs  = new Set(prevServer.map(m => getMsgTs(m)).filter(t => t > 0))

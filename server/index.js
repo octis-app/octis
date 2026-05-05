@@ -1587,28 +1587,39 @@ app.get('/api/session-model', requireAuth, async (req, res) => {
       defaultModel = cfg?.agents?.defaults?.model?.primary || defaultModel
     } catch {}
 
-    // Try to read per-session model from sessions.json
+    // Query gateway for live session model (supports any agent, session overrides)
     let sessionModel = defaultModel
     let isFallback = false
     if (sessionKey) {
       try {
-        const sessions = JSON.parse(await fs.readFile(SESSIONS_JSON_PATH, 'utf8'))
-        const sess = sessions[sessionKey]
-        if (sess) {
-          // Prefer modelOverride/providerOverride (set by /model command)
-          // Fall back to modelProvider/model (last-used model)
-          const provider = sess.providerOverride || sess.modelProvider
-          const model = sess.modelOverride || sess.model
-          if (provider && model) {
-            sessionModel = `${provider}/${model}`
-          }
+        const [result] = await adminGwCall([{ method: 'sessions.describe', params: { key: sessionKey } }])
+        const sess = result?.session
+        if (sess?.model) {
+          sessionModel = sess.model
           // Check if it's a fallback (provider differs from default provider)
           const defaultProvider = modelProvider(defaultModel)
-          if (provider && provider !== defaultProvider) {
+          if (modelProvider(sessionModel) !== defaultProvider) {
             isFallback = true
           }
+          // If model is a bare id (no provider prefix), try to infer from modelProvider
+          if (!sessionModel.includes('/') && sess.modelProvider) {
+            sessionModel = `${sess.modelProvider}/${sessionModel}`
+          }
         }
-      } catch {}
+      } catch (e) {
+        // Gateway unavailable — fall through to sessions.json as backup
+        try {
+          const sessions = JSON.parse(await fs.readFile(SESSIONS_JSON_PATH, 'utf8'))
+          const sess = sessions[sessionKey]
+          if (sess) {
+            const provider = sess.providerOverride || sess.modelProvider
+            const model = sess.modelOverride || sess.model
+            if (provider && model) {
+              sessionModel = `${provider}/${model}`
+            }
+          }
+        } catch {}
+      }
     }
 
     // Validate fallbacks from config
