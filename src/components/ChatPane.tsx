@@ -1364,13 +1364,29 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
           setHasMore(msgs.length >= historyLimitRef.current)
           setMessages((prev) => {
             if (msgs.length === 0) return prev
-            // Guard: never downgrade message count during an active agent run.
-            // History fetches (esp. load-more) lag behind streaming — replacing state would
-            // make messages visually disappear until the agent finishes.
-            if (runActiveRef.current) {
-              const prevServer = prev.filter(m => typeof m.id !== 'number')
-              if (msgs.length < prevServer.length) return prev
+
+            const prevServer = prev.filter(m => typeof m.id !== 'number' && !(m as any).__localOnly)
+            const localOnly  = prev.filter((m: any) => m.__localOnly)
+
+            // Guard: never downgrade message count after the session is loaded.
+            // Applies regardless of run state — the server can return fewer messages due
+            // to compaction, limit truncation, or JSONL flush lag, making visible messages
+            // disappear (the root cause of the "table vanishes on next send" bug).
+            if (loadedKey === sessionKey && msgs.length < prevServer.length) {
+              // Keep existing messages; append only genuinely new arrivals.
+              const prevIds = new Set(prevServer.filter(m => m.id != null).map(m => m.id))
+              const prevTs  = new Set(prevServer.map(m => getMsgTs(m)).filter(t => t > 0))
+              const newOnes = msgs.filter(m => {
+                if (m.id != null && prevIds.has(m.id)) return false
+                const ts = getMsgTs(m)
+                return ts > 0 ? !prevTs.has(ts) : false
+              })
+              return newOnes.length > 0
+                ? [...prevServer, ...newOnes, ...localOnly]
+                : prev
             }
+
+            // Server has same or more messages — normal path with optimistic handling.
             const pendingOid = pendingOptimisticIdRef.current
             if (pendingOid !== null) {
               const optimisticMsg = prev.find(m => m.id === pendingOid)
