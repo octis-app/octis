@@ -400,7 +400,7 @@ export const useGatewayStore = create<GatewayState>()(
           // Strip ephemeral fields (streaming state, working flags) — they're stale on load.
           // Keep cost fields so the cost badges render immediately.
           try {
-            const CACHE_KEY = 'octis-session-cache-v2'
+            const CACHE_KEY = 'octis-session-cache-v3'
             const slim = sessions.map((s: any) => ({
               key: s.key, id: s.id, sessionId: s.sessionId, label: s.label,
               ts: s.ts, lastTs: s.lastTs, agentId: s.agentId, tags: s.tags,
@@ -477,7 +477,7 @@ export const useGatewayStore = create<GatewayState>()(
 
 // Drafts persist across reloads (localStorage) AND across devices (server sync).
 
-const DRAFT_LS_KEY = 'octis-drafts-v2'
+const DRAFT_LS_KEY = 'octis-drafts-v3'
 const DRAFT_API_BASE = ((import.meta as any).env?.VITE_API_URL as string) || ''
 
 /** Structured draft: text + optional pending image/file attachments */
@@ -1573,7 +1573,7 @@ export function trySeedSessionCache() {
   if (_sessionCacheSeeded) return
   _sessionCacheSeeded = true
   try {
-    const raw = localStorage.getItem('octis-session-cache-v2')
+    const raw = localStorage.getItem('octis-session-cache-v3')
     if (!raw) return
     const cached = JSON.parse(raw)
     if (!Array.isArray(cached) || cached.length === 0) return
