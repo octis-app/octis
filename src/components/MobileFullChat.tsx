@@ -570,7 +570,7 @@ function MobileModelBadge({ sessionKey }: { sessionKey: string }) {
       <button
         onClick={() => setOpen(o => !o)}
         title={`Model: ${modelInfo.model}${isFallback ? ' (fallback)' : ''}`}
-        className={`flex items-center gap-0.5 px-1 py-0 rounded-full border text-[9px] font-mono select-none cursor-pointer leading-none ${
+        className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-mono select-none cursor-pointer leading-none ${
           switching ? 'opacity-50' : ''
         } ${pillClass}`}
       >
@@ -1829,7 +1829,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
   return (
     <div ref={outerRef} data-testid="chat-swipe-area" className="bg-[#181c24] flex flex-col overflow-hidden" style={{ position: 'fixed', top: 0, left: 0, right: 0 }}>
       <div
-        className="flex items-center gap-3 px-4 py-3 bg-[#181c24] border-b border-[#2a3142] shrink-0"
+        className="flex items-center gap-2 px-3 py-2 bg-[#181c24] border-b border-[#2a3142] shrink-0"
         style={{ paddingTop: 'max(0.75rem, env(safe-area-inset-top))' }}
       >
         <button
@@ -1851,7 +1851,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
         ) : (
           <>
             <span
-              className="text-[11px] font-semibold text-white truncate flex-1 select-none"
+              className="text-sm font-semibold text-white truncate flex-1 select-none"
               onDoubleClick={startEditing}
               title="Double-tap to rename"
             >

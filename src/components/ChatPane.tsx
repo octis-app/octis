@@ -213,7 +213,7 @@ function ModelBadge({ sessionKey }: { sessionKey: string }) {
       <button
         onClick={() => setOpen(o => !o)}
         title={`Model: ${modelInfo.model}${isFallback ? ' (fallback)' : ''}`}
-        className={`flex items-center gap-0.5 px-1 py-0 rounded-full border text-[9px] font-mono select-none cursor-pointer leading-none ${switching ? 'opacity-50' : ''} ${pillClass}`}
+        className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-mono select-none cursor-pointer leading-none ${switching ? 'opacity-50' : ''} ${pillClass}`}
       >
         {isFallback && <span className="leading-none">⚡</span>}
         <span className="leading-none">{switching ? '...' : modelInfo.displayName}</span>
@@ -2617,7 +2617,7 @@ export default function ChatPane({ sessionKey, paneIndex: _paneIndex, onClose, o
                 <>
                   {(() => { const slug = getTag(sessionKey).project; const emoji = slug ? getProjectEmoji(slug) : ''; return emoji ? <span className="text-[13px] shrink-0 leading-none" title={slug}>{emoji}</span> : null })()}
                   <span
-                    className="text-[11px] font-medium text-white truncate leading-none"
+                    className="text-xs font-medium text-white truncate leading-none"
                     title={sessionKey}
                   >
                     {displayName}
