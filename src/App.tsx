@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import LoginPage from './components/LoginPage'
-import { useGatewayStore, useSessionStore, useLabelStore, useProjectStore, useHiddenStore, useDraftStore, Session } from './store/gatewayStore'
+import { useGatewayStore, useSessionStore, useLabelStore, useProjectStore, useHiddenStore, useDraftStore, Session, trySeedSessionCache } from './store/gatewayStore'
 import { useAuthStore } from './store/authStore'
 import Sidebar from './components/Sidebar'
 import ChatPane from './components/ChatPane'
@@ -90,6 +90,9 @@ function AuthenticatedApp({ preloadedConfig }: { preloadedConfig?: GatewayConfig
   const { connected, gatewayUrl, connect, setCredentials } = useGatewayStore()
   const { setAuth, fetchOwnedSessions } = useAuthStore()
   const { activePanes, pinToPane, paneCount, setPaneCount, sessions, setSessions, paneLayout, setPaneLayout } = useSessionStore()
+
+  // Seed session list from cache before WS connects — makes first paint instant
+  useEffect(() => { trySeedSessionCache() }, [])
 
   // Background preload: cache chat history for top 10 sessions on connect
   useSessionPreloader()

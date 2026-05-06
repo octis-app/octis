@@ -1564,28 +1564,21 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
 }))
 
 // ─── Session cache: instant first paint before WS connects ───────────────────
-// Zstand persist handles reload persistence, but the WS sessions.list response
-// is the ultimate source of truth and can arrive 1-3s late on mobile.
-// This cache bridges that gap: show cached sessions immediately, then merge.
-;(function loadSessionCache() {
+// The cache is written on every sessions.list response (see handleMessage above).
+// On load, we seed the store ONLY if it's completely empty (before zustand rehydrates).
+// We do NOT merge — merging causes duplicate keys and draft corruption when
+// different sources (cache vs zustand persist vs WS) have diverging key sets.
+let _sessionCacheSeeded = false
+export function trySeedSessionCache() {
+  if (_sessionCacheSeeded) return
+  _sessionCacheSeeded = true
   try {
     const raw = localStorage.getItem('octis-session-cache-v2')
-    if (raw) {
-      const cached = JSON.parse(raw)
-      if (Array.isArray(cached) && cached.length > 0) {
-        const store = useSessionStore.getState()
-        const existingKeys = new Set(store.sessions.map((s: Session) => s.key))
-        const fresh = cached.filter((s: Session) => !existingKeys.has(s.key))
-        if (fresh.length > 0) {
-          // Merge cached sessions that aren't already in the store.
-          // Critical: do NOT replace the entire list — zustand persist may have
-          // already loaded sessions, and replacing would cause a flash.
-          store.setSessions([...store.sessions, ...fresh])
-        } else if (store.sessions.length === 0) {
-          // Store is empty (first-ever load, or cleared) — use cache as full seed
-          store.setSessions(cached)
-        }
-      }
-    }
+    if (!raw) return
+    const cached = JSON.parse(raw)
+    if (!Array.isArray(cached) || cached.length === 0) return
+    const store = useSessionStore.getState()
+    if (store.sessions.length > 0) return // already hydrated — don't interfere
+    store.setSessions(cached)
   } catch { /* parse error or quota — silently skip */ }
-})()
+}
