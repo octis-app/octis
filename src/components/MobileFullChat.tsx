@@ -1076,15 +1076,16 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
       // Returning to visible
       const awayMs = hiddenAt > 0 ? Date.now() - hiddenAt : 0
       if (connected && ws && ws.readyState === WebSocket.OPEN) {
-        // WS is alive — just refresh history immediately (no reconnect needed)
-        // If away >60s, use larger limit to catch any missed replies
-        const limit = awayMs > 60_000 ? historyLimit : 30
-        send({ type: 'req', id: `chat-history-return-${session?.key}-${Date.now()}`, method: 'chat.history', params: { sessionKey: session?.key, limit } })
+        // WS is alive — just refresh history immediately (no reconnect needed).
+        // Always use historyLimit (not a hard cap of 30) so all messages are visible.
+        // IMPORTANT: update currentHistoryReqIdRef so the WS message handler matches the response.
+        const reqId = `chat-history-return-${session?.key}-${Date.now()}`
+        currentHistoryReqIdRef.current = reqId
+        send({ type: 'req', id: reqId, method: 'chat.history', params: { sessionKey: session?.key, limit: historyLimitRef.current } })
       } else {
         // WS dropped — fetch history via HTTP immediately so messages appear right away,
         // then reconnect in parallel (ws-change effect will also re-fetch once live).
-        const limit = awayMs > 60_000 ? historyLimit : 30
-        void fetchHistoryHttp(limit)
+        void fetchHistoryHttp(historyLimitRef.current)
         connect()
       }
     }
@@ -1462,7 +1463,7 @@ export default function MobileFullChat({ session, onBack, recentSessions, onSwit
       } else {
         void fetchHistoryHttp(30)
       }
-    }, 60000)
+    }, 15000)
     return () => clearInterval(interval)
   }, [session?.key, ws, connected, send, fetchHistoryHttp])
 
