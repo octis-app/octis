@@ -396,11 +396,20 @@ export const useGatewayStore = create<GatewayState>()(
           useSessionStore.getState().setSessions(sessions)
           // Auto-tag Slack sessions to the Slack project
           autoTagSlackSessions(sessions)
-          // Cache to localStorage so next load is instant
-          if (msg.id === 'sessions-list-init') {
-            const { agentId } = useGatewayStore.getState()
-            try { localStorage.setItem(`octis-session-cache-${agentId || 'default'}`, JSON.stringify(sessions)) } catch {}
-          }
+          // Cache session list to localStorage so next page load is instant.
+          // Strip ephemeral fields (streaming state, working flags) — they're stale on load.
+          // Keep cost fields so the cost badges render immediately.
+          try {
+            const CACHE_KEY = 'octis-session-cache-v2'
+            const slim = sessions.map((s: any) => ({
+              key: s.key, id: s.id, sessionId: s.sessionId, label: s.label,
+              ts: s.ts, lastTs: s.lastTs, agentId: s.agentId, tags: s.tags,
+              estimatedCostUsd: s.estimatedCostUsd, totalTokens: s.totalTokens,
+              contextTokens: s.contextTokens, updatedAt: s.updatedAt,
+              status: s.status, model: s.model,
+            }))
+            localStorage.setItem(CACHE_KEY, JSON.stringify(slim.slice(0, 200)))
+          } catch { /* quota exceeded — silently drop */ }
         }
 
         if (msg.type === 'sessions.list.result') {
@@ -1553,3 +1562,30 @@ export const useSessionStore = create<SessionState>()(persist((set, get) => ({
     })),
   }),
 }))
+
+// ─── Session cache: instant first paint before WS connects ───────────────────
+// Zstand persist handles reload persistence, but the WS sessions.list response
+// is the ultimate source of truth and can arrive 1-3s late on mobile.
+// This cache bridges that gap: show cached sessions immediately, then merge.
+;(function loadSessionCache() {
+  try {
+    const raw = localStorage.getItem('octis-session-cache-v2')
+    if (raw) {
+      const cached = JSON.parse(raw)
+      if (Array.isArray(cached) && cached.length > 0) {
+        const store = useSessionStore.getState()
+        const existingKeys = new Set(store.sessions.map((s: Session) => s.key))
+        const fresh = cached.filter((s: Session) => !existingKeys.has(s.key))
+        if (fresh.length > 0) {
+          // Merge cached sessions that aren't already in the store.
+          // Critical: do NOT replace the entire list — zustand persist may have
+          // already loaded sessions, and replacing would cause a flash.
+          store.setSessions([...store.sessions, ...fresh])
+        } else if (store.sessions.length === 0) {
+          // Store is empty (first-ever load, or cleared) — use cache as full seed
+          store.setSessions(cached)
+        }
+      }
+    }
+  } catch { /* parse error or quota — silently skip */ }
+})()
