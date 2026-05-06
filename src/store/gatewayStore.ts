@@ -362,7 +362,7 @@ export const useGatewayStore = create<GatewayState>()(
                   type: 'req',
                   id: 'sessions-list-init',
                   method: 'sessions.list',
-                  params: { limit: 100 },
+                  params: { limit: 30 },
                 })
               )
             }

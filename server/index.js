@@ -1086,7 +1086,7 @@ app.post('/api/session-init', requireAuth, async (req, res) => {
 app.get('/api/sessions-list', requireAuth, async (req, res) => {
   try {
     const { limit = 50 } = req.query
-    const params = { limit: Math.min(Number(limit), 100) }
+    const params = { limit: Math.min(Number(limit), 30) }
     const [result] = await adminGwCall([{ method: 'sessions.list', params }])
     res.json({ ok: true, sessions: result?.sessions || [] })
   } catch (err) {

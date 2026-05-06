@@ -630,7 +630,7 @@ export default function Sidebar({ onSettingsClick }: { onSettingsClick: () => vo
   useEffect(() => {
     if (!connected) return
     const poll = () => {
-      send({ type: 'req', id: `sessions-list-${Date.now()}`, method: 'sessions.list', params: {} })
+      send({ type: 'req', id: `sessions-list-${Date.now()}`, method: 'sessions.list', params: { limit: 30 } })
     }
     const t = setInterval(poll, 120_000)
     return () => clearInterval(t)
